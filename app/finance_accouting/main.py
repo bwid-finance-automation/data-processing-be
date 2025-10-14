@@ -231,6 +231,40 @@ async def download_legacy(request: Request, session_id: str):
     from .api.analysis import download_main_result
     return await download_main_result(session_id)
 
+@app.post("/compare")
+async def compare_legacy(
+    request: Request,
+    excel_files: List[UploadFile] = File(...),
+    mapping_file: Optional[UploadFile] = File(None),
+    materiality_vnd: Optional[float] = Form(None),
+    recurring_pct_threshold: Optional[float] = Form(None),
+    revenue_opex_pct_threshold: Optional[float] = Form(None),
+    bs_pct_threshold: Optional[float] = Form(None),
+    recurring_code_prefixes: Optional[str] = Form(None),
+    min_trend_periods: Optional[int] = Form(None),
+    gm_drop_threshold_pct: Optional[float] = Form(None),
+    dep_pct_only_prefixes: Optional[str] = Form(None),
+    customer_column_hints: Optional[str] = Form(None),
+):
+    """Legacy /compare endpoint - redirects to /api/compare."""
+    from .api.analysis import compare_excel_files
+    from .core.config import get_settings
+    return await compare_excel_files(
+        request=request,
+        excel_files=excel_files,
+        mapping_file=mapping_file,
+        materiality_vnd=materiality_vnd,
+        recurring_pct_threshold=recurring_pct_threshold,
+        revenue_opex_pct_threshold=revenue_opex_pct_threshold,
+        bs_pct_threshold=bs_pct_threshold,
+        recurring_code_prefixes=recurring_code_prefixes,
+        min_trend_periods=min_trend_periods,
+        gm_drop_threshold_pct=gm_drop_threshold_pct,
+        dep_pct_only_prefixes=dep_pct_only_prefixes,
+        customer_column_hints=customer_column_hints,
+        settings=get_settings()
+    )
+
 if __name__ == "__main__":
     import uvicorn
     config = get_unified_config()

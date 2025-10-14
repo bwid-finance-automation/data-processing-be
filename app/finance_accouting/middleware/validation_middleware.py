@@ -154,8 +154,8 @@ class ValidationMiddleware(BaseHTTPMiddleware):
                     if content_type and "multipart" not in content_type:
                         RequestValidator.validate_content_type(content_type, expected_types)
 
-            # JSON endpoints
-            elif "/api/" in path and "upload" not in path:
+            # JSON endpoints (exclude file upload endpoints)
+            elif "/api/" in path and "upload" not in path and "/process" not in path and "/compare" not in path:
                 if content_type and "application/json" not in content_type:
                     RequestValidator.validate_content_type(content_type, ["application/json"])
 

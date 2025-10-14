@@ -269,3 +269,37 @@ async def list_debug_files(session_id: str):
     files = analysis_service.get_debug_files(session_id)
     return DebugFilesResponse(session_id=session_id, files=files)
 
+@router.post("/compare")
+async def compare_excel_files(
+    request: Request,
+    excel_files: List[UploadFile] = File(...),
+    mapping_file: Optional[UploadFile] = File(None),
+    materiality_vnd: Optional[float] = Form(None),
+    recurring_pct_threshold: Optional[float] = Form(None),
+    revenue_opex_pct_threshold: Optional[float] = Form(None),
+    bs_pct_threshold: Optional[float] = Form(None),
+    recurring_code_prefixes: Optional[str] = Form(None),
+    min_trend_periods: Optional[int] = Form(None),
+    gm_drop_threshold_pct: Optional[float] = Form(None),
+    dep_pct_only_prefixes: Optional[str] = Form(None),
+    customer_column_hints: Optional[str] = Form(None),
+    settings: Settings = Depends(get_settings)
+):
+    """Compare Excel files - alias for /api/process endpoint."""
+    logger.info(f"Comparing {len(excel_files)} files")
+    return await process_python_analysis(
+        request=request,
+        excel_files=excel_files,
+        mapping_file=mapping_file,
+        materiality_vnd=materiality_vnd,
+        recurring_pct_threshold=recurring_pct_threshold,
+        revenue_opex_pct_threshold=revenue_opex_pct_threshold,
+        bs_pct_threshold=bs_pct_threshold,
+        recurring_code_prefixes=recurring_code_prefixes,
+        min_trend_periods=min_trend_periods,
+        gm_drop_threshold_pct=gm_drop_threshold_pct,
+        dep_pct_only_prefixes=dep_pct_only_prefixes,
+        customer_column_hints=customer_column_hints,
+        settings=settings
+    )
+
