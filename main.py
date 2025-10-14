@@ -1,29 +1,28 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+"""
+Main entry point for the Data Processing Backend.
+This file imports and exposes the full application from app.finance_accouting.
+"""
 
-# Khởi tạo ứng dụng FastAPI
-app = FastAPI()
+# Import the full application from the finance_accouting module
+from app.finance_accouting.main import app
 
-# Cấu hình CORS (Cross-Origin Resource Sharing)
-origins = [
-    "http://localhost",
-    "http://localhost:5173", #gọi API từ frontend
-]
+# The 'app' object is now the complete FastAPI application with all endpoints:
+# - /process (POST) - Main data processing endpoint
+# - /api/process (POST) - API version of process endpoint
+# - /start-analysis (POST) - Start AI-powered analysis
+# - /logs/{session_id} (GET) - Stream analysis logs
+# - /download/{session_id} (GET) - Download analysis results
+# - /health (GET) - Health check endpoint
+# - And all other endpoints from the finance_accouting module
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# For local development, you can run:
+# uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
-@app.get("/")
-def read_root():
-    return {"message": "Chào mừng bạn đến với FastAPI Backend!"}
-
-@app.get("/api/data")
-def get_data():
-    return {
-        "message": "Dữ liệu được tải thành công từ backend!",
-    }
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
