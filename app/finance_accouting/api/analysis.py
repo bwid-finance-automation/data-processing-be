@@ -272,7 +272,7 @@ async def list_debug_files(session_id: str):
 @router.post("/compare")
 async def compare_excel_files(
     request: Request,
-    excel_files: List[UploadFile] = File(...),
+    excel_files: List[UploadFile] = File(..., description="Excel files to compare"),
     mapping_file: Optional[UploadFile] = File(None),
     materiality_vnd: Optional[float] = Form(None),
     recurring_pct_threshold: Optional[float] = Form(None),
@@ -286,7 +286,21 @@ async def compare_excel_files(
     settings: Settings = Depends(get_settings)
 ):
     """Compare Excel files - alias for /api/process endpoint."""
-    logger.info(f"Comparing {len(excel_files)} files")
+    try:
+        logger.info(f"Comparing {len(excel_files)} files")
+        logger.info(f"Request content-type: {request.headers.get('content-type')}")
+        logger.info(f"Files received: {[f.filename for f in excel_files]}")
+
+        # Validate that files are provided
+        if not excel_files or len(excel_files) == 0:
+            raise FileProcessingError(
+                "No files provided for comparison",
+                details="The 'excel_files' field is required and must contain at least one file"
+            )
+    except Exception as e:
+        logger.error(f"Error in compare endpoint: {str(e)}", exc_info=True)
+        raise
+
     return await process_python_analysis(
         request=request,
         excel_files=excel_files,

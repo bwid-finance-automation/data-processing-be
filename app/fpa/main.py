@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'excel_processor'))
-from summary_comparator import SummaryComparator
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from app.fpa.excel_processor.summary_comparator import SummaryComparator
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -55,7 +55,7 @@ async def startup_event():
     """Run cleanup on startup"""
     cleanup_old_files()
 
-@app.get("/api/health")
+@app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {
@@ -64,7 +64,7 @@ async def health_check():
         "version": "2.0.0"
     }
 
-@app.post("/api/compare")
+@app.post("/compare")
 async def compare_files(
     old_file: UploadFile = File(..., description="Previous month Excel file"),
     new_file: UploadFile = File(..., description="Current month Excel file")
@@ -142,7 +142,7 @@ async def compare_files(
             new_path.unlink()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/download/{filename}")
+@app.get("/download/{filename}")
 async def download_file(filename: str):
     """Download generated output file"""
     file_path = OUTPUT_DIR / filename
@@ -156,7 +156,7 @@ async def download_file(filename: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-@app.get("/api/files")
+@app.get("/files")
 async def list_output_files():
     """List all available output files"""
     files = []
@@ -168,7 +168,7 @@ async def list_output_files():
         })
     return {"files": files}
 
-@app.delete("/api/files/{filename}")
+@app.delete("/files/{filename}")
 async def delete_file(filename: str):
     """Delete an output file"""
     file_path = OUTPUT_DIR / filename
