@@ -301,6 +301,19 @@ async def compare_legacy(
         settings=get_settings()
     )
 
+# Add shortcut routes for Contract OCR endpoints
+@app.post("/api/process-contract")
+async def process_contract_shortcut(file: UploadFile = File(...)):
+    """Shortcut route for single contract processing - redirects to /api/v1/contract-ocr/process-contract."""
+    from .api.contract_ocr import process_single_contract
+    return await process_single_contract(file)
+
+@app.post("/api/process-contracts-batch")
+async def process_contracts_batch_shortcut(files: List[UploadFile] = File(...)):
+    """Shortcut route for batch contract processing - redirects to /api/v1/contract-ocr/process-contracts-batch."""
+    from .api.contract_ocr import process_multiple_contracts
+    return await process_multiple_contracts(files)
+
 if __name__ == "__main__":
     import uvicorn
     config = get_unified_config()

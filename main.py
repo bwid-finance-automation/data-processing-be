@@ -33,6 +33,7 @@ app.add_middleware(
 app.mount("/api/finance", finance_app)
 app.mount("/api/fpa", fpa_app)
 
+
 # Root health check
 @app.get("/")
 def root():
