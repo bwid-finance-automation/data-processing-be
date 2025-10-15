@@ -1,23 +1,44 @@
 """
-Main entry point for the Data Processing Backend.
-This file imports and exposes the full application from app.finance_accouting.
+Main entry point for the unified Data Processing Backend.
+This file combines both:
+- Finance Accounting module
+- FP&A module
+into a single FastAPI application.
 """
 
-# Import the full application from the finance_accouting module
-from app.finance_accouting.main import app
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-# The 'app' object is now the complete FastAPI application with all endpoints:
-# - /process (POST) - Main data processing endpoint
-# - /api/process (POST) - API version of process endpoint
-# - /start-analysis (POST) - Start AI-powered analysis
-# - /logs/{session_id} (GET) - Stream analysis logs
-# - /download/{session_id} (GET) - Download analysis results
-# - /health (GET) - Health check endpoint
-# - And all other endpoints from the finance_accouting module
+# Import sub-applications
+from app.finance_accouting.main import app as finance_app
+from app.fpa.main import app as fpa_app
 
-# For local development, you can run:
-# uvicorn main:app --reload --host 0.0.0.0 --port 8000
+# Create the root application
+app = FastAPI(
+    title="Data Processing Backend (Unified)",
+    description="Unified API for Finance Accounting and FP&A modules",
+    version="2.0.0",
+)
 
+# Allow CORS (optional, if your frontend calls this API)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount both apps under different prefixes
+app.mount("/api/finance", finance_app)
+app.mount("/api/fpa", fpa_app)
+
+# Root health check
+@app.get("/")
+def root():
+    return {"message": "Unified Data Processing Backend running", "modules": ["finance", "fpa"]}
+
+# Local run
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
