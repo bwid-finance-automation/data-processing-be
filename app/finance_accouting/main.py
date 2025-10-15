@@ -30,8 +30,9 @@ from .core.exceptions import (
     analysis_error_handler, validation_error_handler,
     http_error_handler, general_error_handler
 )
-from .api import health, analysis
+from .api import health, analysis, billing, contract_ocr
 from .services.analysis_service import analysis_service
+from .core.session import SessionManager
 from .utils.logging_config import setup_logging, get_logger
 from .middleware import ValidationMiddleware, SecurityHeadersMiddleware, RequestLoggingMiddleware
 from .middleware.config_middleware import ConfigValidationMiddleware, ConfigMonitoringMiddleware
@@ -79,6 +80,9 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    # Cleanup billing sessions
+    SessionManager.cleanup_all_sessions()
+
 def create_application() -> FastAPI:
     """Create and configure FastAPI application."""
     config = get_unified_config()
@@ -122,6 +126,8 @@ def create_application() -> FastAPI:
     # Include routers
     app.include_router(health.router)
     app.include_router(analysis.router)
+    app.include_router(billing.router)
+    app.include_router(contract_ocr.router)
 
     # Serve frontend static files
     frontend_dir = Path("frontend").resolve()
@@ -234,7 +240,9 @@ async def download_legacy(request: Request, session_id: str):
 @app.post("/compare")
 async def compare_legacy(
     request: Request,
-    excel_files: List[UploadFile] = File(...),
+    old_file: Optional[UploadFile] = File(None),
+    new_file: Optional[UploadFile] = File(None),
+    excel_files: Optional[List[UploadFile]] = File(None),
     mapping_file: Optional[UploadFile] = File(None),
     materiality_vnd: Optional[float] = Form(None),
     recurring_pct_threshold: Optional[float] = Form(None),
@@ -246,12 +254,40 @@ async def compare_legacy(
     dep_pct_only_prefixes: Optional[str] = Form(None),
     customer_column_hints: Optional[str] = Form(None),
 ):
-    """Legacy /compare endpoint - redirects to /api/compare."""
+    """
+    Legacy /compare endpoint - supports both old_file/new_file and excel_files formats.
+    Redirects to /api/compare.
+    """
     from .api.analysis import compare_excel_files
     from .core.config import get_settings
+
+    logger = get_logger(__name__)
+
+    # Debug logging
+    logger.info(f"Received /compare request")
+    logger.info(f"old_file: {old_file.filename if old_file else None}")
+    logger.info(f"new_file: {new_file.filename if new_file else None}")
+    logger.info(f"excel_files: {[f.filename for f in excel_files] if excel_files else None}")
+
+    # Handle both parameter formats
+    if old_file and new_file:
+        # FP&A format: old_file + new_file
+        logger.info("Using old_file/new_file format")
+        files_to_process = [old_file, new_file]
+    elif excel_files:
+        # Variance analysis format: excel_files list
+        logger.info("Using excel_files format")
+        files_to_process = excel_files
+    else:
+        logger.error("No files provided in either format")
+        raise HTTPException(
+            status_code=400,
+            detail="Either provide 'old_file' and 'new_file', or 'excel_files'"
+        )
+
     return await compare_excel_files(
         request=request,
-        excel_files=excel_files,
+        excel_files=files_to_process,
         mapping_file=mapping_file,
         materiality_vnd=materiality_vnd,
         recurring_pct_threshold=recurring_pct_threshold,

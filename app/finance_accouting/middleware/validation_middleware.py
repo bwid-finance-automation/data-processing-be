@@ -145,8 +145,13 @@ class ValidationMiddleware(BaseHTTPMiddleware):
         if method in ["POST", "PUT", "PATCH"]:
             content_type = request.headers.get("content-type", "").lower()
 
+            # Billing process endpoint uses JSON
+            if "/billing/process" in path:
+                # Skip validation for billing process endpoint - it handles its own validation
+                pass
+
             # File upload endpoints
-            if "/process" in path or "/start-analysis" in path or "/analyze-revenue" in path:
+            elif "/process" in path or "/start-analysis" in path or "/analyze-revenue" in path:
                 expected_types = ["multipart/form-data", "application/x-www-form-urlencoded"]
                 if not any(expected in content_type for expected in expected_types):
                     # Allow requests without explicit content-type for file uploads
