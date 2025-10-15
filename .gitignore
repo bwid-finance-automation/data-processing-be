@@ -6,3 +6,7 @@ __pycache__/
 venv/
 __pycache__/
 *.pyc
+__pycache__/
+*.py[cod]
+logs/
+outputs/
