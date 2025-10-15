@@ -196,10 +196,18 @@ async def analysis_error_handler(request: Request, exc: AnalysisError) -> JSONRe
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Handle validation errors with user-friendly messages."""
-    logger.warning(f"Validation error: {exc.errors()}", extra={
+    # Enhanced logging for debugging
+    logger.warning(f"Validation error on {request.method} {request.url.path}", extra={
         "request_url": str(request.url),
+        "method": request.method,
+        "content_type": request.headers.get("content-type"),
         "errors": exc.errors()
     })
+
+    # Log detailed error information for debugging
+    logger.error(f"Detailed validation errors: {exc.errors()}")
+    for error in exc.errors():
+        logger.error(f"Field: {error.get('loc')}, Type: {error.get('type')}, Message: {error.get('msg')}")
 
     # Convert technical validation errors to user-friendly messages
     user_friendly_errors = []
@@ -210,7 +218,8 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
         user_friendly_errors.append({
             "field": field,
             "message": user_msg,
-            "type": error.get('type')
+            "type": error.get('type'),
+            "technical_message": msg  # Include technical message for debugging
         })
 
     return JSONResponse(
