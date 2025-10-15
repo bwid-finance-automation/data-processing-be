@@ -151,7 +151,7 @@ class ValidationMiddleware(BaseHTTPMiddleware):
                 pass
 
             # File upload endpoints
-            elif "/process" in path or "/start-analysis" in path or "/analyze-revenue" in path:
+            elif "/process" in path or "/start_analysis" in path or "/start-analysis" in path or "/analyze-revenue" in path or "/process-contract" in path:
                 expected_types = ["multipart/form-data", "application/x-www-form-urlencoded"]
                 if not any(expected in content_type for expected in expected_types):
                     # Allow requests without explicit content-type for file uploads
