@@ -1994,46 +1994,51 @@ class SummaryComparator:
                 print("   No changes found - no highlighting needed")
                 return output_path
 
-            # Open THE COPY (not the original) with xlwings for highlighting
-            import xlwings as xw
+            # Open THE COPY (not the original) with openpyxl for highlighting
+            from openpyxl import load_workbook
+            from openpyxl.styles import PatternFill
 
-            app = xw.App(visible=False, add_book=False)
             try:
-                wb = app.books.open(output_path)
-                sheet = wb.sheets[0]  # Assume first sheet
-                
+                wb = load_workbook(output_path)
+                sheet = wb.active  # Get the active sheet
+
                 print(f"   Highlighting {len(new_rows_indices)} new rows (yellow)")
                 print(f"   Highlighting {len(changed_cells)} rows with cell changes (blue cells)")
-                
+
                 # Get total columns for full row highlighting
-                last_col = sheet.used_range.last_cell.column
-                
+                last_col = sheet.max_column
+
+                # Define fill colors
+                yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Yellow for new rows
+                blue_fill = PatternFill(start_color="ADD8E6", end_color="ADD8E6", fill_type="solid")  # Light blue for changed cells
+
                 # Apply yellow highlighting to new rows (full rows)
                 for df_idx in new_rows_indices:
                     excel_row = df_idx + 2  # Convert pandas index to Excel row (+2 for header)
                     try:
-                        row_range = sheet.range((excel_row, 1), (excel_row, last_col))
-                        row_range.color = (255, 255, 0)  # Yellow for new rows
+                        for col in range(1, last_col + 1):
+                            cell = sheet.cell(row=excel_row, column=col)
+                            cell.fill = yellow_fill
                     except Exception as e:
                         print(f"   Warning: Could not highlight row {excel_row}: {e}")
-                
+
                 # Load summary file once for column mapping
                 summary_df = self.load_summary_file(summary_new_path)
                 headers = list(summary_df.columns)
-                
+
                 # Apply blue highlighting to changed cells
                 for excel_row, changed_columns in changed_cells.items():
                     try:
                         for col_name in changed_columns:
                             if col_name in headers:
                                 col_idx = headers.index(col_name) + 1  # +1 for Excel 1-based indexing
-                                cell_range = sheet.range((excel_row, col_idx))
-                                cell_range.color = (173, 216, 230)  # Light blue for changed cells
+                                cell = sheet.cell(row=excel_row, column=col_idx)
+                                cell.fill = blue_fill
                     except Exception as e:
                         print(f"   Warning: Could not highlight cells in row {excel_row}: {e}")
-                
+
                 # Save and close
-                wb.save()
+                wb.save(output_path)
                 wb.close()
 
                 print("   Highlighting applied successfully!")
@@ -2048,12 +2053,6 @@ class SummaryComparator:
                         pass
                 # Return the output path even if highlighting failed (file was copied)
                 return output_path
-
-            finally:
-                try:
-                    app.quit()
-                except:
-                    pass
 
         except Exception as e:
             print(f"   Error applying highlighting: {e}")
