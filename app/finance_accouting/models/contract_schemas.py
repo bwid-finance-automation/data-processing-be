@@ -10,6 +10,14 @@ class Party(BaseModel):
     address: Optional[str] = None
 
 
+class RatePeriod(BaseModel):
+    """Represents a rate period with start date, end date, and rates."""
+    start_date: Optional[str] = Field(None, description="Period start date (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(None, description="Period end date (YYYY-MM-DD)")
+    monthly_rate_per_sqm: Optional[str] = Field(None, description="Monthly rate per sqm for this period")
+    total_monthly_rate: Optional[str] = Field(None, description="Total monthly rate for this period")
+
+
 class ContractInfo(BaseModel):
     """Extracted contract information."""
     # General fields
@@ -34,12 +42,13 @@ class ContractInfo(BaseModel):
     plc_id: Optional[str] = Field(None, description="PLC ID")
     unit_for_lease: Optional[str] = Field(None, description="Unit For Lease")
     type: Optional[str] = Field(None, description="Type")
-    start_date: Optional[str] = Field(None, description="Start Date")
-    end_date: Optional[str] = Field(None, description="End Date")
+    start_date: Optional[str] = Field(None, description="Start Date (deprecated - use rate_periods)")
+    end_date: Optional[str] = Field(None, description="End Date (deprecated - use rate_periods)")
     tenant: Optional[str] = Field(None, description="Tenant name")
-    monthly_rate_per_sqm: Optional[str] = Field(None, description="Monthly Rate per Sqm")
+    monthly_rate_per_sqm: Optional[str] = Field(None, description="Monthly Rate per Sqm (deprecated - use rate_periods)")
     gla_for_lease: Optional[str] = Field(None, description="GLA for Lease (Gross Leasable Area)")
-    total_monthly_rate: Optional[str] = Field(None, description="Total Monthly Rate")
+    total_monthly_rate: Optional[str] = Field(None, description="Total Monthly Rate (deprecated - use rate_periods)")
+    rate_periods: List[RatePeriod] = Field(default_factory=list, description="Array of rate periods with dates and rates")
     months: Optional[int] = Field(None, description="Number of months")
     total_rate: Optional[str] = Field(None, description="Total Rate")
     status: Optional[str] = Field(None, description="Status")

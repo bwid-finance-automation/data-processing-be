@@ -11,7 +11,7 @@ from PIL import Image
 import fitz  # PyMuPDF
 import pytesseract
 
-from ..models.contract_schemas import ContractInfo, ContractExtractionResult, Party
+from ..models.contract_schemas import ContractInfo, ContractExtractionResult, Party, RatePeriod
 from ..utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -449,6 +449,7 @@ Based on the contract text above, extract ONLY the 7 required fields and return 
             # Process rate_periods array
             if 'rate_periods' in extracted_data and isinstance(extracted_data['rate_periods'], list):
                 gla = extracted_data.get('gla_for_lease')
+                processed_periods = []
 
                 for period in extracted_data['rate_periods']:
                     if not isinstance(period, dict):
@@ -471,6 +472,17 @@ Based on the contract text above, extract ONLY the 7 required fields and return 
                             logger.info(f"Calculated total_monthly_rate for period {period.get('start_date')}: {period['total_monthly_rate']}")
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Could not calculate total_monthly_rate for period: {e}")
+
+                    # Convert dict to RatePeriod object
+                    try:
+                        rate_period_obj = RatePeriod(**period)
+                        processed_periods.append(rate_period_obj)
+                    except Exception as e:
+                        logger.warning(f"Could not create RatePeriod object from {period}: {e}")
+
+                # Replace the list of dicts with list of RatePeriod objects
+                extracted_data['rate_periods'] = processed_periods
+                logger.info(f"Successfully converted {len(processed_periods)} rate periods to RatePeriod objects")
 
             # Sanitize data - convert empty arrays to None for string fields
             string_fields = [
