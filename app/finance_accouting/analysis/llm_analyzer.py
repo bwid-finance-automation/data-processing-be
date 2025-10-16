@@ -201,10 +201,14 @@ class LLMFinancialAnalyzer:
     def _call_openai(self, system_prompt: str, user_prompt: str) -> dict:
         """Call OpenAI API."""
         try:
+            total_chars = len(system_prompt) + len(user_prompt)
+            estimated_tokens = total_chars // 4
+
             print(f"   🔄 Making OpenAI API call...")
             print(f"      • Model: {self.openai_model}")
-            print(f"      • System prompt length: {len(system_prompt)} chars")
-            print(f"      • User prompt length: {len(user_prompt)} chars")
+            print(f"      • System prompt: {len(system_prompt):,} chars")
+            print(f"      • User prompt: {len(user_prompt):,} chars")
+            print(f"      • Estimated tokens: ~{estimated_tokens:,}")
 
             response = self.openai_client.chat.completions.create(
                 model=self.openai_model,
@@ -216,12 +220,12 @@ class LLMFinancialAnalyzer:
                 max_tokens=4000
             )
 
-            print(f"   ✅ OpenAI API call completed")
+            print(f"   ✅ OpenAI API call completed successfully")
 
             # Update progress by increment after successful API call (200 response)
             if self.progress_callback:
                 self.current_progress = min(self.current_progress + self.progress_increment, 100)
-                self.progress_callback(self.current_progress, "Processing AI analysis...")
+                self.progress_callback(self.current_progress, f"AI analysis in progress (~{estimated_tokens:,} tokens processed)")
 
             print(f"      • Response type: {type(response)}")
 
@@ -702,14 +706,34 @@ class LLMFinancialAnalyzer:
         bs_chunk_size = 150
         pl_chunk_size = 75
 
+        # Calculate total number of chunks for progress tracking
+        bs_chunks_count = (len(bs_df) + bs_chunk_size - 1) // bs_chunk_size
+        pl_chunks_count = (len(pl_df) + pl_chunk_size - 1) // pl_chunk_size
+        total_chunks = bs_chunks_count * pl_chunks_count
+        current_chunk = 0
+
+        # Progress range for chunking: assume we're between 35% and 75%
+        chunk_start_progress = 35
+        chunk_end_progress = 75
+        progress_range = chunk_end_progress - chunk_start_progress
+
         for i in range(0, len(bs_df), bs_chunk_size):
             bs_chunk = bs_df.iloc[i:i+bs_chunk_size]
 
             # For each BS chunk, process with a smaller PL chunk
             for j in range(0, len(pl_df), pl_chunk_size):
                 pl_chunk = pl_df.iloc[j:j+pl_chunk_size]
+                current_chunk += 1
 
-                print(f"   📊 Processing chunk BS[{i}:{i+len(bs_chunk)}] + PL[{j}:{j+len(pl_chunk)}]")
+                # Calculate current progress percentage
+                chunk_progress = chunk_start_progress + int((current_chunk / total_chunks) * progress_range)
+
+                chunk_msg = f"Processing chunk {current_chunk}/{total_chunks}: BS[{i}:{i+len(bs_chunk)}] + PL[{j}:{j+len(pl_chunk)}]"
+                print(f"   📊 {chunk_msg}")
+
+                # Send progress update
+                if self.progress_callback:
+                    self.progress_callback(chunk_progress, chunk_msg)
 
                 bs_csv = bs_chunk.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
                 pl_csv = pl_chunk.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
@@ -725,13 +749,29 @@ class LLMFinancialAnalyzer:
                     if response and response.get('message', {}).get('content'):
                         chunk_anomalies = self._parse_llm_response(response['message']['content'], subsidiary)
                         all_anomalies.extend(chunk_anomalies)
-                        print(f"      ✅ Found {len(chunk_anomalies)} anomalies in this chunk")
+                        success_msg = f"Found {len(chunk_anomalies)} anomalies in chunk {current_chunk}/{total_chunks}"
+                        print(f"      ✅ {success_msg}")
+
+                        # Send detailed log update
+                        if self.progress_callback:
+                            self.progress_callback(chunk_progress, success_msg)
 
                 except Exception as e:
-                    print(f"      ⚠️  Chunk failed: {str(e)[:100]}...")
+                    error_msg = f"Chunk {current_chunk}/{total_chunks} failed: {str(e)[:100]}"
+                    print(f"      ⚠️  {error_msg}")
+
+                    # Send error log but continue processing
+                    if self.progress_callback:
+                        self.progress_callback(chunk_progress, error_msg)
                     continue
 
-        print(f"   ✅ Chunked analysis complete: {len(all_anomalies)} total anomalies")
+        completion_msg = f"Chunked analysis complete: {len(all_anomalies)} total anomalies found across {total_chunks} chunks"
+        print(f"   ✅ {completion_msg}")
+
+        # Send completion progress update
+        if self.progress_callback:
+            self.progress_callback(chunk_end_progress, completion_msg)
+
         return all_anomalies
 
     def analyze_comprehensive_revenue_impact(

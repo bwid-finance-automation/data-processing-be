@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(cat:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Read(//Users/andyl/Desktop/BWID/BWID AUTOMATION/data-processing-fe/**)",
+      "Bash(lsof:*)"
     ],
     "deny": [],
     "ask": []

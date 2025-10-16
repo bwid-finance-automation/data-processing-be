@@ -22,7 +22,9 @@ class AnalysisService:
     def __init__(self):
         self.debug_files_store: Dict[str, Tuple[str, bytes]] = {}
         self.log_streams: Dict[str, queue.Queue] = {}
+        self.log_captures: Dict[str, 'LogCapture'] = {}  # Store LogCapture objects for history access
         self.active_sessions: Dict[str, AnalysisSession] = {}
+        self.session_progress: Dict[str, Dict[str, Any]] = {}  # Track progress per session
 
     def create_session(self) -> AnalysisSession:
         """Create a new analysis session."""
@@ -59,6 +61,14 @@ class AnalysisService:
         # Remove log streams
         if session_id in self.log_streams:
             del self.log_streams[session_id]
+
+        # Remove log captures
+        if session_id in self.log_captures:
+            del self.log_captures[session_id]
+
+        # Remove progress tracking
+        if session_id in self.session_progress:
+            del self.session_progress[session_id]
 
         # Remove debug files
         files_to_remove = [key for key in self.debug_files_store.keys() if key.startswith(session_id)]
@@ -120,10 +130,15 @@ class AnalysisService:
                 for f in excel_files
             ]
 
+            # Create log stream BEFORE starting thread so SSE endpoint can access it immediately
+            log_capture = LogCapture(session.session_id)
+            self.log_streams[session.session_id] = log_capture.queue
+            self.log_captures[session.session_id] = log_capture  # Store for history access
+
             # Start background processing
             thread = threading.Thread(
                 target=self._run_ai_analysis,
-                args=(session.session_id, files)
+                args=(session.session_id, files, log_capture)
             )
             thread.daemon = True
             thread.start()
@@ -133,19 +148,36 @@ class AnalysisService:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to start AI analysis: {str(e)}")
 
-    def _run_ai_analysis(self, session_id: str, files: List[Tuple[str, bytes]]):
+    def _run_ai_analysis(self, session_id: str, files: List[Tuple[str, bytes]], log_capture: LogCapture):
         """Run AI analysis in background thread."""
-        log_capture = LogCapture(session_id)
-        self.log_streams[session_id] = log_capture.queue
+        import sys
+
+        # log_capture is now passed from start_ai_analysis to ensure it exists before SSE connects
+        # Redirect stdout to capture print statements
+        old_stdout = sys.stdout
+        sys.stdout = log_capture
 
         try:
             def progress_update(percentage, message):
                 log_capture.queue.put(f"__PROGRESS__{percentage}__{message}")
+                # Also store progress separately for polling to access without disrupting queue
+                self.session_progress[session_id] = {
+                    "percentage": percentage,
+                    "message": message,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            # Send initial log
+            log_capture.queue.put(f"🚀 Starting AI-powered variance analysis")
+            log_capture.queue.put(f"📁 Processing {len(files)} file(s)")
 
             # Configure AI analysis
             config = get_analysis_config()
             config["use_llm_analysis"] = True
             config["llm_model"] = "gpt-4o"
+
+            log_capture.queue.put(f"🤖 AI Model: {config['llm_model']}")
+            log_capture.queue.put(f"⚙️  Configuration loaded successfully")
 
             progress_update(10, "Starting AI analysis...")
 
@@ -159,18 +191,21 @@ class AnalysisService:
             progress_update(85, "Storing results...")
 
             # Store debug files
+            log_capture.queue.put(f"💾 Storing {len(debug_files)} debug file(s)...")
             for debug_name, debug_bytes in debug_files:
                 file_key = f"{session_id}_{debug_name}"
                 self.debug_files_store[file_key] = (debug_name, debug_bytes)
+                log_capture.queue.put(f"   ✅ Saved: {debug_name} ({len(debug_bytes):,} bytes)")
 
             # Store main result
             main_file_key = f"{session_id}_main_result"
-            self.debug_files_store[main_file_key] = (
-                f"ai_variance_analysis_{session_id}.xlsx",
-                xlsx_bytes
-            )
+            result_filename = f"ai_variance_analysis_{session_id}.xlsx"
+            self.debug_files_store[main_file_key] = (result_filename, xlsx_bytes)
+            log_capture.queue.put(f"📊 Main result: {result_filename} ({len(xlsx_bytes):,} bytes)")
 
             progress_update(100, "Analysis complete!")
+            log_capture.queue.put(f"✅ Analysis completed successfully!")
+            log_capture.queue.put(f"📥 Download ready: {result_filename}")
             log_capture.queue.put("__ANALYSIS_COMPLETE__")
 
             # Update session status
@@ -178,9 +213,13 @@ class AnalysisService:
                 self.active_sessions[session_id].status = "completed"
 
         except Exception as e:
+            log_capture.queue.put(f"❌ Error occurred: {str(e)}")
             log_capture.queue.put(f"__ERROR__{str(e)}")
             if session_id in self.active_sessions:
                 self.active_sessions[session_id].status = "failed"
+        finally:
+            # Restore original stdout
+            sys.stdout = old_stdout
 
     async def analyze_revenue_variance(
         self,

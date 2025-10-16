@@ -168,48 +168,75 @@ async def stream_logs(
             session_id=clean_session_id
         )
 
-    logger.info(f"Streaming logs for session: {clean_session_id}")
+    logger.info(f"[SSE] Streaming logs for session: {clean_session_id}")
+    logger.info(f"[SSE] Available log_streams: {list(analysis_service.log_streams.keys())}")
 
     def generate():
-        if clean_session_id not in analysis_service.log_streams:
-            yield f"data: {json.dumps({'error': 'Session not found'})}\n\n"
-            return
+        logger.info(f"[SSE Generator] Starting for session: {clean_session_id}")
+        try:
+            if clean_session_id not in analysis_service.log_streams:
+                logger.error(f"[SSE Generator] Session {clean_session_id} not found in log_streams!")
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Session not found'})}\n\n"
+                return
 
-        log_queue = analysis_service.log_streams[session_id]
-        yield f"data: {json.dumps({'type': 'log', 'message': '📡 SSE connection established'})}\n\n"
+            log_queue = analysis_service.log_streams[clean_session_id]
+            logger.info(f"[SSE Generator] Log queue obtained, sending connection message")
+            yield f"data: {json.dumps({'type': 'log', 'message': '📡 SSE connection established'})}\n\n"
+            logger.info(f"[SSE Generator] Connection message yielded, entering main loop")
 
-        while True:
-            try:
-                message = log_queue.get(timeout=1)
+            message_count = 0
+            import time
+            last_heartbeat = time.time()
 
-                if message == "__ANALYSIS_COMPLETE__":
-                    yield f"data: {json.dumps({'type': 'complete', 'message': 'Analysis completed successfully'})}\n\n"
-                    break
-                elif message.startswith("__ERROR__"):
-                    error_msg = message[9:]
-                    yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
-                    break
-                elif message.startswith("__PROGRESS__"):
-                    parts = message.split("__")
-                    if len(parts) >= 4:
-                        try:
-                            percentage = int(parts[2])
-                            progress_msg = parts[3]
-                            yield f"data: {json.dumps({'type': 'progress', 'percentage': percentage, 'message': progress_msg})}\n\n"
-                        except ValueError:
+            while True:
+                try:
+                    # Use very short timeout (0.1s) and track heartbeats separately
+                    message = log_queue.get(timeout=0.1)
+                    message_count += 1
+                    last_heartbeat = time.time()  # Reset heartbeat timer on message
+                    logger.info(f"[SSE Generator] Message #{message_count}: {message[:80]}...")
+
+                    if message == "__ANALYSIS_COMPLETE__":
+                        yield f"data: {json.dumps({'type': 'complete', 'message': 'Analysis completed successfully'})}\n\n"
+                        break
+                    elif message.startswith("__ERROR__"):
+                        error_msg = message[9:]
+                        yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+                        break
+                    elif message.startswith("__PROGRESS__"):
+                        parts = message.split("__")
+                        if len(parts) >= 4:
+                            try:
+                                percentage = int(parts[2])
+                                progress_msg = parts[3]
+                                yield f"data: {json.dumps({'type': 'progress', 'percentage': percentage, 'message': progress_msg})}\n\n"
+                            except ValueError as ve:
+                                logger.error(f"Invalid progress format: {message} - {ve}")
+                                yield f"data: {json.dumps({'type': 'log', 'message': message})}\n\n"
+                        else:
                             yield f"data: {json.dumps({'type': 'log', 'message': message})}\n\n"
                     else:
                         yield f"data: {json.dumps({'type': 'log', 'message': message})}\n\n"
-                else:
-                    yield f"data: {json.dumps({'type': 'log', 'message': message})}\n\n"
 
-            except queue.Empty:
-                yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
-                continue
+                except queue.Empty:
+                    # Send heartbeat every 2 seconds to keep connection alive
+                    current_time = time.time()
+                    if current_time - last_heartbeat >= 2.0:
+                        yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                        last_heartbeat = current_time
+                    continue
+                except Exception as e:
+                    logger.error(f"Error in SSE stream: {e}")
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Stream error: {str(e)}'})}\n\n"
+                    break
 
-        # Cleanup
-        if session_id in analysis_service.log_streams:
-            del analysis_service.log_streams[session_id]
+        except Exception as e:
+            logger.error(f"Fatal error in SSE generator: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Fatal stream error: {str(e)}'})}\n\n"
+        finally:
+            # Don't cleanup immediately - polling may still need access to log history
+            # Session cleanup will happen via cleanup_old_sessions after expiration
+            logger.info(f"SSE stream closed for session: {clean_session_id}")
 
     return StreamingResponse(
         generate(),
@@ -229,6 +256,43 @@ async def analyze_revenue_variance(
 ):
     """Perform comprehensive revenue variance analysis with net effect breakdown."""
     return await analysis_service.analyze_revenue_variance(excel_file)
+
+@router.get("/status/{session_id}")
+async def get_analysis_status(session_id: str):
+    """Check if analysis is complete and file is ready for download. Also returns recent logs and progress."""
+    clean_session_id = sanitize_session_id(session_id)
+
+    session = analysis_service.get_session(clean_session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{clean_session_id}' not found")
+
+    # Check if main result file exists
+    main_file_key = f"{clean_session_id}_main_result"
+    file_exists = analysis_service.get_file(main_file_key) is not None
+
+    # Get progress from separate tracking (doesn't disrupt queue)
+    current_progress = 0
+    progress_message = ""
+    progress_data = analysis_service.session_progress.get(clean_session_id)
+    if progress_data:
+        current_progress = progress_data.get("percentage", 0)
+        progress_message = progress_data.get("message", "")
+
+    # Get recent logs from history buffer (doesn't disrupt queue)
+    recent_logs = []
+    log_capture = analysis_service.log_captures.get(clean_session_id)
+    if log_capture:
+        recent_logs = log_capture.get_recent_logs(count=10)
+
+    return {
+        "session_id": clean_session_id,
+        "status": session.status,
+        "file_ready": file_exists,
+        "progress": current_progress,
+        "progress_message": progress_message,
+        "recent_logs": recent_logs,
+        "created_at": session.created_at.isoformat() if hasattr(session.created_at, 'isoformat') else str(session.created_at)
+    }
 
 @router.get("/download/{session_id}")
 async def download_main_result(session_id: str):
