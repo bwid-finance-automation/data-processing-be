@@ -18,3 +18,4 @@ rapidfuzz>=3.0.0
 aiofiles>=23.2.1
 pillow>=10.0.0
 pymupdf>=1.23.0
+pytesseract>=0.3.10
