@@ -32,9 +32,9 @@ RUN mkdir -p /tmp/contract_ocr
 # Expose port
 EXPOSE 8000
 
-# Health check
+# Health check - updated to check unified app root endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health', timeout=5)"
+    CMD python -c "import requests; requests.get('http://localhost:8000/', timeout=5)"
 
-# Run the application
-CMD ["uvicorn", "app.finance_accouting.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the unified application (includes both Finance and FPA modules)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
