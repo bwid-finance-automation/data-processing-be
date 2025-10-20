@@ -24,7 +24,7 @@ from ..utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api", tags=["analysis"])
+router = APIRouter(tags=["analysis"])
 
 @router.post("/process")
 async def process_python_analysis(

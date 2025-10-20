@@ -22,7 +22,7 @@ from ..core.session import SessionManager
 from ..utils.logging_config import get_logger
 
 logger = get_logger(__name__)
-router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
+router = APIRouter(prefix="/billing", tags=["billing"])
 
 
 # === SESSION MANAGEMENT ===

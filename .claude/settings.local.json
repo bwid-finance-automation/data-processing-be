@@ -1,11 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cat:*)",
-      "Bash(curl:*)",
-      "Bash(python3:*)",
-      "Read(//Users/andyl/Desktop/BWID/BWID AUTOMATION/data-processing-fe/**)",
-      "Bash(lsof:*)"
+      "Bash(python -m uvicorn main:app --host 127.0.0.1 --port 8000)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :8000)",
+      "Bash(taskkill /F /PID 5412)",
+      "Bash(taskkill //F //PID 5412)",
+      "Bash(python -c \"import sys, json; data=json.load(sys.stdin); paths=data.get(''''paths'''', {}); print(''''\\n''''.join(sorted(paths.keys())))\")"
     ],
     "deny": [],
     "ask": []

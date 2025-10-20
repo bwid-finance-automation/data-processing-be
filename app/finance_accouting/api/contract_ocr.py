@@ -17,7 +17,7 @@ from ..utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/v1/contract-ocr", tags=["Contract OCR"])
+router = APIRouter(prefix="/contract-ocr", tags=["Contract OCR"])
 
 # Supported file formats
 SUPPORTED_FORMATS = [".pdf", ".png", ".jpg", ".jpeg"]
