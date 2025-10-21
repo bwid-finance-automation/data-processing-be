@@ -1,5 +1,4 @@
 """Contract OCR service for extracting information from contract documents."""
-import base64
 import json
 import time
 import os
@@ -11,8 +10,9 @@ from PIL import Image
 import fitz  # PyMuPDF
 import pytesseract
 
-from ..models.contract_schemas import ContractInfo, ContractExtractionResult, Party, RatePeriod
+from ..models.contract_schemas import ContractInfo, ContractExtractionResult, RatePeriod
 from ..utils.logging_config import get_logger
+from .contract_validator import ContractValidator
 
 logger = get_logger(__name__)
 
@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 class ContractOCRService:
     """Service for reading and extracting information from contract documents using Tesseract OCR and OpenAI text extraction."""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, enable_validation: bool = True):
         """Initialize the OCR service with OpenAI API key."""
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -39,7 +39,16 @@ class ContractOCRService:
         self.chunk_size = 15000  # Characters per chunk (~3,750 words)
         self.chunk_overlap = 500  # Overlap between chunks to avoid missing context
 
-        logger.info(f"Contract OCR Service initialized with Tesseract OCR + {self.model}")
+        # Validation
+        self.enable_validation = enable_validation
+        self.validator = ContractValidator() if enable_validation else None
+
+        # Log and print model information prominently
+        model_info = f"Contract OCR Service initialized with Tesseract OCR + {self.model} (validation: {enable_validation})"
+        logger.info(model_info)
+        print("\n" + "="*80)
+        print(f"🤖 AI MODEL: {self.model}")
+        print("="*80 + "\n")
 
     def _chunk_text(self, text: str) -> List[str]:
         """
@@ -71,6 +80,7 @@ class ContractOCRService:
     def _are_all_fields_extracted(self, data: dict) -> bool:
         """
         Check if all required fields have been extracted.
+        Includes both legacy fields and new multilingual fields.
 
         Args:
             data: Extracted data dictionary
@@ -78,7 +88,16 @@ class ContractOCRService:
         Returns:
             True if all fields are present and non-null
         """
-        required_fields = ['type', 'tenant', 'gla_for_lease', 'rate_periods']
+        # Core required fields (original + new critical fields)
+        required_fields = [
+            'type',
+            'tenant',
+            'gla_for_lease',
+            'rate_periods',
+            'customer_name',
+            'contract_number',
+            'contract_date'
+        ]
 
         # Check basic fields
         for field in required_fields:
@@ -99,6 +118,107 @@ class ContractOCRService:
                 return True
 
         return False
+
+    def _calculate_service_charge(self, data: dict) -> str:
+        """
+        Calculate total service charge based on extracted data.
+
+        Logic:
+        - If service_charge_applies_to == "rent_free_only": Calculate for rent-free periods only
+        - If service_charge_applies_to == "all_periods": Calculate for all periods
+        - If service_charge_applies_to == "not_applicable": Return None
+
+        Formula:
+        service_charge_total = service_charge_rate × number_of_months × (gfa or gla_for_lease)
+
+        Args:
+            data: Extracted contract data with rate_periods, service_charge_rate, etc.
+
+        Returns:
+            Total service charge as string, or None if not applicable
+        """
+        try:
+            # Check if service charge is applicable
+            applies_to = data.get('service_charge_applies_to')
+            if not applies_to or applies_to == 'not_applicable':
+                return None
+
+            # Get service charge rate
+            service_charge_rate = data.get('service_charge_rate')
+            if not service_charge_rate:
+                return None
+
+            # Get area (prefer gfa, fallback to gla_for_lease)
+            area = data.get('gfa') or data.get('gla_for_lease')
+            if not area:
+                logger.warning("Cannot calculate service charge: no GFA or GLA found")
+                return None
+
+            # Convert to float for calculation
+            rate = float(service_charge_rate)
+            area_float = float(area)
+
+            # Get rate periods
+            rate_periods = data.get('rate_periods', [])
+            if not rate_periods:
+                return None
+
+            total_months = 0
+
+            if applies_to == 'rent_free_only':
+                # Calculate months where foc_from and foc_to are set (rent-free periods)
+                for period in rate_periods:
+                    if not isinstance(period, dict):
+                        continue
+
+                    foc_from = period.get('foc_from')
+                    foc_to = period.get('foc_to')
+
+                    # Check if this period has FOC dates
+                    if foc_from and foc_to:
+                        try:
+                            from datetime import datetime
+                            start = datetime.strptime(foc_from, '%m-%d-%Y')
+                            end = datetime.strptime(foc_to, '%m-%d-%Y')
+                            months = ((end.year - start.year) * 12 + end.month - start.month) + 1
+                            total_months += months
+                            logger.info(f"Found FOC period: {foc_from} to {foc_to} ({months} month(s))")
+                        except Exception as e:
+                            logger.warning(f"Error calculating FOC months for period {foc_from} to {foc_to}: {e}")
+
+            elif applies_to == 'all_periods':
+                # Calculate total months across all periods
+                for period in rate_periods:
+                    if not isinstance(period, dict):
+                        continue
+
+                    start_date = period.get('start_date')
+                    end_date = period.get('end_date')
+
+                    if start_date and end_date:
+                        try:
+                            from datetime import datetime
+                            start = datetime.strptime(start_date, '%m-%d-%Y')
+                            end = datetime.strptime(end_date, '%m-%d-%Y')
+                            months = ((end.year - start.year) * 12 + end.month - start.month) + 1
+                            total_months += months
+                        except Exception as e:
+                            logger.warning(f"Error calculating months for period {start_date} to {end_date}: {e}")
+
+            if total_months == 0:
+                logger.info(f"Service charge applicable to '{applies_to}' but no matching periods found")
+                return "0"
+
+            # Calculate total: rate × months × area
+            total_service_charge = rate * total_months * area_float
+
+            logger.info(f"Calculated service charge: {rate}/sqm/month × {total_months} months × {area_float} sqm = {total_service_charge}")
+
+            return str(round(total_service_charge, 2))
+
+        except Exception as e:
+            logger.error(f"Error calculating service charge: {e}", exc_info=True)
+            return None
 
     def _merge_extracted_data(self, existing: dict, new_data: dict) -> dict:
         """
@@ -229,6 +349,7 @@ class ContractOCRService:
     def _create_extraction_prompt(self, extracted_text: str) -> str:
         """
         Create the prompt for information extraction from OCR text.
+        Supports multilingual contracts (Vietnamese, English, Chinese).
 
         Args:
             extracted_text: The OCR-extracted text from the contract
@@ -236,57 +357,263 @@ class ContractOCRService:
         Returns:
             Formatted prompt string
         """
-        return f"""You are an expert contract analyst specializing in lease contracts. Analyze the following contract text that was extracted via OCR and extract the following information in JSON format:
+        return f"""You are an expert contract analyst specializing in multilingual lease contracts (Vietnamese, English, Chinese). Analyze the following contract text that was extracted via OCR and extract ALL of the following information in JSON format:
 
-REQUIRED FIELDS:
+MULTILINGUAL SUPPORT:
+- Contracts may be in Vietnamese, English, Chinese, or mixed languages
+- Extract the exact text as written (preserve original language in text fields)
+- Convert dates to MM-DD-YYYY format regardless of original format
+- Strip currency symbols from all monetary values
+
+REQUIRED FIELDS (EXISTING):
 1. type: Type of lease: Rent, Fit out, Service Charge in Rent Free, Rent Free, or Other
-2. tenant: Tenant name (person or company name)
+2. tenant: Tenant name (person or company name) - also check "bên đi thuê" (Vietnamese)
 3. gla_for_lease: GLA (Gross Leasable Area) for lease in square meters (as string, numeric value only)
 4. rate_periods: Array of rate periods, where each period has:
-   - start_date: Period start date (YYYY-MM-DD as string)
-   - end_date: Period end date (YYYY-MM-DD as string)
+   - start_date: Period start date (MM-DD-YYYY as string)
+   - end_date: Period end date (MM-DD-YYYY as string)
    - monthly_rate_per_sqm: Monthly rate per sqm for this period (as string, no currency symbol)
    - total_monthly_rate: Total monthly rate for this period (as string, no currency symbol)
-     * If not stated, calculate: monthly_rate_per_sqm × gla_for_lease
+     * If not stated, calculate: monthly_rate_per_sqm × gla_for_lease OR monthly_rate_per_sqm × gfa
+   - foc_from: FOC start date within this period (MM-DD-YYYY as string, optional)
+   - foc_to: FOC end date within this period (MM-DD-YYYY as string, optional)
+
+   CRITICAL: LOOK FOR RENT-FREE PERIODS SECTION AND DISTRIBUTION RULES!
+   - Vietnamese contracts often have a dedicated section: "THỜI HẠN MIỄN TIỀN THUÊ" or "Thời hạn miễn giảm tiền thuê"
+   - This section specifies when FOC (Free of Charge) months occur during the lease term
+   - IMPORTANT: Read HOW the rent-free periods are DISTRIBUTED throughout the lease term
+   - Common patterns:
+     * "4 tháng và được miễn sẽ được phân bổ vào tháng thuê thứ 13, 25, 37, và 49 của Thời Hạn Thuê"
+       = 4 FOC months distributed at lease months 13, 25, 37, and 49
+     * "miễn tiền thuê 2 tháng đầu" = first 2 months are FOC
+     * "1 tháng miễn thuê sau mỗi 12 tháng" = 1 FOC month after every 12 months
+
+   CRITICAL FORMATTING RULE - FOC AS FIELDS WITHIN RATE_PERIODS:
+   - DO NOT create separate rate_period entries for FOC months
+   - DO NOT split a rate period just because it contains a FOC month
+   - INSTEAD: Add foc_from and foc_to fields to the rate_period that CONTAINS the FOC month
+   - The monthly_rate_per_sqm should be the PAID rent rate (not "0")
+   - Keep the original rate period dates intact - only add foc_from/foc_to fields
+   - Each rate_period represents a rental rate escalation period (typically 12 months)
+   - FOC months occur WITHIN these periods and should not cause period splits
+
+   STEP-BY-STEP FOC EXTRACTION:
+   1. FIRST: Extract the rate escalation schedule from the rent table (usually shows Year 1, Year 2, etc. with rates)
+   2. SECOND: Find "THỜI HẠN MIỄN TIỀN THUÊ" section and identify which lease months are FOC (e.g., months 13, 25, 37, 49)
+   3. Calculate the calendar dates for each FOC month:
+      - Month 13 from handover 11-01-2024 = 11-01-2024 + 12 months = 12-01-2025 to 12-31-2025
+      - Month 25 from handover 11-01-2024 = 11-01-2024 + 24 months = 12-01-2026 to 12-31-2026
+      - Month 37 from handover 11-01-2024 = 11-01-2024 + 36 months = 12-01-2027 to 12-31-2027
+      - Month 49 from handover 11-01-2024 = 11-01-2024 + 48 months = 12-01-2028 to 12-31-2028
+   4. For each rate_period from the rent table, check if any FOC month falls within its date range
+   5. If a FOC month is within the period, add foc_from and foc_to to that rate_period
+   6. If a rate_period contains NO FOC months, leave foc_from and foc_to as null
+   7. DO NOT modify the start_date or end_date of rate periods - keep them as shown in the rent table
+
+   EXAMPLE: Contract with rate table showing Year 1-8 and "4 FOC months at lease months 13, 25, 37, 49":
+   - Rate table shows: Year 2 from 12-01-2024 to 10-31-2025 at rate 131440
+   - Month 13 (12-01-2025) does NOT fall in this period (which ends 10-31-2025)
+   - So Year 2 period has: foc_from: null, foc_to: null
+
+   - Rate table shows: Year 3 from 11-01-2025 to 10-31-2026 at rate 138012
+   - Month 13 (12-01-2025 to 12-31-2025) DOES fall in this period
+   - So Year 3 period has: foc_from: "12-01-2025", foc_to: "12-31-2025"
+
+NEW REQUIRED FIELDS:
+5. customer_name: Customer/tenant name from tenant section
+   - Vietnamese: Look for "bên đi thuê", "bên thuê", "khách hàng"
+   - English: "tenant", "lessee", "customer"
+   - Chinese: "承租方", "租户"
+
+6. contract_number: Contract number (extract exactly as written)
+   - Vietnamese: "Số hợp đồng", "HỢP ĐỒNG SỐ", "Mã HĐ"
+   - English: "Contract No", "Contract Number", "Agreement No"
+   - Chinese: "合同编号", "合同号"
+   - Usually on first page, often in header or title
+
+7. contract_date: Contract signing date (MM-DD-YYYY format)
+   - Vietnamese: "Ngày ký", "Ngày hợp đồng", "Ký ngày"
+   - English: "Date", "Signing Date", "Contract Date"
+   - Chinese: "签订日期", "合同日期"
+   - Convert formats like "15/01/2025", "01-15-2025", "2025年1月15日" to "01-15-2025"
+
+8. payment_terms_details: Payment frequency ONLY - return "monthly" or "quarterly" (lowercase string)
+   - Vietnamese:
+     * "Thanh toán hàng tháng", "Tháng", "mỗi tháng" → return "monthly"
+     * "Thanh toán hàng quý", "Quý", "mỗi quý", "3 tháng/lần" → return "quarterly"
+   - English:
+     * "Monthly", "per month", "each month" → return "monthly"
+     * "Quarterly", "per quarter", "every 3 months" → return "quarterly"
+   - Chinese:
+     * "每月", "月付" → return "monthly"
+     * "每季度", "季付" → return "quarterly"
+   - IMPORTANT: Return ONLY "monthly" or "quarterly" (no other text, no original language)
+
+9. deposit_amount: Total deposit amount ONLY (numeric string, no currency symbols)
+   - Vietnamese: "Tiền đặt cọc", "Tiền cọc", "Tiền bảo đảm"
+   - English: "Deposit", "Security Deposit", "Guarantee"
+   - Chinese: "押金", "保证金"
+   - If total stated: extract total only (e.g., "150000000")
+   - If only installments listed: sum them (e.g., "75000000 + 75000000" = "150000000")
+   - If expressed as months of rent (e.g., "3 tháng tiền thuê"): calculate (3 × monthly_rate × gfa)
+
+10. handover_date: Property handover date (MM-DD-YYYY format)
+    - Vietnamese: "Ngày bàn giao", "Ngày giao nhà", "Ngày nhận bàn giao"
+    - English: "Handover Date", "Delivery Date", "Possession Date"
+    - Chinese: "交接日期", "交付日期"
+
+11. gfa: Gross Floor Area (leasable construction floor area in sqm - DIFFERENT from GLA)
+    - Vietnamese: "Diện tích sàn xây dựng", "Diện tích sàn", "Diện tích thuê"
+    - English: "GFA", "Gross Floor Area", "Floor Area"
+    - Chinese: "建筑面积", "楼面面积"
+    - Extract numeric value only (as string)
+    - NOTE: GFA and GLA are different fields - extract both if both are mentioned
+
+12. service_charge_rate: Service charge rate per sqm per month (numeric string, no currency)
+    - Vietnamese: "Phí dịch vụ", "Chi phí dịch vụ", "Phí quản lý"
+    - English: "Service Charge", "Management Fee", "Service Fee"
+    - Chinese: "服务费", "管理费"
+    - Extract the rate per sqm per month (e.g., "50000")
+    - Look for tables or fee schedules
+
+13. service_charge_applies_to: When service charge applies (extract as one of these values ONLY)
+    - Return "rent_free_only" if wording indicates:
+      * Vietnamese: "Phí dịch vụ áp dụng trong thời gian miễn giảm tiền thuê", "chỉ áp dụng khi miễn thuê"
+      * English: "Service charge applies during rent-free period", "applies only during rent-free months"
+      * Chinese: "服务费仅适用于免租期"
+    - Return "all_periods" if wording indicates:
+      * Vietnamese: "Phí dịch vụ áp dụng cho toàn bộ thời gian thuê", "áp dụng suốt thời gian hợp đồng"
+      * English: "Service charge applies throughout the entire lease term", "applies for all periods"
+      * Chinese: "服务费适用于整个租赁期"
+    - Return "not_applicable" if service charge not mentioned or unclear
 
 IMPORTANT INSTRUCTIONS:
 - Return the information as a valid JSON object
 - ALL values must be strings (even numbers - wrap them in quotes: "250" not 250)
 - If a field cannot be determined, use null
-- Extract all monetary values as strings without currency symbols
-- Extract all dates in YYYY-MM-DD format as strings
-- For dates, convert any format to "YYYY-MM-DD"
+- Extract all monetary values as strings without currency symbols (VND, USD, CNY, THB, etc.)
+- Extract all dates in MM-DD-YYYY format as strings (NOT YYYY-MM-DD)
 - The text may contain OCR errors, so use context to interpret unclear words
-- Look for keywords like "rent", "lease term", "lessee", "lessor", "tenant", "area", "sqm", "rate"
 - IMPORTANT: Contracts often have different rates for different years/periods - extract ALL rate periods
 - Each rate period should have its own start_date, end_date, and rates
-- If only one rate period exists, the array will have one element
+- CRITICAL FOR RENT-FREE/FOC PERIODS - READ CAREFULLY:
+  * DO NOT create separate rate_period entries for FOC months
+  * DO NOT set monthly_rate_per_sqm to "0" for any period
+  * INSTEAD: Use foc_from and foc_to fields within the relevant rate_period
 
-EXAMPLE OUTPUT FORMAT (Multiple Rate Periods):
+  * STEP 1: Find the section "THỜI HẠN MIỄN TIỀN THUÊ" or "Thời hạn miễn giảm tiền thuê"
+  * STEP 2: Read HOW the rent-free months are distributed. Look for phrases like:
+    - "phân bổ vào tháng thuê thứ X, Y, Z" (distributed to lease months X, Y, Z)
+    - "tháng đầu tiên" (first months)
+    - "sau mỗi X tháng" (after every X months)
+  * STEP 3: Calculate the EXACT calendar dates for each FOC month based on:
+    - The handover_date (starting point of the lease, month 1)
+    - The distribution rule (which lease months are FOC)
+    - Example: handover 11-01-2024, month 13 = 11-01-2024 + 12 months = 12-01-2025 to 12-31-2025
+  * STEP 4: For each rate_period, determine if any FOC month falls within that period's date range
+  * STEP 5: If yes, add foc_from and foc_to to that rate_period (one FOC month per period typically)
+  * STEP 6: Keep monthly_rate_per_sqm as the PAID rate (not "0"), FOC is tracked separately
+
+  * EXAMPLE: "4 tháng miễn thuê phân bổ vào tháng 13, 25, 37, 49" with handover 11-01-2024:
+    - Month 13 = 12-01-2025 to 12-31-2025 → Add to period covering Dec 2025
+    - Month 25 = 12-01-2026 to 12-31-2026 → Add to period covering Dec 2026
+    - Month 37 = 12-01-2027 to 12-31-2027 → Add to period covering Dec 2027
+    - Month 49 = 12-01-2028 to 12-31-2028 → Add to period covering Dec 2028
+
+MULTILINGUAL KEYWORDS TO LOOK FOR:
+- Vietnamese: "bên đi thuê", "tiền thuê", "diện tích", "m²", "tháng", "năm", "ngày", "tiền đặt cọc", "phí dịch vụ", "miễn giảm", "miễn phí", "không tính tiền", "THỜI HẠN MIỄN TIỀN THUÊ"
+- English: "tenant", "lessee", "rent", "area", "sqm", "month", "year", "deposit", "service charge", "rent-free", "FOC", "free of charge", "no rent", "RENT-FREE PERIOD"
+- Chinese: "承租方", "租金", "面积", "平方米", "月", "年", "押金", "服务费", "免租期", "免费"
+
+EXAMPLE OUTPUT FORMAT:
+IMPORTANT: rate_periods MUST be in CHRONOLOGICAL ORDER by start_date!
+FOC months are tracked using foc_from and foc_to fields WITHIN each rate_period (NOT as separate periods).
+Each rate_period should correspond to ONE rental rate from the contract's rent table.
+DO NOT create additional periods or split periods just because they contain FOC months.
+
+Example: RIGHT WEIGH contract - "4 FOC months at lease months 13, 25, 37, 49" with handover 11-01-2024:
+The rent table shows 8 years of rates starting from 12-01-2024 (not handover date).
+Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, etc.
+
 {{
   "type": "Rent",
-  "tenant": "ABC Corporation",
-  "gla_for_lease": "200",
+  "tenant": "CONG TY TNHH RIGHT WEIGH",
+  "gla_for_lease": "1254.2",
   "rate_periods": [
     {{
-      "start_date": "2024-01-01",
-      "end_date": "2024-12-31",
-      "monthly_rate_per_sqm": "250",
-      "total_monthly_rate": "50000"
+      "start_date": "12-01-2024",
+      "end_date": "10-31-2025",
+      "monthly_rate_per_sqm": "131440",
+      "total_monthly_rate": "164800048",
+      "foc_from": null,
+      "foc_to": null
     }},
     {{
-      "start_date": "2025-01-01",
-      "end_date": "2025-12-31",
-      "monthly_rate_per_sqm": "275",
-      "total_monthly_rate": "55000"
+      "start_date": "11-01-2025",
+      "end_date": "10-31-2026",
+      "monthly_rate_per_sqm": "138012",
+      "total_monthly_rate": "173188370.4",
+      "foc_from": "12-01-2025",
+      "foc_to": "12-31-2025"
     }},
     {{
-      "start_date": "2026-01-01",
-      "end_date": "2026-12-31",
-      "monthly_rate_per_sqm": "300",
-      "total_monthly_rate": "60000"
+      "start_date": "11-01-2026",
+      "end_date": "10-31-2027",
+      "monthly_rate_per_sqm": "144913",
+      "total_monthly_rate": "181771799.6",
+      "foc_from": "12-01-2026",
+      "foc_to": "12-31-2026"
+    }},
+    {{
+      "start_date": "11-01-2027",
+      "end_date": "10-31-2028",
+      "monthly_rate_per_sqm": "152158",
+      "total_monthly_rate": "190900483.6",
+      "foc_from": "12-01-2027",
+      "foc_to": "12-31-2027"
+    }},
+    {{
+      "start_date": "11-01-2028",
+      "end_date": "10-31-2029",
+      "monthly_rate_per_sqm": "159766",
+      "total_monthly_rate": "200600177.2",
+      "foc_from": "12-01-2028",
+      "foc_to": "12-31-2028"
+    }},
+    {{
+      "start_date": "11-01-2029",
+      "end_date": "10-31-2030",
+      "monthly_rate_per_sqm": "167754",
+      "total_monthly_rate": "210897646.8",
+      "foc_from": null,
+      "foc_to": null
+    }},
+    {{
+      "start_date": "11-01-2030",
+      "end_date": "10-31-2031",
+      "monthly_rate_per_sqm": "176142",
+      "total_monthly_rate": "221820532.4",
+      "foc_from": null,
+      "foc_to": null
+    }},
+    {{
+      "start_date": "11-01-2031",
+      "end_date": "10-31-2032",
+      "monthly_rate_per_sqm": "184949",
+      "total_monthly_rate": "233397625.8",
+      "foc_from": null,
+      "foc_to": null
     }}
-  ]
+  ],
+  "customer_name": "CONG TY TNHH RIGHT WEIGH",
+  "contract_number": "BWSCC/PLC/24022",
+  "contract_date": "10-01-2024",
+  "payment_terms_details": "quarterly",
+  "deposit_amount": "824260240",
+  "handover_date": "11-01-2024",
+  "gfa": "1254.2",
+  "service_charge_rate": "9920",
+  "service_charge_applies_to": "rent_free_only"
 }}
 
 CONTRACT TEXT:
@@ -294,7 +621,7 @@ CONTRACT TEXT:
 {extracted_text}
 ---
 
-Based on the contract text above, extract ONLY the 7 required fields and return as valid JSON."""
+Based on the contract text above, extract ALL 13 required fields and return as valid JSON. Remember to preserve original language in text fields while converting dates to MM-DD-YYYY and removing currency symbols from numbers."""
 
     def _extract_from_text_chunk(self, text_chunk: str) -> dict:
         """
@@ -308,19 +635,56 @@ Based on the contract text above, extract ONLY the 7 required fields and return 
         """
         prompt = self._create_extraction_prompt(text_chunk)
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            max_tokens=2000,
-            temperature=0.1,
-        )
+        # Log AI call
+        logger.info(f"Calling OpenAI API with model: {self.model}")
+        print(f"🤖 Calling AI model: {self.model}")
 
-        content = response.choices[0].message.content
+        # Configure parameters based on model type
+        try:
+            if self.model.startswith("gpt-5"):
+                # GPT-5 uses new parameters and extended reasoning
+                print(f"   Using GPT-5 parameters: max_completion_tokens=2000, reasoning_effort=high")
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    max_completion_tokens=2000,
+                    reasoning_effort="high",
+                )
+            else:
+                # GPT-4 and earlier models use traditional parameters
+                print(f"   Using GPT-4 parameters: max_tokens=2000, temperature=0.1")
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    max_tokens=2000,
+                    temperature=0.1,
+                )
+
+            # Log response details
+            print(f"   Response received. Finish reason: {response.choices[0].finish_reason}")
+            content = response.choices[0].message.content
+
+            if not content:
+                print(f"   ⚠️ WARNING: Empty response content from {self.model}")
+                logger.warning(f"Empty response from {self.model}")
+                return {}
+
+            print(f"   Response length: {len(content)} characters")
+
+        except Exception as e:
+            print(f"   ❌ ERROR calling {self.model}: {str(e)}")
+            logger.error(f"Error calling {self.model}: {str(e)}")
+            raise
 
         # Parse JSON from response
         if "```json" in content:
@@ -484,6 +848,22 @@ Based on the contract text above, extract ONLY the 7 required fields and return 
                 extracted_data['rate_periods'] = processed_periods
                 logger.info(f"Successfully converted {len(processed_periods)} rate periods to RatePeriod objects")
 
+            # Step 3: Calculate service charge (Python calculation layer)
+            logger.info("Calculating service charge based on extracted data...")
+            service_charge_total = self._calculate_service_charge(extracted_data)
+            if service_charge_total:
+                extracted_data['service_charge_total'] = service_charge_total
+                logger.info(f"Service charge calculated: {service_charge_total}")
+            else:
+                extracted_data['service_charge_total'] = None
+                logger.info("Service charge not calculated (not applicable or insufficient data)")
+
+            # Convert new numeric fields to strings
+            for field in ['gfa', 'deposit_amount', 'service_charge_rate']:
+                if field in extracted_data and extracted_data[field] is not None:
+                    if isinstance(extracted_data[field], (int, float)):
+                        extracted_data[field] = str(extracted_data[field])
+
             # Sanitize data - convert empty arrays to None for string fields
             string_fields = [
                 'contract_title', 'contract_type', 'effective_date', 'expiration_date',
@@ -493,7 +873,11 @@ Based on the contract text above, extract ONLY the 7 required fields and return 
                 'gla_for_lease', 'total_monthly_rate', 'total_rate', 'status',
                 'historical_journal_entry', 'amortization_journal_entry',
                 'related_billing_schedule', 'subsidiary', 'ccs_product_type',
-                'bwid_project', 'phase', 'raw_text'
+                'bwid_project', 'phase', 'raw_text',
+                # New fields
+                'customer_name', 'contract_number', 'contract_date', 'payment_terms_details',
+                'deposit_amount', 'handover_date', 'gfa', 'service_charge_rate',
+                'service_charge_applies_to', 'service_charge_total'
             ]
 
             for field in string_fields:
@@ -510,6 +894,32 @@ Based on the contract text above, extract ONLY the 7 required fields and return 
             # Create ContractInfo object
             contract_info = ContractInfo(**extracted_data)
 
+            # Step 4: Validate extracted data (if enabled)
+            if self.enable_validation and self.validator:
+                logger.info("Running validation on extracted data...")
+                validation_result = self.validator.validate_contract(contract_info)
+
+                errors = validation_result.get('errors', [])
+                warnings = validation_result.get('warnings', [])
+
+                if errors:
+                    logger.warning(f"Validation errors found: {len(errors)}")
+                    for error in errors:
+                        logger.warning(f"  - {error}")
+
+                if warnings:
+                    logger.info(f"Validation warnings: {len(warnings)}")
+                    for warning in warnings:
+                        logger.info(f"  - {warning}")
+
+                # Log validation summary
+                summary = self.validator.get_validation_summary(validation_result)
+                print("\n" + "="*80)
+                print("📋 VALIDATION SUMMARY:")
+                print("="*80)
+                print(summary)
+                print("="*80 + "\n")
+
             processing_time = time.time() - start_time
 
             logger.info(f"Successfully processed contract: {file_path.name} in {processing_time:.2f}s")
@@ -523,7 +933,7 @@ Based on the contract text above, extract ONLY the 7 required fields and return 
 
         except json.JSONDecodeError as e:
             error_msg = f"Failed to parse JSON response: {str(e)}"
-            logger.error(f"{error_msg}. Response preview: {content[:200] if 'content' in locals() else 'No content'}")
+            logger.error(error_msg)
             return ContractExtractionResult(
                 success=False,
                 error=error_msg,

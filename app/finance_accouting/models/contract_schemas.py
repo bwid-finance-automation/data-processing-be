@@ -12,10 +12,12 @@ class Party(BaseModel):
 
 class RatePeriod(BaseModel):
     """Represents a rate period with start date, end date, and rates."""
-    start_date: Optional[str] = Field(None, description="Period start date (YYYY-MM-DD)")
-    end_date: Optional[str] = Field(None, description="Period end date (YYYY-MM-DD)")
+    start_date: Optional[str] = Field(None, description="Period start date (MM-DD-YYYY)")
+    end_date: Optional[str] = Field(None, description="Period end date (MM-DD-YYYY)")
     monthly_rate_per_sqm: Optional[str] = Field(None, description="Monthly rate per sqm for this period")
     total_monthly_rate: Optional[str] = Field(None, description="Total monthly rate for this period")
+    foc_from: Optional[str] = Field(None, description="FOC (Free of Charge) start date within this period (MM-DD-YYYY)")
+    foc_to: Optional[str] = Field(None, description="FOC (Free of Charge) end date within this period (MM-DD-YYYY)")
 
 
 class ContractInfo(BaseModel):
@@ -59,6 +61,18 @@ class ContractInfo(BaseModel):
     ccs_product_type: Optional[str] = Field(None, description="CCS Product Type")
     bwid_project: Optional[str] = Field(None, description="BWID Project")
     phase: Optional[str] = Field(None, description="Phase")
+
+    # New Vietnamese contract fields (multilingual support: Vietnamese/English/Chinese)
+    customer_name: Optional[str] = Field(None, description="Customer/Tenant name from 'bên đi thuê' section")
+    contract_number: Optional[str] = Field(None, description="Contract number (Số hợp đồng / Contract No / 合同编号)")
+    contract_date: Optional[str] = Field(None, description="Contract signing date (Ngày hợp đồng / Contract Date) - YYYY-MM-DD format")
+    payment_terms_details: Optional[str] = Field(None, description="Full payment terms text (Thời hạn thanh toán tiền thuê)")
+    deposit_amount: Optional[str] = Field(None, description="Total deposit amount only (Tiền đặt cọc / Deposit), no installment breakdown")
+    handover_date: Optional[str] = Field(None, description="Property handover date (Ngày bàn giao / Handover Date) - YYYY-MM-DD format")
+    gfa: Optional[str] = Field(None, description="Gross Floor Area - leasable construction floor area in sqm (different from GLA)")
+    service_charge_rate: Optional[str] = Field(None, description="Service charge rate per sqm per month (Phí dịch vụ)")
+    service_charge_applies_to: Optional[str] = Field(None, description="When service charge applies: 'rent_free_only', 'all_periods', or 'not_applicable'")
+    service_charge_total: Optional[str] = Field(None, description="Calculated total service charge (computed in post-processing)")
 
     # OCR metadata
     raw_text: Optional[str] = Field(None, description="Raw OCR text extracted from the document")
