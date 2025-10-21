@@ -42,7 +42,7 @@ class ContractExcelExporter:
         try:
             start = datetime.strptime(start_date_str, '%m-%d-%Y')
             end = datetime.strptime(end_date_str, '%m-%d-%Y')
-            months = ((end.year - start.year) * 12) + (end.month - start.month) + 1
+            months = ((end.year - start.year) * 12) + (end.month - start.month)
             return months
         except (ValueError, AttributeError):
             return None
