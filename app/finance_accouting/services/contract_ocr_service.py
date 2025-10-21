@@ -375,8 +375,15 @@ REQUIRED FIELDS (EXISTING):
    - monthly_rate_per_sqm: Monthly rate per sqm for this period (as string, no currency symbol)
    - total_monthly_rate: Total monthly rate for this period (as string, no currency symbol)
      * If not stated, calculate: monthly_rate_per_sqm × gla_for_lease OR monthly_rate_per_sqm × gfa
+   - num_months: Number of billing months in this period (as string)
+     * Calculate based on the contract's billing structure (e.g., "12", "11", "1")
+     * For periods like "09-15-2025 to 09-14-2026", this is typically "12" (12 monthly payments)
    - foc_from: FOC start date within this period (MM-DD-YYYY as string, optional)
    - foc_to: FOC end date within this period (MM-DD-YYYY as string, optional)
+   - foc_num_months: Number of FOC months (as string, optional)
+     * Calculate the number of months covered by the FOC period
+     * For "10-01-2026 to 10-31-2026", this is "1"
+     * For "09-15-2025 to 11-14-2025", this is "2"
 
    CRITICAL: LOOK FOR RENT-FREE PERIODS SECTION AND DISTRIBUTION RULES!
    - Vietnamese contracts often have a dedicated section: "THỜI HẠN MIỄN TIỀN THUÊ" or "Thời hạn miễn giảm tiền thuê"
@@ -545,64 +552,80 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "end_date": "10-31-2025",
       "monthly_rate_per_sqm": "131440",
       "total_monthly_rate": "164800048",
+      "num_months": "11",
       "foc_from": null,
-      "foc_to": null
+      "foc_to": null,
+      "foc_num_months": null
     }},
     {{
       "start_date": "11-01-2025",
       "end_date": "10-31-2026",
       "monthly_rate_per_sqm": "138012",
       "total_monthly_rate": "173188370.4",
+      "num_months": "12",
       "foc_from": "12-01-2025",
-      "foc_to": "12-31-2025"
+      "foc_to": "12-31-2025",
+      "foc_num_months": "1"
     }},
     {{
       "start_date": "11-01-2026",
       "end_date": "10-31-2027",
       "monthly_rate_per_sqm": "144913",
       "total_monthly_rate": "181771799.6",
+      "num_months": "12",
       "foc_from": "12-01-2026",
-      "foc_to": "12-31-2026"
+      "foc_to": "12-31-2026",
+      "foc_num_months": "1"
     }},
     {{
       "start_date": "11-01-2027",
       "end_date": "10-31-2028",
       "monthly_rate_per_sqm": "152158",
       "total_monthly_rate": "190900483.6",
+      "num_months": "12",
       "foc_from": "12-01-2027",
-      "foc_to": "12-31-2027"
+      "foc_to": "12-31-2027",
+      "foc_num_months": "1"
     }},
     {{
       "start_date": "11-01-2028",
       "end_date": "10-31-2029",
       "monthly_rate_per_sqm": "159766",
       "total_monthly_rate": "200600177.2",
+      "num_months": "12",
       "foc_from": "12-01-2028",
-      "foc_to": "12-31-2028"
+      "foc_to": "12-31-2028",
+      "foc_num_months": "1"
     }},
     {{
       "start_date": "11-01-2029",
       "end_date": "10-31-2030",
       "monthly_rate_per_sqm": "167754",
       "total_monthly_rate": "210897646.8",
+      "num_months": "12",
       "foc_from": null,
-      "foc_to": null
+      "foc_to": null,
+      "foc_num_months": null
     }},
     {{
       "start_date": "11-01-2030",
       "end_date": "10-31-2031",
       "monthly_rate_per_sqm": "176142",
       "total_monthly_rate": "221820532.4",
+      "num_months": "12",
       "foc_from": null,
-      "foc_to": null
+      "foc_to": null,
+      "foc_num_months": null
     }},
     {{
       "start_date": "11-01-2031",
       "end_date": "10-31-2032",
       "monthly_rate_per_sqm": "184949",
       "total_monthly_rate": "233397625.8",
+      "num_months": "12",
       "foc_from": null,
-      "foc_to": null
+      "foc_to": null,
+      "foc_num_months": null
     }}
   ],
   "customer_name": "CONG TY TNHH RIGHT WEIGH",

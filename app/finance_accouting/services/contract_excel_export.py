@@ -38,12 +38,31 @@ class ContractExcelExporter:
         ]
 
     def _calculate_months(self, start_date_str: str, end_date_str: str) -> Optional[int]:
-        """Calculate number of months between two dates in MM-DD-YYYY format."""
+        """
+        Calculate number of months between two dates in MM-DD-YYYY format.
+        Logic: Count month-to-month billing periods.
+        - 09-15-2025 to 11-14-2025 = 2 months (Sept 15 to Oct 15, Oct 15 to Nov 15)
+        - 10-01-2026 to 10-31-2026 = 1 month (partial month counts as 1)
+        - 09-15-2025 to 09-14-2026 = 12 months (exactly 12 month periods)
+        """
         try:
             start = datetime.strptime(start_date_str, '%m-%d-%Y')
             end = datetime.strptime(end_date_str, '%m-%d-%Y')
-            months = ((end.year - start.year) * 12) + (end.month - start.month)
-            return months
+
+            # Calculate difference in months
+            month_diff = (end.year - start.year) * 12 + (end.month - start.month)
+
+            # If end day is >= start day, it's a complete month, otherwise it's partial
+            # But we still count partial months
+            if end.day >= start.day:
+                # Complete month (e.g., Sept 15 to Oct 15 or later)
+                months = month_diff + 1
+            else:
+                # Partial month (e.g., Sept 15 to Oct 14)
+                months = month_diff
+
+            # Ensure at least 1 month if there's any period
+            return max(1, months)
         except (ValueError, AttributeError):
             return None
 
@@ -82,26 +101,26 @@ class ContractExcelExporter:
             for period in contract.rate_periods:
                 row = base_data.copy()
 
-                # Calculate months for this period
-                months = None
-                if period.start_date and period.end_date:
-                    months = self._calculate_months(period.start_date, period.end_date)
+                # Use AI-calculated months if available, otherwise fallback to calculation
+                months = period.num_months if hasattr(period, 'num_months') and period.num_months else None
+                if months is None and period.start_date and period.end_date:
+                    months = str(self._calculate_months(period.start_date, period.end_date))
 
-                # Calculate FOC months if foc_from and foc_to are present
-                foc_months = None
-                if period.foc_from and period.foc_to:
-                    foc_months = self._calculate_months(period.foc_from, period.foc_to)
+                # Use AI-calculated FOC months if available, otherwise fallback to calculation
+                foc_months = period.foc_num_months if hasattr(period, 'foc_num_months') and period.foc_num_months else None
+                if foc_months is None and period.foc_from and period.foc_to:
+                    foc_months = str(self._calculate_months(period.foc_from, period.foc_to))
 
                 # Log for debugging
-                logger.debug(f"Period {period.start_date} to {period.end_date}: rate={period.monthly_rate_per_sqm}, foc_from={period.foc_from}, foc_to={period.foc_to}")
+                logger.debug(f"Period {period.start_date} to {period.end_date}: months={months}, foc_months={foc_months}")
 
                 row.update({
                     'Rent from': period.start_date or '',
                     'Rent to': period.end_date or '',
-                    'No. Month of rent': str(months) if months else '',
+                    'No. Month of rent': months or '',
                     'FOC from': period.foc_from or '',
                     'FOC to': period.foc_to or '',
-                    'No month of FOC': str(foc_months) if foc_months else '',
+                    'No month of FOC': foc_months or '',
                     'GFA': contract.gfa or '',
                     'Unit price/month': period.monthly_rate_per_sqm or '',
                     'Monthly Rental fee': period.total_monthly_rate or ''
