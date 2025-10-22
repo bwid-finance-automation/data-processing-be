@@ -384,19 +384,27 @@ REQUIRED FIELDS (EXISTING):
      * Calculate the number of months covered by the FOC period
      * For "10-01-2026 to 10-31-2026", this is "1"
      * For "09-15-2025 to 11-14-2025", this is "2"
-   - service_charge_per_month: Total monthly service charge amount for this period (as string, no currency symbol)
-     * IMPORTANT: Service charge treatment varies by contract:
-       (a) If "Phí Dịch Vụ đã được bao gồm trong Đơn Giá Thuê" (included in rent price):
-           - During PAID rent periods: set to "0" or null (already included in total_monthly_rate)
-           - During FOC/rent-free periods: Calculate separately (service_charge_rate × gfa)
-       (b) If service charge is separate from rent (not included):
-           - Calculate for ALL periods: service_charge_rate × gfa OR service_charge_rate × gla_for_lease
-     * Look for escalation clauses: "Phí Dịch Vụ sẽ tăng X% mỗi năm"
-       - Apply yearly increases starting from year 2
-       - Example: Year 1: 10288, Year 2: 10288×1.04=10699.52, Year 3: 10699.52×1.04=11127.50
-     * Vietnamese example: "Phí Dịch Vụ sẽ là 10.288 VNĐ/m²/tháng" during rent-free period
-       - Calculate: 10288 × gfa = total service charge per month
-     * If service charge not mentioned or not applicable: use null
+   - service_charge_rate_per_sqm: Service charge rate per sqm per month for this period (as string, no currency symbol)
+     * CRITICAL: Extract the RAW service charge rate for EVERY PERIOD - do NOT leave any period blank
+     * IMPORTANT: Extract the service charge rate for THIS SPECIFIC PERIOD (do NOT calculate totals, Python will do that)
+     * The service charge rate should be extracted for ALL periods, regardless of whether it's included in rent or not
+     * Look for the service charge rate in the contract and apply it to ALL rate periods:
+       - Find the base service charge rate (e.g., "10288" VND/m²/month)
+       - Extract this rate for EVERY period, including:
+         * Fit-out periods
+         * FOC (rent-free) periods
+         * Regular paid rent periods
+     * Look for escalation clauses: "Phí Dịch Vụ sẽ tăng X% mỗi năm" (service charge increases X% per year)
+       - If escalation exists, calculate DIFFERENT rates for each year/period
+       - Example: Year 1: "10288", Year 2: "10699.52" (10288×1.04), Year 3: "11127.50" (10699.52×1.04)
+       - Calculate the escalated rate for each period/year and extract as a string
+     * Vietnamese keywords: "Phí Dịch Vụ", "phí quản lý", "VNĐ/m²/tháng"
+     * English keywords: "Service charge", "management fee", "per sqm per month"
+     * Chinese keywords: "服务费", "管理费", "每平方米每月"
+     * NOTE: Even if the contract states "Phí Dịch Vụ đã được bao gồm trong Đơn Giá Thuê" (service charge included in rent),
+             STILL extract the service charge rate so the user can see it separately
+     * Only use null if the contract genuinely has NO service charge mentioned at all
+     * NOTE: Python will calculate the total monthly amount: service_charge_rate_per_sqm × gfa
 
    CRITICAL: LOOK FOR RENT-FREE PERIODS SECTION AND DISTRIBUTION RULES!
    - Vietnamese contracts often have a dedicated section: "THỜI HẠN MIỄN TIỀN THUÊ" or "Thời hạn miễn giảm tiền thuê"
@@ -608,6 +616,7 @@ Example: RIGHT WEIGH contract - "1 month fit-out + 4 FOC months at lease months 
 The contract has a 1-month fit-out period from handover (11-01-2024 to 11-30-2024).
 Then the rent table shows 8 years of rates starting from 12-01-2024.
 Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, etc.
+Service charge is 9920 VND/m²/month with 4% annual escalation.
 
 {{
   "type": "Rent",
@@ -623,7 +632,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": "11-01-2024",
       "foc_to": "11-30-2024",
       "foc_num_months": "1",
-      "service_charge_per_month": "12905376"
+      "service_charge_rate_per_sqm": "9920"
     }},
     {{
       "start_date": "12-01-2024",
@@ -634,7 +643,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": null,
       "foc_to": null,
       "foc_num_months": null,
-      "service_charge_per_month": null
+      "service_charge_rate_per_sqm": "9920"
     }},
     {{
       "start_date": "11-01-2025",
@@ -645,7 +654,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": "12-01-2025",
       "foc_to": "12-31-2025",
       "foc_num_months": "1",
-      "service_charge_per_month": null
+      "service_charge_rate_per_sqm": "10316.8"
     }},
     {{
       "start_date": "11-01-2026",
@@ -656,7 +665,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": "12-01-2026",
       "foc_to": "12-31-2026",
       "foc_num_months": "1",
-      "service_charge_per_month": null
+      "service_charge_rate_per_sqm": "10729.472"
     }},
     {{
       "start_date": "11-01-2027",
@@ -667,7 +676,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": "12-01-2027",
       "foc_to": "12-31-2027",
       "foc_num_months": "1",
-      "service_charge_per_month": null
+      "service_charge_rate_per_sqm": "11158.650880"
     }},
     {{
       "start_date": "11-01-2028",
@@ -678,7 +687,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": "12-01-2028",
       "foc_to": "12-31-2028",
       "foc_num_months": "1",
-      "service_charge_per_month": null
+      "service_charge_rate_per_sqm": "11604.996915"
     }},
     {{
       "start_date": "11-01-2029",
@@ -689,7 +698,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": null,
       "foc_to": null,
       "foc_num_months": null,
-      "service_charge_per_month": null
+      "service_charge_rate_per_sqm": "12069.196792"
     }},
     {{
       "start_date": "11-01-2030",
@@ -700,7 +709,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": null,
       "foc_to": null,
       "foc_num_months": null,
-      "service_charge_per_month": null
+      "service_charge_rate_per_sqm": "12551.964664"
     }},
     {{
       "start_date": "11-01-2031",
@@ -711,7 +720,7 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "foc_from": null,
       "foc_to": null,
       "foc_num_months": null,
-      "service_charge_per_month": null
+      "service_charge_rate_per_sqm": "13054.043251"
     }}
   ],
   "customer_name": "CONG TY TNHH RIGHT WEIGH",

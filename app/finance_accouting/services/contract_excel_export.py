@@ -35,7 +35,8 @@ class ContractExcelExporter:
             'GFA',
             'Unit price/month',
             'Monthly Rental fee',
-            'Service charge per month'
+            'Service charge per m²/month',
+            'Total service charge per month'
         ]
 
     def _calculate_months(self, start_date_str: str, end_date_str: str) -> Optional[int]:
@@ -112,8 +113,20 @@ class ContractExcelExporter:
                 if foc_months is None and period.foc_from and period.foc_to:
                     foc_months = str(self._calculate_months(period.foc_from, period.foc_to))
 
+                # Service charge - get raw rate and calculate total
+                service_charge_rate = period.service_charge_rate_per_sqm if hasattr(period, 'service_charge_rate_per_sqm') else ''
+                total_service_charge = ''
+                if service_charge_rate:
+                    try:
+                        rate = float(service_charge_rate)
+                        gfa = float(contract.gfa) if contract.gfa else 0
+                        if gfa > 0:
+                            total_service_charge = str(rate * gfa)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not calculate total service charge: rate={service_charge_rate}, gfa={contract.gfa}")
+
                 # Log for debugging
-                logger.debug(f"Period {period.start_date} to {period.end_date}: months={months}, foc_months={foc_months}")
+                logger.debug(f"Period {period.start_date} to {period.end_date}: months={months}, foc_months={foc_months}, service_charge_rate={service_charge_rate}, total_service_charge={total_service_charge}")
 
                 row.update({
                     'Rent from': period.start_date or '',
@@ -125,7 +138,8 @@ class ContractExcelExporter:
                     'GFA': contract.gfa or '',
                     'Unit price/month': period.monthly_rate_per_sqm or '',
                     'Monthly Rental fee': period.total_monthly_rate or '',
-                    'Service charge per month': period.service_charge_per_month if hasattr(period, 'service_charge_per_month') else ''
+                    'Service charge per m²/month': service_charge_rate or '',
+                    'Total service charge per month': total_service_charge or ''
                 })
                 rows.append(row)
         else:
@@ -141,7 +155,8 @@ class ContractExcelExporter:
                 'GFA': contract.gfa or '',
                 'Unit price/month': '',
                 'Monthly Rental fee': '',
-                'Service charge per month': ''
+                'Service charge per m²/month': '',
+                'Total service charge per month': ''
             })
             rows.append(row)
 
