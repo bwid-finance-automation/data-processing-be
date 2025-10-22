@@ -384,6 +384,19 @@ REQUIRED FIELDS (EXISTING):
      * Calculate the number of months covered by the FOC period
      * For "10-01-2026 to 10-31-2026", this is "1"
      * For "09-15-2025 to 11-14-2025", this is "2"
+   - service_charge_per_month: Total monthly service charge amount for this period (as string, no currency symbol)
+     * IMPORTANT: Service charge treatment varies by contract:
+       (a) If "Phí Dịch Vụ đã được bao gồm trong Đơn Giá Thuê" (included in rent price):
+           - During PAID rent periods: set to "0" or null (already included in total_monthly_rate)
+           - During FOC/rent-free periods: Calculate separately (service_charge_rate × gfa)
+       (b) If service charge is separate from rent (not included):
+           - Calculate for ALL periods: service_charge_rate × gfa OR service_charge_rate × gla_for_lease
+     * Look for escalation clauses: "Phí Dịch Vụ sẽ tăng X% mỗi năm"
+       - Apply yearly increases starting from year 2
+       - Example: Year 1: 10288, Year 2: 10288×1.04=10699.52, Year 3: 10699.52×1.04=11127.50
+     * Vietnamese example: "Phí Dịch Vụ sẽ là 10.288 VNĐ/m²/tháng" during rent-free period
+       - Calculate: 10288 × gfa = total service charge per month
+     * If service charge not mentioned or not applicable: use null
 
    CRITICAL: LOOK FOR RENT-FREE PERIODS SECTION AND DISTRIBUTION RULES!
    - Vietnamese contracts often have a dedicated section: "THỜI HẠN MIỄN TIỀN THUÊ" or "Thời hạn miễn giảm tiền thuê"
@@ -609,7 +622,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "1",
       "foc_from": "11-01-2024",
       "foc_to": "11-30-2024",
-      "foc_num_months": "1"
+      "foc_num_months": "1",
+      "service_charge_per_month": "12905376"
     }},
     {{
       "start_date": "12-01-2024",
@@ -619,7 +633,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "11",
       "foc_from": null,
       "foc_to": null,
-      "foc_num_months": null
+      "foc_num_months": null,
+      "service_charge_per_month": null
     }},
     {{
       "start_date": "11-01-2025",
@@ -629,7 +644,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "12",
       "foc_from": "12-01-2025",
       "foc_to": "12-31-2025",
-      "foc_num_months": "1"
+      "foc_num_months": "1",
+      "service_charge_per_month": null
     }},
     {{
       "start_date": "11-01-2026",
@@ -639,7 +655,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "12",
       "foc_from": "12-01-2026",
       "foc_to": "12-31-2026",
-      "foc_num_months": "1"
+      "foc_num_months": "1",
+      "service_charge_per_month": null
     }},
     {{
       "start_date": "11-01-2027",
@@ -649,7 +666,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "12",
       "foc_from": "12-01-2027",
       "foc_to": "12-31-2027",
-      "foc_num_months": "1"
+      "foc_num_months": "1",
+      "service_charge_per_month": null
     }},
     {{
       "start_date": "11-01-2028",
@@ -659,7 +677,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "12",
       "foc_from": "12-01-2028",
       "foc_to": "12-31-2028",
-      "foc_num_months": "1"
+      "foc_num_months": "1",
+      "service_charge_per_month": null
     }},
     {{
       "start_date": "11-01-2029",
@@ -669,7 +688,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "12",
       "foc_from": null,
       "foc_to": null,
-      "foc_num_months": null
+      "foc_num_months": null,
+      "service_charge_per_month": null
     }},
     {{
       "start_date": "11-01-2030",
@@ -679,7 +699,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "12",
       "foc_from": null,
       "foc_to": null,
-      "foc_num_months": null
+      "foc_num_months": null,
+      "service_charge_per_month": null
     }},
     {{
       "start_date": "11-01-2031",
@@ -689,7 +710,8 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
       "num_months": "12",
       "foc_from": null,
       "foc_to": null,
-      "foc_num_months": null
+      "foc_num_months": null,
+      "service_charge_per_month": null
     }}
   ],
   "customer_name": "CONG TY TNHH RIGHT WEIGH",

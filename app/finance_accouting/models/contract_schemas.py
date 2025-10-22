@@ -20,6 +20,7 @@ class RatePeriod(BaseModel):
     foc_from: Optional[str] = Field(None, description="FOC (Free of Charge) start date within this period (MM-DD-YYYY)")
     foc_to: Optional[str] = Field(None, description="FOC (Free of Charge) end date within this period (MM-DD-YYYY)")
     foc_num_months: Optional[str] = Field(None, description="Number of FOC months (as string)")
+    service_charge_per_month: Optional[str] = Field(None, description="Total monthly service charge amount for this period")
 
 
 class ContractInfo(BaseModel):

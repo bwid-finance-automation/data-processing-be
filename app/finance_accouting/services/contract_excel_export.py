@@ -34,7 +34,8 @@ class ContractExcelExporter:
             'No month of FOC',
             'GFA',
             'Unit price/month',
-            'Monthly Rental fee'
+            'Monthly Rental fee',
+            'Service charge per month'
         ]
 
     def _calculate_months(self, start_date_str: str, end_date_str: str) -> Optional[int]:
@@ -123,7 +124,8 @@ class ContractExcelExporter:
                     'No month of FOC': foc_months or '',
                     'GFA': contract.gfa or '',
                     'Unit price/month': period.monthly_rate_per_sqm or '',
-                    'Monthly Rental fee': period.total_monthly_rate or ''
+                    'Monthly Rental fee': period.total_monthly_rate or '',
+                    'Service charge per month': period.service_charge_per_month if hasattr(period, 'service_charge_per_month') else ''
                 })
                 rows.append(row)
         else:
@@ -138,7 +140,8 @@ class ContractExcelExporter:
                 'No month of FOC': '',
                 'GFA': contract.gfa or '',
                 'Unit price/month': '',
-                'Monthly Rental fee': ''
+                'Monthly Rental fee': '',
+                'Service charge per month': ''
             })
             rows.append(row)
 
