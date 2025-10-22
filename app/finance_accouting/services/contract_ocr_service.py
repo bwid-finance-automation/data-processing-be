@@ -373,8 +373,12 @@ REQUIRED FIELDS (EXISTING):
    - start_date: Period start date (MM-DD-YYYY as string)
    - end_date: Period end date (MM-DD-YYYY as string)
    - monthly_rate_per_sqm: Monthly rate per sqm for this period (as string, no currency symbol)
-   - total_monthly_rate: Total monthly rate for this period (as string, no currency symbol)
-     * If not stated, calculate: monthly_rate_per_sqm × gla_for_lease OR monthly_rate_per_sqm × gfa
+     * IMPORTANT: Extract the RAW monthly rate per sqm for this period (do NOT calculate totals, Python will do that)
+     * This is the rent rate charged per square meter per month
+     * Vietnamese keywords: "Đơn Giá Thuê", "giá thuê/m²/tháng", "VNĐ/m²/tháng"
+     * English keywords: "Rental rate", "rent per sqm", "per square meter per month"
+     * Chinese keywords: "租金单价", "每平方米每月"
+   - total_monthly_rate: DEPRECATED - set to null (Python will calculate: monthly_rate_per_sqm × gfa)
    - num_months: Number of billing months in this period (as string)
      * Calculate based on the contract's billing structure (e.g., "12", "11", "1")
      * For periods like "09-15-2025 to 09-14-2026", this is typically "12" (12 monthly payments)
@@ -627,7 +631,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "11-01-2024",
       "end_date": "11-30-2024",
       "monthly_rate_per_sqm": "131440",
-      "total_monthly_rate": "164800048",
+      "total_monthly_rate": null,
       "num_months": "1",
       "foc_from": "11-01-2024",
       "foc_to": "11-30-2024",
@@ -638,7 +642,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "12-01-2024",
       "end_date": "10-31-2025",
       "monthly_rate_per_sqm": "131440",
-      "total_monthly_rate": "164800048",
+      "total_monthly_rate": null,
       "num_months": "11",
       "foc_from": null,
       "foc_to": null,
@@ -649,7 +653,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "11-01-2025",
       "end_date": "10-31-2026",
       "monthly_rate_per_sqm": "138012",
-      "total_monthly_rate": "173188370.4",
+      "total_monthly_rate": null,
       "num_months": "12",
       "foc_from": "12-01-2025",
       "foc_to": "12-31-2025",
@@ -660,7 +664,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "11-01-2026",
       "end_date": "10-31-2027",
       "monthly_rate_per_sqm": "144913",
-      "total_monthly_rate": "181771799.6",
+      "total_monthly_rate": null,
       "num_months": "12",
       "foc_from": "12-01-2026",
       "foc_to": "12-31-2026",
@@ -671,7 +675,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "11-01-2027",
       "end_date": "10-31-2028",
       "monthly_rate_per_sqm": "152158",
-      "total_monthly_rate": "190900483.6",
+      "total_monthly_rate": null,
       "num_months": "12",
       "foc_from": "12-01-2027",
       "foc_to": "12-31-2027",
@@ -682,7 +686,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "11-01-2028",
       "end_date": "10-31-2029",
       "monthly_rate_per_sqm": "159766",
-      "total_monthly_rate": "200600177.2",
+      "total_monthly_rate": null,
       "num_months": "12",
       "foc_from": "12-01-2028",
       "foc_to": "12-31-2028",
@@ -693,7 +697,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "11-01-2029",
       "end_date": "10-31-2030",
       "monthly_rate_per_sqm": "167754",
-      "total_monthly_rate": "210897646.8",
+      "total_monthly_rate": null,
       "num_months": "12",
       "foc_from": null,
       "foc_to": null,
@@ -704,7 +708,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "11-01-2030",
       "end_date": "10-31-2031",
       "monthly_rate_per_sqm": "176142",
-      "total_monthly_rate": "221820532.4",
+      "total_monthly_rate": null,
       "num_months": "12",
       "foc_from": null,
       "foc_to": null,
@@ -715,7 +719,7 @@ Service charge is 9920 VND/m²/month with 4% annual escalation.
       "start_date": "11-01-2031",
       "end_date": "10-31-2032",
       "monthly_rate_per_sqm": "184949",
-      "total_monthly_rate": "233397625.8",
+      "total_monthly_rate": null,
       "num_months": "12",
       "foc_from": null,
       "foc_to": null,
