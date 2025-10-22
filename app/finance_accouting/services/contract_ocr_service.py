@@ -527,10 +527,63 @@ IMPORTANT INSTRUCTIONS:
     - Month 37 = 12-01-2027 to 12-31-2027 → Add to period covering Dec 2027
     - Month 49 = 12-01-2028 to 12-31-2028 → Add to period covering Dec 2028
 
+CRITICAL: FIT-OUT PERIOD / GRACE PERIOD / SETUP PERIOD (miễn giảm thời gian lắp đặt):
+- Many contracts have a FIT-OUT or SETUP period at the BEGINNING (right after handover)
+- This is a grace period where the tenant can install equipment, renovate, setup operations
+- During this period, NO RENT is charged (it's a type of FOC)
+- This fit-out period should be captured as the FIRST rate_period with FOC fields
+
+IDENTIFYING FIT-OUT PERIOD:
+- Vietnamese keywords:
+  * "Thời gian lắp đặt hoàn thiện", "Thời Hạn Lắp Đặt", "giai đoạn lắp đặt"
+  * "Miễn tiền thuê đợt lắp đặt", "không tính tiền thuê trong thời gian lắp đặt"
+  * "Tiền Đặt Cọc cho giai đoạn lắp đặt hoàn thiện" (deposit for fit-out period)
+  * "Trong vòng X tháng/ngày... lắp đặt hoàn thiện"
+  * "Thời Hạn Miễn Tiền Thuê đối với Bên Thuê để lắp đặt hoàn thiện"
+- English keywords:
+  * "Fit-out period", "Setup period", "Grace period", "Installation period"
+  * "Rent-free for fit-out", "No rent during setup"
+  * "Fit-out deposit", "Setup deposit"
+- Chinese keywords:
+  * "装修期", "免租装修期", "设置期"
+
+HOW TO EXTRACT FIT-OUT PERIOD:
+1. Look for the fit-out duration (e.g., "1 tháng" = 1 month, "01 tháng" = 1 month)
+2. The fit-out period starts from handover_date
+3. Calculate the end date: handover_date + fit-out duration - 1 day
+4. Create a rate_period entry with:
+   - start_date: handover_date
+   - end_date: handover_date + fit-out_months - 1 day (last day of fit-out month)
+   - monthly_rate_per_sqm: The REGULAR rent rate (NOT "0")
+   - total_monthly_rate: Calculated from regular rate
+   - num_months: The fit-out duration (e.g., "1")
+   - foc_from: Same as start_date
+   - foc_to: Same as end_date
+   - foc_num_months: Same as num_months
+5. This should be the FIRST rate_period in chronological order
+6. The actual paid rent periods start AFTER the fit-out period ends
+
+EXAMPLE: Right Weigh contract
+- Handover date: "11-01-2024"
+- Fit-out period: "01 tháng" (1 month) mentioned in "Thời Hạn Miễn Tiền Thuê"
+- Regular rate for Year 1: "131440" per sqm
+- FIT-OUT RATE PERIOD (should be FIRST in rate_periods array):
+  {{
+    "start_date": "11-01-2024",
+    "end_date": "11-30-2024",
+    "monthly_rate_per_sqm": "131440",
+    "total_monthly_rate": "164800048",
+    "num_months": "1",
+    "foc_from": "11-01-2024",
+    "foc_to": "11-30-2024",
+    "foc_num_months": "1"
+  }}
+- Then Year 1 paid rent period starts from "12-01-2024"
+
 MULTILINGUAL KEYWORDS TO LOOK FOR:
-- Vietnamese: "bên đi thuê", "tiền thuê", "diện tích", "m²", "tháng", "năm", "ngày", "tiền đặt cọc", "phí dịch vụ", "miễn giảm", "miễn phí", "không tính tiền", "THỜI HẠN MIỄN TIỀN THUÊ"
-- English: "tenant", "lessee", "rent", "area", "sqm", "month", "year", "deposit", "service charge", "rent-free", "FOC", "free of charge", "no rent", "RENT-FREE PERIOD"
-- Chinese: "承租方", "租金", "面积", "平方米", "月", "年", "押金", "服务费", "免租期", "免费"
+- Vietnamese: "bên đi thuê", "tiền thuê", "diện tích", "m²", "tháng", "năm", "ngày", "tiền đặt cọc", "phí dịch vụ", "miễn giảm", "miễn phí", "không tính tiền", "THỜI HẠN MIỄN TIỀN THUÊ", "lắp đặt hoàn thiện", "giai đoạn lắp đặt", "thời gian lắp đặt"
+- English: "tenant", "lessee", "rent", "area", "sqm", "month", "year", "deposit", "service charge", "rent-free", "FOC", "free of charge", "no rent", "RENT-FREE PERIOD", "fit-out", "setup period", "grace period", "installation period"
+- Chinese: "承租方", "租金", "面积", "平方米", "月", "年", "押金", "服务费", "免租期", "免费", "装修期", "免租装修期"
 
 EXAMPLE OUTPUT FORMAT:
 IMPORTANT: rate_periods MUST be in CHRONOLOGICAL ORDER by start_date!
@@ -538,8 +591,9 @@ FOC months are tracked using foc_from and foc_to fields WITHIN each rate_period 
 Each rate_period should correspond to ONE rental rate from the contract's rent table.
 DO NOT create additional periods or split periods just because they contain FOC months.
 
-Example: RIGHT WEIGH contract - "4 FOC months at lease months 13, 25, 37, 49" with handover 11-01-2024:
-The rent table shows 8 years of rates starting from 12-01-2024 (not handover date).
+Example: RIGHT WEIGH contract - "1 month fit-out + 4 FOC months at lease months 13, 25, 37, 49" with handover 11-01-2024:
+The contract has a 1-month fit-out period from handover (11-01-2024 to 11-30-2024).
+Then the rent table shows 8 years of rates starting from 12-01-2024.
 Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, etc.
 
 {{
@@ -547,6 +601,16 @@ Month 13 (12-01-2025) falls in Year 2, Month 25 (12-01-2026) falls in Year 3, et
   "tenant": "CONG TY TNHH RIGHT WEIGH",
   "gla_for_lease": "1254.2",
   "rate_periods": [
+    {{
+      "start_date": "11-01-2024",
+      "end_date": "11-30-2024",
+      "monthly_rate_per_sqm": "131440",
+      "total_monthly_rate": "164800048",
+      "num_months": "1",
+      "foc_from": "11-01-2024",
+      "foc_to": "11-30-2024",
+      "foc_num_months": "1"
+    }},
     {{
       "start_date": "12-01-2024",
       "end_date": "10-31-2025",
@@ -658,6 +722,14 @@ Based on the contract text above, extract ALL 13 required fields and return as v
         """
         prompt = self._create_extraction_prompt(text_chunk)
 
+        # Print prompt for debugging
+        print("\n" + "="*80)
+        print("📝 PROMPT SENT TO AI (for debugging):")
+        print("="*80)
+        print(prompt[:500] + "..." if len(prompt) > 500 else prompt)
+        print(f"\n[Full prompt length: {len(prompt)} characters]")
+        print("="*80 + "\n")
+
         # Log AI call
         logger.info(f"Calling OpenAI API with model: {self.model}")
         print(f"🤖 Calling AI model: {self.model}")
@@ -703,6 +775,13 @@ Based on the contract text above, extract ALL 13 required fields and return as v
                 return {}
 
             print(f"   Response length: {len(content)} characters")
+
+            # Print AI response for debugging
+            print("\n" + "="*80)
+            print("🤖 AI RESPONSE (for debugging):")
+            print("="*80)
+            print(content)
+            print("="*80 + "\n")
 
         except Exception as e:
             print(f"   ❌ ERROR calling {self.model}: {str(e)}")
