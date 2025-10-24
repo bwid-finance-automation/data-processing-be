@@ -10,7 +10,9 @@ from fastapi.responses import JSONResponse, FileResponse
 from ..models.contract_schemas import (
     ContractExtractionResult,
     BatchContractResult,
-    SupportedFormatsResponse
+    SupportedFormatsResponse,
+    TokenUsage,
+    CostEstimate
 )
 from ..services.contract_ocr_service import ContractOCRService
 from ..services.contract_excel_export import ContractExcelExporter
@@ -176,6 +178,52 @@ async def process_multiple_contracts(files: List[UploadFile] = File(...)):
         successful = sum(1 for r in results if r.success)
         failed = len(results) - successful
 
+        # Aggregate token usage and costs across all contracts
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens = 0
+        total_input_cost = 0.0
+        total_output_cost = 0.0
+        total_cost = 0.0
+        model_name = None
+
+        for result in results:
+            if result.token_usage:
+                total_prompt_tokens += result.token_usage.prompt_tokens
+                total_completion_tokens += result.token_usage.completion_tokens
+                total_tokens += result.token_usage.total_tokens
+
+            if result.cost_estimate:
+                total_input_cost += result.cost_estimate.input_cost
+                total_output_cost += result.cost_estimate.output_cost
+                total_cost += result.cost_estimate.total_cost
+                if not model_name:
+                    model_name = result.cost_estimate.model
+
+        # Create aggregated token usage object
+        aggregated_token_usage = None
+        if total_tokens > 0:
+            aggregated_token_usage = TokenUsage(
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_tokens
+            )
+            logger.info(f"Total token usage for batch - Prompt: {total_prompt_tokens}, "
+                       f"Completion: {total_completion_tokens}, Total: {total_tokens}")
+
+        # Create aggregated cost estimate
+        aggregated_cost_estimate = None
+        if total_cost > 0:
+            aggregated_cost_estimate = CostEstimate(
+                input_cost=round(total_input_cost, 6),
+                output_cost=round(total_output_cost, 6),
+                total_cost=round(total_cost, 6),
+                model=model_name,
+                currency="USD"
+            )
+            logger.info(f"💰 Total estimated cost for batch: ${total_cost:.6f} "
+                       f"(input: ${total_input_cost:.6f}, output: ${total_output_cost:.6f})")
+
         logger.info(f"Batch processing complete: {successful}/{len(results)} successful")
 
         return BatchContractResult(
@@ -183,7 +231,9 @@ async def process_multiple_contracts(files: List[UploadFile] = File(...)):
             total_files=len(results),
             successful=successful,
             failed=failed,
-            results=results
+            results=results,
+            total_token_usage=aggregated_token_usage,
+            total_cost_estimate=aggregated_cost_estimate
         )
 
     except HTTPException:

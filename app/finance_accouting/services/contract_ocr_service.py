@@ -10,7 +10,7 @@ from PIL import Image
 import fitz  # PyMuPDF
 import pytesseract
 
-from ..models.contract_schemas import ContractInfo, ContractExtractionResult, RatePeriod
+from ..models.contract_schemas import ContractInfo, ContractExtractionResult, RatePeriod, TokenUsage, CostEstimate
 from ..utils.logging_config import get_logger
 from .contract_validator import ContractValidator
 
@@ -30,6 +30,10 @@ class ContractOCRService:
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
         self.pdf_max_pages = 10  # Maximum pages to process from PDF
 
+        # Pricing configuration (USD per 1 million tokens)
+        self.input_price_per_million = float(os.getenv("OPENAI_INPUT_PRICE_PER_MILLION", "2.50"))
+        self.output_price_per_million = float(os.getenv("OPENAI_OUTPUT_PRICE_PER_MILLION", "10.00"))
+
         # Configure Tesseract path if needed (for Windows or custom installations)
         tesseract_cmd = os.getenv("TESSERACT_CMD")
         if tesseract_cmd:
@@ -48,7 +52,31 @@ class ContractOCRService:
         logger.info(model_info)
         print("\n" + "="*80)
         print(f"🤖 AI MODEL: {self.model}")
+        print(f"💰 PRICING: ${self.input_price_per_million}/1M input tokens, ${self.output_price_per_million}/1M output tokens")
         print("="*80 + "\n")
+
+    def _calculate_cost(self, prompt_tokens: int, completion_tokens: int) -> CostEstimate:
+        """
+        Calculate the cost estimate based on token usage and pricing configuration.
+
+        Args:
+            prompt_tokens: Number of input/prompt tokens
+            completion_tokens: Number of output/completion tokens
+
+        Returns:
+            CostEstimate object with detailed cost breakdown
+        """
+        input_cost = (prompt_tokens / 1_000_000) * self.input_price_per_million
+        output_cost = (completion_tokens / 1_000_000) * self.output_price_per_million
+        total_cost = input_cost + output_cost
+
+        return CostEstimate(
+            input_cost=round(input_cost, 6),
+            output_cost=round(output_cost, 6),
+            total_cost=round(total_cost, 6),
+            model=self.model,
+            currency="USD"
+        )
 
     def _chunk_text(self, text: str) -> List[str]:
         """
@@ -745,7 +773,7 @@ CONTRACT TEXT:
 
 Based on the contract text above, extract ALL 13 required fields and return as valid JSON. Remember to preserve original language in text fields while converting dates to MM-DD-YYYY and removing currency symbols from numbers."""
 
-    def _extract_from_text_chunk(self, text_chunk: str) -> dict:
+    def _extract_from_text_chunk(self, text_chunk: str) -> tuple[dict, dict]:
         """
         Extract data from a single text chunk using LLM.
 
@@ -753,7 +781,7 @@ Based on the contract text above, extract ALL 13 required fields and return as v
             text_chunk: Text chunk to process
 
         Returns:
-            Extracted data dictionary
+            Tuple of (extracted data dictionary, usage dictionary with token counts)
         """
         prompt = self._create_extraction_prompt(text_chunk)
 
@@ -804,10 +832,30 @@ Based on the contract text above, extract ALL 13 required fields and return as v
             print(f"   Response received. Finish reason: {response.choices[0].finish_reason}")
             content = response.choices[0].message.content
 
+            # Extract token usage information
+            usage_info = {
+                'prompt_tokens': 0,
+                'completion_tokens': 0,
+                'total_tokens': 0
+            }
+
+            if hasattr(response, 'usage') and response.usage:
+                usage_info['prompt_tokens'] = response.usage.prompt_tokens
+                usage_info['completion_tokens'] = response.usage.completion_tokens
+                usage_info['total_tokens'] = response.usage.total_tokens
+
+                # Log token usage
+                logger.info(f"Token usage - Prompt: {usage_info['prompt_tokens']}, "
+                           f"Completion: {usage_info['completion_tokens']}, "
+                           f"Total: {usage_info['total_tokens']}")
+                print(f"   📊 Token usage: Prompt={usage_info['prompt_tokens']}, "
+                      f"Completion={usage_info['completion_tokens']}, "
+                      f"Total={usage_info['total_tokens']}")
+
             if not content:
                 print(f"   ⚠️ WARNING: Empty response content from {self.model}")
                 logger.warning(f"Empty response from {self.model}")
-                return {}
+                return {}, usage_info
 
             print(f"   Response length: {len(content)} characters")
 
@@ -829,9 +877,9 @@ Based on the contract text above, extract ALL 13 required fields and return as v
         elif "```" in content:
             content = content.split("```")[1].split("```")[0].strip()
 
-        return json.loads(content)
+        return json.loads(content), usage_info
 
-    def _process_text_with_chunking(self, extracted_text: str) -> dict:
+    def _process_text_with_chunking(self, extracted_text: str) -> tuple[dict, dict]:
         """
         Process text in chunks, stopping when all fields are found or all text is processed.
 
@@ -839,10 +887,17 @@ Based on the contract text above, extract ALL 13 required fields and return as v
             extracted_text: The full OCR-extracted text
 
         Returns:
-            Extracted data dictionary with all found fields
+            Tuple of (extracted data dictionary with all found fields, accumulated token usage)
         """
         chunks = self._chunk_text(extracted_text)
         merged_data = {}
+
+        # Initialize accumulated token usage
+        total_usage = {
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0
+        }
 
         logger.info(f"Processing {len(chunks)} chunk(s) of text...")
 
@@ -850,8 +905,13 @@ Based on the contract text above, extract ALL 13 required fields and return as v
             logger.info(f"Processing chunk {i}/{len(chunks)}...")
 
             try:
-                chunk_data = self._extract_from_text_chunk(chunk)
+                chunk_data, chunk_usage = self._extract_from_text_chunk(chunk)
                 merged_data = self._merge_extracted_data(merged_data, chunk_data)
+
+                # Accumulate token usage
+                total_usage['prompt_tokens'] += chunk_usage.get('prompt_tokens', 0)
+                total_usage['completion_tokens'] += chunk_usage.get('completion_tokens', 0)
+                total_usage['total_tokens'] += chunk_usage.get('total_tokens', 0)
 
                 # Check if we have all fields
                 if self._are_all_fields_extracted(merged_data):
@@ -890,7 +950,18 @@ Based on the contract text above, extract ALL 13 required fields and return as v
                 missing.append('rate_periods (no valid periods found)')
             logger.warning(f"⚠ Processed all chunks but still missing fields: {missing}")
 
-        return merged_data
+        # Log total token usage for this contract
+        logger.info(f"📊 Total token usage for this contract - Prompt: {total_usage['prompt_tokens']}, "
+                   f"Completion: {total_usage['completion_tokens']}, "
+                   f"Total: {total_usage['total_tokens']}")
+        print("\n" + "="*80)
+        print(f"📊 TOTAL TOKEN USAGE FOR CONTRACT:")
+        print(f"   Prompt tokens: {total_usage['prompt_tokens']}")
+        print(f"   Completion tokens: {total_usage['completion_tokens']}")
+        print(f"   Total tokens: {total_usage['total_tokens']}")
+        print("="*80 + "\n")
+
+        return merged_data, total_usage
 
     def process_contract(self, file_path: Union[str, Path]) -> ContractExtractionResult:
         """
@@ -937,7 +1008,7 @@ Based on the contract text above, extract ALL 13 required fields and return as v
 
             # Step 2: Process text with chunking (stops when all 7 fields found or all text processed)
             logger.info(f"Processing text with intelligent chunking...")
-            extracted_data = self._process_text_with_chunking(extracted_text)
+            extracted_data, token_usage = self._process_text_with_chunking(extracted_text)
 
             # Add raw extracted text to the data
             extracted_data["raw_text"] = extracted_text
@@ -1061,11 +1132,26 @@ Based on the contract text above, extract ALL 13 required fields and return as v
 
             logger.info(f"Successfully processed contract: {file_path.name} in {processing_time:.2f}s")
 
+            # Create TokenUsage object
+            token_usage_obj = TokenUsage(**token_usage)
+
+            # Calculate cost estimate
+            cost_estimate = self._calculate_cost(
+                token_usage['prompt_tokens'],
+                token_usage['completion_tokens']
+            )
+
+            logger.info(f"💰 Estimated cost: ${cost_estimate.total_cost:.6f} "
+                       f"(input: ${cost_estimate.input_cost:.6f}, output: ${cost_estimate.output_cost:.6f})")
+            print(f"\n💰 Estimated cost for this contract: ${cost_estimate.total_cost:.6f} USD\n")
+
             return ContractExtractionResult(
                 success=True,
                 data=contract_info,
                 processing_time=processing_time,
-                source_file=str(file_path.name)
+                source_file=str(file_path.name),
+                token_usage=token_usage_obj,
+                cost_estimate=cost_estimate
             )
 
         except json.JSONDecodeError as e:
