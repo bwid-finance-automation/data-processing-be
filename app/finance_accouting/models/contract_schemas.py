@@ -124,3 +124,32 @@ class SupportedFormatsResponse(BaseModel):
     """Supported file formats response."""
     formats: List[str]
     description: str
+
+
+class UnitBreakdownInfo(BaseModel):
+    """Information about a single unit from breakdown file."""
+    customer_code: Optional[str] = None
+    customer_name: Optional[str] = None
+    tax_rate: Optional[float] = None
+    unit: str
+    gfa: float
+
+
+class UnitBreakdownSummary(BaseModel):
+    """Summary of unit breakdown processing."""
+    success: bool
+    total_units: int
+    total_gfa: float
+    units: List[UnitBreakdownInfo]
+    error: Optional[str] = None
+
+
+class ContractWithUnitsResult(BaseModel):
+    """Result of processing contract with unit breakdown."""
+    success: bool
+    base_contract: Optional[ContractExtractionResult] = Field(None, description="Base contract extraction from PDF")
+    unit_breakdown: Optional[UnitBreakdownSummary] = Field(None, description="Unit breakdown from Excel")
+    unit_contracts: List[ContractInfo] = Field(default_factory=list, description="Individual contracts for each unit")
+    total_units: int = Field(0, description="Total number of unit-specific contracts created")
+    gfa_validation: Optional[dict] = Field(None, description="GFA validation result")
+    error: Optional[str] = None

@@ -92,7 +92,7 @@ class ContractExcelExporter:
             'Contract Date': contract.contract_date or '',
             'Payment term': contract.payment_terms_details or '',
             'Tax rate': '',  # Left blank as requested
-            'Unit': '',  # Left blank as requested
+            'Unit': contract.unit_for_lease or '',  # Unit from unit breakdown
             'Booking fee': '',  # Left blank as requested
             'Deposit': contract.deposit_amount or '',
             'Handover Date': contract.handover_date or '',

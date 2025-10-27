@@ -12,10 +12,14 @@ from ..models.contract_schemas import (
     BatchContractResult,
     SupportedFormatsResponse,
     TokenUsage,
-    CostEstimate
+    CostEstimate,
+    ContractWithUnitsResult,
+    UnitBreakdownSummary,
+    UnitBreakdownInfo
 )
 from ..services.contract_ocr_service import ContractOCRService
 from ..services.contract_excel_export import ContractExcelExporter
+from ..services.unit_breakdown_reader import UnitBreakdownReader
 from ..utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -353,6 +357,318 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
         )
 
 
+@router.post("/process-contract-with-units", response_model=ContractWithUnitsResult)
+async def process_contract_with_unit_breakdown(
+    contract_file: UploadFile = File(..., description="Contract PDF/image file"),
+    unit_breakdown_file: UploadFile = File(..., description="Unit breakdown Excel file (.xlsx)")
+):
+    """
+    Process a contract PDF and create individual contracts for each unit from breakdown Excel.
+
+    This endpoint is useful when a single contract covers multiple units, and you have a separate
+    Excel file that lists each unit with its GFA (Gross Floor Area).
+
+    **Workflow:**
+    1. Process the contract PDF to extract general contract information
+    2. Read the unit breakdown Excel to get list of units and their GFAs
+    3. Validate that sum of unit GFAs matches the contract's total GLA
+    4. Create individual contract records for each unit (duplicating contract data with unit-specific GFA)
+
+    **Required Excel columns:**
+    - `Unit`: Unit code/name (e.g., "WA1.1", "WB1.2")
+    - `GFA`: Gross Floor Area for this unit in sqm
+
+    **Optional Excel columns:**
+    - `Customer Code`: Customer code
+    - `Customer Name`: Customer name
+    - `Tax rate`: Tax rate
+
+    **Returns:**
+    - Base contract extraction result
+    - Unit breakdown summary
+    - Individual contracts for each unit (with recalculated totals)
+    - GFA validation result
+    """
+    logger.info(f"Received contract with units request: {contract_file.filename}, {unit_breakdown_file.filename}")
+
+    # Validate contract file format
+    contract_ext = Path(contract_file.filename).suffix.lower()
+    if contract_ext not in SUPPORTED_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported contract file format: {contract_ext}. Supported formats: {', '.join(SUPPORTED_FORMATS)}"
+        )
+
+    # Validate Excel file format
+    excel_ext = Path(unit_breakdown_file.filename).suffix.lower()
+    if excel_ext not in ['.xlsx', '.xls']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported Excel format: {excel_ext}. Use .xlsx or .xls"
+        )
+
+    contract_temp_path = None
+    excel_temp_path = None
+
+    try:
+        # Save contract file to temp
+        with tempfile.NamedTemporaryFile(delete=False, suffix=contract_ext) as temp_file:
+            content = await contract_file.read()
+            temp_file.write(content)
+            contract_temp_path = temp_file.name
+
+        logger.info(f"Saved contract temp file: {contract_temp_path}")
+
+        # Save Excel file to temp
+        with tempfile.NamedTemporaryFile(delete=False, suffix=excel_ext) as temp_file:
+            content = await unit_breakdown_file.read()
+            temp_file.write(content)
+            excel_temp_path = temp_file.name
+
+        logger.info(f"Saved Excel temp file: {excel_temp_path}")
+
+        # Process contract with unit breakdown
+        ocr_service = get_ocr_service()
+        result = ocr_service.process_contract_with_unit_breakdown(
+            contract_file_path=contract_temp_path,
+            unit_breakdown_file_path=excel_temp_path,
+            validate_gfa=True,
+            gfa_tolerance=0.01  # 1% tolerance
+        )
+
+        # Clean up temp files
+        for temp_path in [contract_temp_path, excel_temp_path]:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp file: {e}")
+
+        if not result['success']:
+            error_msg = result.get('error', 'Unknown error processing contract with units')
+            logger.error(f"Processing failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+        # Convert result to response model
+        unit_breakdown_summary = None
+        if result['breakdown_result'] and result['breakdown_result'].success:
+            unit_breakdown_summary = UnitBreakdownSummary(
+                success=result['breakdown_result'].success,
+                total_units=len(result['breakdown_result'].units),
+                total_gfa=result['breakdown_result'].total_gfa,
+                units=[
+                    UnitBreakdownInfo(
+                        customer_code=unit.customer_code,
+                        customer_name=unit.customer_name,
+                        tax_rate=unit.tax_rate,
+                        unit=unit.unit,
+                        gfa=unit.gfa
+                    )
+                    for unit in result['breakdown_result'].units
+                ],
+                error=result['breakdown_result'].error
+            )
+
+        # Create GFA validation info
+        gfa_validation = None
+        if result['base_result'] and result['base_result'].data and result['breakdown_result']:
+            try:
+                contract_gla = float(result['base_result'].data.gla_for_lease) if result['base_result'].data.gla_for_lease else None
+                if contract_gla and result['breakdown_result'].total_gfa:
+                    reader = UnitBreakdownReader()
+                    gfa_validation = reader.validate_gfa_match(
+                        result['breakdown_result'],
+                        contract_gla,
+                        tolerance=0.01
+                    )
+            except Exception as e:
+                logger.warning(f"Could not create GFA validation: {e}")
+
+        response = ContractWithUnitsResult(
+            success=result['success'],
+            base_contract=result['base_result'],
+            unit_breakdown=unit_breakdown_summary,
+            unit_contracts=result['unit_contracts'],
+            total_units=len(result['unit_contracts']),
+            gfa_validation=gfa_validation,
+            error=result.get('error')
+        )
+
+        logger.info(f"Successfully processed contract with {len(result['unit_contracts'])} units")
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing contract with units: {e}", exc_info=True)
+
+        # Clean up temp files on error
+        for temp_path in [contract_temp_path, excel_temp_path]:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process contract with units: {str(e)}"
+        )
+
+
+@router.post("/export-contract-with-units-to-excel")
+async def export_contract_with_units_to_excel(
+    contract_file: UploadFile = File(..., description="Contract PDF/image file"),
+    unit_breakdown_file: UploadFile = File(..., description="Unit breakdown Excel file (.xlsx)")
+):
+    """
+    Process a contract with unit breakdown and export unit-specific contracts to Excel.
+
+    This endpoint combines contract processing with unit breakdown and Excel export:
+    1. Processes the contract PDF to extract general contract information
+    2. Reads the unit breakdown Excel to get list of units and their GFAs
+    3. Creates individual contract records for each unit
+    4. Exports all unit-specific contracts to Excel (one row per unit per rate period)
+
+    **Required Excel columns:**
+    - `Unit`: Unit code/name (e.g., "WA1.1", "WB1.2")
+    - `GFA`: Gross Floor Area for this unit in sqm
+
+    **Optional Excel columns:**
+    - `Customer Code`: Customer code
+    - `Customer Name`: Customer name
+    - `Tax rate`: Tax rate
+
+    **Returns:**
+    - Excel file with one row per unit per rate period
+    - Unit column properly filled from breakdown Excel
+    - All rate calculations based on unit-specific GFA
+    """
+    logger.info(f"Received Excel export with units request: {contract_file.filename}, {unit_breakdown_file.filename}")
+
+    # Validate contract file format
+    contract_ext = Path(contract_file.filename).suffix.lower()
+    if contract_ext not in SUPPORTED_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported contract file format: {contract_ext}. Supported formats: {', '.join(SUPPORTED_FORMATS)}"
+        )
+
+    # Validate Excel file format
+    excel_ext = Path(unit_breakdown_file.filename).suffix.lower()
+    if excel_ext not in ['.xlsx', '.xls']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported Excel format: {excel_ext}. Use .xlsx or .xls"
+        )
+
+    contract_temp_path = None
+    excel_temp_path = None
+    output_excel_path = None
+
+    try:
+        # Save contract file to temp
+        with tempfile.NamedTemporaryFile(delete=False, suffix=contract_ext) as temp_file:
+            content = await contract_file.read()
+            temp_file.write(content)
+            contract_temp_path = temp_file.name
+
+        logger.info(f"Saved contract temp file: {contract_temp_path}")
+
+        # Save Excel file to temp
+        with tempfile.NamedTemporaryFile(delete=False, suffix=excel_ext) as temp_file:
+            content = await unit_breakdown_file.read()
+            temp_file.write(content)
+            excel_temp_path = temp_file.name
+
+        logger.info(f"Saved Excel temp file: {excel_temp_path}")
+
+        # Process contract with unit breakdown
+        ocr_service = get_ocr_service()
+        result = ocr_service.process_contract_with_unit_breakdown(
+            contract_file_path=contract_temp_path,
+            unit_breakdown_file_path=excel_temp_path,
+            validate_gfa=True,
+            gfa_tolerance=0.01  # 1% tolerance
+        )
+
+        if not result['success']:
+            error_msg = result.get('error', 'Unknown error processing contract with units')
+            logger.error(f"Processing failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+        # Convert unit contracts to ContractExtractionResult objects for Excel export
+        unit_contracts = result['unit_contracts']
+
+        if not unit_contracts:
+            raise HTTPException(
+                status_code=500,
+                detail="No unit-specific contracts were created"
+            )
+
+        # Create ContractExtractionResult objects from unit contracts
+        extraction_results = []
+        for unit_contract in unit_contracts:
+            extraction_result = ContractExtractionResult(
+                success=True,
+                data=unit_contract,
+                processing_time=result['base_result'].processing_time if result['base_result'] else None,
+                source_file=f"{contract_file.filename} - Unit {unit_contract.unit_for_lease}",
+                token_usage=result['base_result'].token_usage if result['base_result'] else None,
+                cost_estimate=result['base_result'].cost_estimate if result['base_result'] else None
+            )
+            extraction_results.append(extraction_result)
+
+        logger.info(f"Created {len(extraction_results)} extraction results for Excel export")
+
+        # Export to Excel
+        exporter = ContractExcelExporter()
+
+        # Create temp Excel file for output
+        excel_output_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
+        output_excel_path = Path(excel_output_temp.name)
+        excel_output_temp.close()
+
+        # Export results
+        exporter.export_to_excel(extraction_results, output_excel_path, include_failed=False)
+
+        logger.info(f"Successfully exported {len(extraction_results)} unit contracts to Excel")
+
+        # Clean up input temp files
+        for temp_path in [contract_temp_path, excel_temp_path]:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp file: {e}")
+
+        # Return the Excel file
+        return FileResponse(
+            path=str(output_excel_path),
+            filename=f"contract_with_units_{len(unit_contracts)}_units.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            background=None  # File will be deleted after response
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in Excel export with units: {e}", exc_info=True)
+
+        # Clean up temp files on error
+        for temp_path in [contract_temp_path, excel_temp_path, output_excel_path]:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Excel export with units failed: {str(e)}"
+        )
+
+
 @router.get("/")
 async def contract_ocr_info():
     """Get Contract OCR API information."""
@@ -363,13 +679,16 @@ async def contract_ocr_info():
         "features": [
             "Single contract processing",
             "Batch contract processing",
+            "Contract with unit breakdown (NEW)",
             "Excel export (normalized format)",
+            "Excel export with unit breakdown (NEW)",
             "42+ fields extraction",
             "Multilingual support (Vietnamese/English/Chinese)",
             "Service charge calculation",
             "One row per rate period export",
             "Lease-specific fields",
-            "PDF and image support"
+            "PDF and image support",
+            "GFA validation"
         ],
         "new_fields": [
             "customer_name",
@@ -389,6 +708,8 @@ async def contract_ocr_info():
             "supported_formats": "GET /api/v1/contract-ocr/supported-formats",
             "process_single": "POST /api/v1/contract-ocr/process-contract",
             "process_batch": "POST /api/v1/contract-ocr/process-contracts-batch",
-            "export_to_excel": "POST /api/v1/contract-ocr/export-to-excel"
+            "process_with_units": "POST /api/v1/contract-ocr/process-contract-with-units",
+            "export_to_excel": "POST /api/v1/contract-ocr/export-to-excel",
+            "export_with_units_to_excel": "POST /api/v1/contract-ocr/export-contract-with-units-to-excel"
         }
     }
