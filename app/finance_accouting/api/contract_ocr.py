@@ -329,6 +329,37 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
         # Export results
         exporter.export_to_excel(results, excel_path, include_failed=True)
 
+        # Calculate totals for successful contracts
+        successful_results = [r for r in results if r.success]
+        total_prompt_tokens = sum(r.token_usage.prompt_tokens for r in successful_results if r.token_usage)
+        total_completion_tokens = sum(r.token_usage.completion_tokens for r in successful_results if r.token_usage)
+        total_tokens = sum(r.token_usage.total_tokens for r in successful_results if r.token_usage)
+        total_cost = sum(r.cost_estimate.total_cost for r in successful_results if r.cost_estimate)
+        total_input_cost = sum(r.cost_estimate.input_cost for r in successful_results if r.cost_estimate)
+        total_output_cost = sum(r.cost_estimate.output_cost for r in successful_results if r.cost_estimate)
+        model_used = successful_results[0].cost_estimate.model if successful_results and successful_results[0].cost_estimate else "N/A"
+
+        # Print summary banner
+        print("\n" + "="*80)
+        print("✅ BATCH EXPORT COMPLETE - SUMMARY")
+        print("="*80)
+        print(f"📄 Contracts processed: {len(successful_results)} successful, {len(results) - len(successful_results)} failed")
+        print(f"📊 Total contracts exported: {len(results)}")
+        print("")
+        print("💰 TOKEN USAGE & COST:")
+        print(f"   • Input tokens:      {total_prompt_tokens:,}")
+        print(f"   • Output tokens:     {total_completion_tokens:,}")
+        print(f"   • TOTAL TOKENS:      {total_tokens:,}")
+        print("")
+        print(f"   • Input cost:        ${total_input_cost:.6f}")
+        print(f"   • Output cost:       ${total_output_cost:.6f}")
+        print(f"   • TOTAL COST:        ${total_cost:.6f} USD")
+        print(f"   • Avg cost/contract: ${(total_cost/len(successful_results) if successful_results else 0):.6f}")
+        print(f"   • Model used:        {model_used}")
+        print("")
+        print(f"📁 Output file: contract_extractions_{len(results)}_contracts.xlsx")
+        print("="*80 + "\n")
+
         # Return the Excel file
         logger.info(f"Returning Excel file: {excel_path}")
 
@@ -633,6 +664,27 @@ async def export_contract_with_units_to_excel(
         exporter.export_to_excel(extraction_results, output_excel_path, include_failed=False)
 
         logger.info(f"Successfully exported {len(extraction_results)} unit contracts to Excel")
+
+        # Print summary with token usage and costs
+        if result['base_result'] and result['base_result'].token_usage and result['base_result'].cost_estimate:
+            print("\n" + "="*80)
+            print("✅ EXPORT COMPLETE - SUMMARY")
+            print("="*80)
+            print(f"📄 Units exported: {len(unit_contracts)}")
+            print(f"📊 Total rows in Excel: {len(unit_contracts) * len(result['base_result'].data.rate_periods) if result['base_result'].data.rate_periods else len(unit_contracts)}")
+            print("")
+            print("💰 TOKEN USAGE & COST:")
+            print(f"   • Input tokens:      {result['base_result'].token_usage.prompt_tokens:,}")
+            print(f"   • Output tokens:     {result['base_result'].token_usage.completion_tokens:,}")
+            print(f"   • TOTAL TOKENS:      {result['base_result'].token_usage.total_tokens:,}")
+            print("")
+            print(f"   • Input cost:        ${result['base_result'].cost_estimate.input_cost:.6f}")
+            print(f"   • Output cost:       ${result['base_result'].cost_estimate.output_cost:.6f}")
+            print(f"   • TOTAL COST:        ${result['base_result'].cost_estimate.total_cost:.6f} USD")
+            print(f"   • Model used:        {result['base_result'].cost_estimate.model}")
+            print("")
+            print(f"📁 Output file: contract_with_units_{len(unit_contracts)}_units.xlsx")
+            print("="*80 + "\n")
 
         # Clean up input temp files
         for temp_path in [contract_temp_path, excel_temp_path]:

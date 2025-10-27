@@ -33,6 +33,10 @@ class LLMFinancialAnalyzer:
         self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
 
+        # Pricing configuration (USD per 1 million tokens)
+        self.input_price_per_million = float(os.getenv("OPENAI_INPUT_PRICE_PER_MILLION", "2.50"))
+        self.output_price_per_million = float(os.getenv("OPENAI_OUTPUT_PRICE_PER_MILLION", "10.00"))
+
         # Debug: Show if API key was loaded
         if self.openai_api_key:
             logger.info(f"✅ OpenAI API key loaded: {self.openai_api_key[:10]}...{self.openai_api_key[-4:]}")
@@ -196,6 +200,32 @@ class LLMFinancialAnalyzer:
             raise e
 
     # ===========================
+    # Cost Calculation
+    # ===========================
+    def _calculate_cost(self, prompt_tokens: int, completion_tokens: int) -> dict:
+        """
+        Calculate the cost estimate based on token usage and pricing configuration.
+
+        Args:
+            prompt_tokens: Number of input/prompt tokens
+            completion_tokens: Number of output/completion tokens
+
+        Returns:
+            Dictionary with cost breakdown
+        """
+        input_cost = (prompt_tokens / 1_000_000) * self.input_price_per_million
+        output_cost = (completion_tokens / 1_000_000) * self.output_price_per_million
+        total_cost = input_cost + output_cost
+
+        return {
+            'input_cost': round(input_cost, 6),
+            'output_cost': round(output_cost, 6),
+            'total_cost': round(total_cost, 6),
+            'model': self.openai_model,
+            'currency': 'USD'
+        }
+
+    # ===========================
     # OpenAI API Methods
     # ===========================
     def _call_openai(self, system_prompt: str, user_prompt: str) -> dict:
@@ -239,13 +269,18 @@ class LLMFinancialAnalyzer:
                 content = response['choices'][0]['message']['content']
                 usage = response.get('usage', {})
 
+                prompt_tokens = usage.get('prompt_tokens', 0)
+                completion_tokens = usage.get('completion_tokens', 0)
+                cost_info = self._calculate_cost(prompt_tokens, completion_tokens)
+
                 return {
                     "message": {
                         "content": content
                     },
-                    "prompt_eval_count": usage.get('prompt_tokens', 0),
-                    "eval_count": usage.get('completion_tokens', 0),
-                    "total_tokens": usage.get('total_tokens', 0)
+                    "prompt_eval_count": prompt_tokens,
+                    "eval_count": completion_tokens,
+                    "total_tokens": usage.get('total_tokens', 0),
+                    "cost": cost_info
                 }
             else:
                 # Standard OpenAI client response
@@ -269,14 +304,21 @@ class LLMFinancialAnalyzer:
                 if content is None:
                     raise RuntimeError("OpenAI API returned None content")
 
+                # Get token counts and calculate cost
+                prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+                completion_tokens = response.usage.completion_tokens if response.usage else 0
+                total_tokens = response.usage.total_tokens if response.usage else 0
+                cost_info = self._calculate_cost(prompt_tokens, completion_tokens)
+
                 # Return in consistent format
                 return {
                     "message": {
                         "content": content
                     },
-                    "prompt_eval_count": response.usage.prompt_tokens if response.usage else 0,
-                    "eval_count": response.usage.completion_tokens if response.usage else 0,
-                    "total_tokens": response.usage.total_tokens if response.usage else 0
+                    "prompt_eval_count": prompt_tokens,
+                    "eval_count": completion_tokens,
+                    "total_tokens": total_tokens,
+                    "cost": cost_info
                 }
         except Exception as e:
             print(f"   ❌ OpenAI API call failed: {str(e)}")
@@ -426,17 +468,22 @@ class LLMFinancialAnalyzer:
             response_length = len(result)
 
             # Extract final token usage from successful response
-            total_input_tokens = response.get('total_tokens', 0)
+            total_input_tokens = response.get('prompt_eval_count', 0)
             total_output_tokens = response.get('eval_count', 0)
-            total_tokens_used = total_input_tokens + total_output_tokens
+            total_tokens_used = response.get('total_tokens', 0)
+            cost_info = response.get('cost', {})
 
             print(f"   ✅ Response received successfully:")
             print(f"      • Response length: {response_length:,} characters")
             if total_tokens_used > 0:
-                print(f"   💰 FINAL TOKEN SUMMARY:")
-                print(f"      • Total Input Tokens: {total_input_tokens:,}")
-                print(f"      • Total Output Tokens: {total_output_tokens:,}")
-                print(f"      • TOTAL TOKENS USED: {total_tokens_used:,}")
+                print(f"   💰 TOKEN USAGE & COST:")
+                print(f"      • Input tokens:  {total_input_tokens:,}")
+                print(f"      • Output tokens: {total_output_tokens:,}")
+                print(f"      • TOTAL TOKENS:  {total_tokens_used:,}")
+                if cost_info:
+                    print(f"      • Input cost:    ${cost_info.get('input_cost', 0):.6f}")
+                    print(f"      • Output cost:   ${cost_info.get('output_cost', 0):.6f}")
+                    print(f"      • TOTAL COST:    ${cost_info.get('total_cost', 0):.6f} USD")
                 print(f"      • Model: {self.openai_model}")
 
             print(f"   📝 Response preview: {result[:200]}...")
@@ -454,9 +501,27 @@ class LLMFinancialAnalyzer:
 
             print(f"\n🎉 ===== RAW EXCEL AI ANALYSIS COMPLETE FOR {subsidiary} =====")
             print(f"📊 Final Results: {len(anomalies)} anomalies identified")
+
+            # Print comprehensive summary banner
             if total_tokens_used > 0:
-                print(f"🔢 Processing Summary: {total_tokens_used:,} tokens used (FREE with OpenAI)")
-            print()
+                print("\n" + "="*80)
+                print("✅ AI ANALYSIS COMPLETE - SUMMARY")
+                print("="*80)
+                print(f"📄 Subsidiary: {subsidiary}")
+                print(f"📊 Anomalies detected: {len(anomalies)}")
+                print("")
+                print("💰 TOKEN USAGE & COST:")
+                print(f"   • Input tokens:  {total_input_tokens:,}")
+                print(f"   • Output tokens: {total_output_tokens:,}")
+                print(f"   • TOTAL TOKENS:  {total_tokens_used:,}")
+                if cost_info:
+                    print("")
+                    print(f"   • Input cost:    ${cost_info.get('input_cost', 0):.6f}")
+                    print(f"   • Output cost:   ${cost_info.get('output_cost', 0):.6f}")
+                    print(f"   • TOTAL COST:    ${cost_info.get('total_cost', 0):.6f} USD")
+                print(f"   • Model:         {self.openai_model}")
+                print("="*80 + "\n")
+
             return anomalies
 
         except Exception as e:
@@ -702,6 +767,11 @@ class LLMFinancialAnalyzer:
 
         all_anomalies = []
 
+        # Track token usage and costs across all chunks
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cost = 0.0
+
         # Split BS data into chunks
         bs_chunk_size = 150
         pl_chunk_size = 75
@@ -749,6 +819,15 @@ class LLMFinancialAnalyzer:
                     if response and response.get('message', {}).get('content'):
                         chunk_anomalies = self._parse_llm_response(response['message']['content'], subsidiary)
                         all_anomalies.extend(chunk_anomalies)
+
+                        # Accumulate token usage and costs
+                        if 'prompt_eval_count' in response:
+                            total_input_tokens += response.get('prompt_eval_count', 0)
+                        if 'eval_count' in response:
+                            total_output_tokens += response.get('eval_count', 0)
+                        if 'cost' in response:
+                            total_cost += response['cost'].get('total_cost', 0)
+
                         success_msg = f"Found {len(chunk_anomalies)} anomalies in chunk {current_chunk}/{total_chunks}"
                         print(f"      ✅ {success_msg}")
 
@@ -771,6 +850,30 @@ class LLMFinancialAnalyzer:
         # Send completion progress update
         if self.progress_callback:
             self.progress_callback(chunk_end_progress, completion_msg)
+
+        # Print comprehensive summary banner
+        total_tokens = total_input_tokens + total_output_tokens
+        if total_tokens > 0:
+            print("\n" + "="*80)
+            print("✅ AI ANALYSIS COMPLETE - SUMMARY")
+            print("="*80)
+            print(f"📄 Subsidiary: {subsidiary}")
+            print(f"📊 Anomalies detected: {len(all_anomalies)}")
+            print(f"📦 Chunks processed: {total_chunks}")
+            print("")
+            print("💰 TOKEN USAGE & COST:")
+            print(f"   • Input tokens:  {total_input_tokens:,}")
+            print(f"   • Output tokens: {total_output_tokens:,}")
+            print(f"   • TOTAL TOKENS:  {total_tokens:,}")
+            if total_cost > 0:
+                print("")
+                input_cost = (total_input_tokens / 1_000_000) * self.input_price_per_million
+                output_cost = (total_output_tokens / 1_000_000) * self.output_price_per_million
+                print(f"   • Input cost:    ${input_cost:.6f}")
+                print(f"   • Output cost:   ${output_cost:.6f}")
+                print(f"   • TOTAL COST:    ${total_cost:.6f} USD")
+            print(f"   • Model:         {self.openai_model}")
+            print("="*80 + "\n")
 
         return all_anomalies
 
