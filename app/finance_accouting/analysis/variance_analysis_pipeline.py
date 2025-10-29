@@ -768,19 +768,38 @@ def check_rule_A7(bs_df, pl_df):
 
 
 def check_rule_D1(bs_df, pl_df):
-    """D1 - Balance sheet imbalance"""
+    """D1 - Balance sheet imbalance
+
+    CORRECT Formula: 1 + 2 = 3 + 4
+    Rearranged: 1 + 2 - 3 - 4 = 0
+
+    Vietnamese Chart of Accounts:
+    - 1xx: Assets (add)
+    - 2xx: Liabilities (add)
+    - 3xx: Contra-Liabilities (subtract from right side)
+    - 4xx: Equity (subtract from right side)
+
+    Balance Equation: Assets + Liabilities = Contra-Liabilities + Equity
+    """
     flags = []
     if bs_df is None or bs_df.empty:
         return flags
 
     month_cols = get_month_cols(bs_df)
-    bs_df['Account_Line_Str'] = bs_df['Account Line'].astype(str)
-    bs_df['First_Digit'] = bs_df['Account_Line_Str'].str[0]
 
-    type_1 = bs_df[bs_df['First_Digit'] == '1']  # Assets
-    type_2 = bs_df[bs_df['First_Digit'] == '2']  # Liabilities
-    type_3 = bs_df[bs_df['First_Digit'] == '3']  # Liabilities (subtract)
-    type_4 = bs_df[bs_df['First_Digit'] == '4']  # Equity (subtract)
+    # Create a copy to avoid SettingWithCopyWarning
+    bs_df_copy = bs_df.copy()
+
+    # CRITICAL FIX: Use 'Account Code' NOT 'Account Line' for categorization!
+    # Account Line contains simplified codes (111, 232, etc.)
+    # Account Code contains full codes (112121132, 214710001, etc.)
+    bs_df_copy['Account_Code_Str'] = bs_df_copy['Account Code'].astype(str)
+    bs_df_copy['First_Digit'] = bs_df_copy['Account_Code_Str'].str[0]
+
+    type_1 = bs_df_copy[bs_df_copy['First_Digit'] == '1']  # Assets
+    type_2 = bs_df_copy[bs_df_copy['First_Digit'] == '2']  # Liabilities
+    type_3 = bs_df_copy[bs_df_copy['First_Digit'] == '3']  # Contra-Liabilities
+    type_4 = bs_df_copy[bs_df_copy['First_Digit'] == '4']  # Equity
 
     for month in month_cols:
         total_1 = type_1[month].sum() if not type_1.empty else 0
@@ -788,6 +807,7 @@ def check_rule_D1(bs_df, pl_df):
         total_3 = type_3[month].sum() if not type_3.empty else 0
         total_4 = type_4[month].sum() if not type_4.empty else 0
 
+        # CORRECT FORMULA: 1 + 2 = 3 + 4, rearranged as 1 + 2 - 3 - 4 = 0
         balance = total_1 + total_2 - total_3 - total_4
 
         if abs(balance) > 1:
@@ -795,36 +815,70 @@ def check_rule_D1(bs_df, pl_df):
                 'Rule_ID': 'D1',
                 'Priority': '🔴 Critical',
                 'Issue': 'Balance sheet imbalance',
-                'Accounts': 'Account Lines: 1xx + 2xx - 3xx - 4xx',
+                'Accounts': 'Account Lines: 1xx + 2xx = 3xx + 4xx',
                 'Period': month,
-                'Reason': f'Balance sheet formula (1+2-3-4) = {balance:,.0f} VND (should be 0)',
-                'Flag_Trigger': '1 + 2 - 3 - 4 ≠ 0'
+                'Type_1_Assets': f'{total_1:,.0f}',
+                'Type_2_Liabilities': f'{total_2:,.0f}',
+                'Type_3_Contra_Liabilities': f'{total_3:,.0f}',
+                'Type_4_Equity': f'{total_4:,.0f}',
+                'Balance': f'{balance:,.0f}',
+                'Reason': f'Balance sheet formula (1+2-3-4) = {balance:,.0f} VND (should be 0). Assets={total_1:,.0f}, Liabilities={total_2:,.0f}, Contra-Liabilities={total_3:,.0f}, Equity={total_4:,.0f}',
+                'Flag_Trigger': '(1 + 2) - (3 + 4) ≠ 0'
             })
     return flags
 
 
 def check_rule_E1(bs_df, pl_df):
-    """E1 - Negative asset balance"""
+    """E1 - Negative Net Book Value (NBV)
+
+    Checks that Cost > Accumulated Depreciation (NBV > 0) for:
+    - Account Line 222 (cost) > 223 (accumulated depreciation)
+    - Account Line 228 (cost) > 229 (accumulated depreciation)
+    - Account Line 231 (cost) > 232 (accumulated depreciation)
+    """
     flags = []
     if bs_df is None or bs_df.empty:
         return flags
 
-    assets = bs_df[bs_df['Account Code'].astype(str).str.match(r'^1\d{2}', na=False)]
     month_cols = get_month_cols(bs_df)
 
-    for month in month_cols:
-        for _, row in assets.iterrows():
-            value = row[month]
-            if value < 0:
+    # Define cost vs accumulated depreciation pairs based on Account Line
+    nbv_pairs = [
+        ('222', '223', 'Asset Class 222/223'),
+        ('228', '229', 'Asset Class 228/229'),
+        ('231', '232', 'Asset Class 231/232')
+    ]
+
+    for cost_line, accum_dep_line, asset_class in nbv_pairs:
+        # Get accounts by Account Line (not Account Code)
+        cost_accounts = bs_df[bs_df['Account Line'].astype(str) == cost_line]
+        accum_dep_accounts = bs_df[bs_df['Account Line'].astype(str) == accum_dep_line]
+
+        if cost_accounts.empty and accum_dep_accounts.empty:
+            continue
+
+        for month in month_cols:
+            cost_total = cost_accounts[month].sum() if not cost_accounts.empty else 0
+            accum_dep_total = accum_dep_accounts[month].sum() if not accum_dep_accounts.empty else 0
+
+            # NBV = Cost - Accumulated Depreciation (note: accum_dep is typically negative)
+            nbv = cost_total + accum_dep_total  # Adding because accum_dep is negative
+
+            # Flag if NBV is negative (cost < abs(accumulated depreciation))
+            if nbv < 0:
                 flags.append({
                     'Rule_ID': 'E1',
                     'Priority': '🔴 Critical',
-                    'Issue': 'Negative asset balance',
-                    'Accounts': f"{row['Account Code']} - {row['Account Name']}",
+                    'Issue': 'Negative Net Book Value (NBV)',
+                    'Accounts': f'Account Line {cost_line} (cost) vs {accum_dep_line} (accum dep)',
                     'Period': month,
-                    'Reason': f'Asset account {row["Account Code"]} has negative balance: {value:,.0f} VND',
-                    'Flag_Trigger': 'Any asset < 0'
+                    'Cost': f'{cost_total:,.0f}',
+                    'Accumulated_Depreciation': f'{accum_dep_total:,.0f}',
+                    'NBV': f'{nbv:,.0f}',
+                    'Reason': f'{asset_class}: Cost={cost_total:,.0f} VND, Accum Dep={accum_dep_total:,.0f} VND, NBV={nbv:,.0f} VND (should be > 0)',
+                    'Flag_Trigger': f'NBV ({cost_line} + {accum_dep_line}) < 0'
                 })
+
     return flags
 
 
@@ -956,48 +1010,139 @@ def check_rule_B3(bs_df, pl_df):
 
 
 def check_rule_C1(bs_df, pl_df):
-    """C1 - Gross margin compression"""
+    """C1 - Gross margin by revenue stream
+
+    Checks gross profit margin for rechargeable services:
+    - Utilities revenue vs expenses
+    - Service charges vs direct expenses
+    - Others revenue vs other expenses
+
+    Revenue streams:
+    - 511800001: Revenue: Utilities
+    - 511800002: Revenue: Others
+    - 511600001: Revenue: Service charge - Third parties
+    - 511600005: Revenue: Operation management fee (Share-mgt services charge)
+
+    Direct expenses (should be recharged to clients):
+    - 632100008: Direct Expenses: Repair & Maintenance - Tenant's request
+    - 632100011: Direct Expenses: Free factories' utility expenses
+    - 632100015: Direct Expenses: Construction requested by tenants
+    - 632199999: Direct Expenses: Others
+
+    Note: Leasing revenue (rental income) vs depreciation/amortization is IGNORED
+    """
     flags = []
     if pl_df is None or pl_df.empty:
         return flags
 
-    revenue_accounts = get_account_pattern_data(pl_df, '511xxx')
-    cogs_accounts = get_account_pattern_data(pl_df, '632xxx')
-    if revenue_accounts.empty or cogs_accounts.empty:
-        return flags
-
     month_cols = get_month_cols(pl_df)
-    if len(month_cols) < MONTHS_6M_AVG:
+    if len(month_cols) < 2:
         return flags
 
-    gm_percentages = []
-    for month in month_cols:
-        revenue = revenue_accounts[month].sum()
-        cogs = cogs_accounts[month].sum()
-        gm_pct = ((revenue - cogs) / revenue * 100) if revenue != 0 else 0
-        gm_percentages.append(gm_pct)
+    # Define revenue stream groups (excluding rental/leasing revenue)
+    revenue_stream_groups = [
+        {
+            'name': 'Utilities',
+            'revenue_accounts': ['511800001'],
+            'expense_accounts': ['632100011'],  # Free factories' utility expenses
+            'description': 'Utilities Revenue vs Utility Expenses'
+        },
+        {
+            'name': 'Service Charges',
+            'revenue_accounts': ['511600001', '511600005'],  # Service charge + Operation management fee
+            'expense_accounts': ['632100008', '632100015'],  # Repair & Maintenance + Construction
+            'description': 'Service Charges vs Direct Service Expenses'
+        },
+        {
+            'name': 'Other Revenue',
+            'revenue_accounts': ['511800002'],  # Revenue: Others
+            'expense_accounts': ['632199999'],  # Direct Expenses: Others
+            'description': 'Other Revenue vs Other Direct Expenses'
+        }
+    ]
 
-    gm_series = pd.Series(gm_percentages, index=month_cols)
+    for stream in revenue_stream_groups:
+        # Get revenue accounts for this stream
+        revenue_data = None
+        for acc in stream['revenue_accounts']:
+            acc_data = pl_df[pl_df['Account Code'].astype(str).str.contains(acc, na=False)]
+            if not acc_data.empty:
+                if revenue_data is None:
+                    revenue_data = acc_data
+                else:
+                    revenue_data = pd.concat([revenue_data, acc_data])
 
-    for i in range(MONTHS_6M_AVG, len(month_cols)):
-        curr_month = month_cols[i]
-        curr_gm = gm_series.iloc[i]
-        baseline_window = gm_series.iloc[i-MONTHS_6M_AVG:i]
-        mean_gm = baseline_window.mean()
-        std_gm = baseline_window.std()
-        threshold = std_gm * STD_DEV_THRESHOLD
-        drop = mean_gm - curr_gm
+        # Get expense accounts for this stream
+        expense_data = None
+        for acc in stream['expense_accounts']:
+            acc_data = pl_df[pl_df['Account Code'].astype(str).str.contains(acc, na=False)]
+            if not acc_data.empty:
+                if expense_data is None:
+                    expense_data = acc_data
+                else:
+                    expense_data = pd.concat([expense_data, acc_data])
 
-        if drop > threshold and threshold > 0:
-            flags.append({
-                'Rule_ID': 'C1',
-                'Priority': '🟡 Review',
-                'Issue': 'Gross margin compression',
-                'Accounts': 'Revenue (511) and COGS (632)',
-                'Period': curr_month,
-                'Reason': f'Gross margin dropped to {curr_gm:.2f}% from baseline {mean_gm:.2f}%',
-                'Flag_Trigger': 'GM% drops > 2σ'
+        if revenue_data is None or revenue_data.empty:
+            continue
+
+        # Need at least 6 months of data to establish baseline
+        if len(month_cols) < MONTHS_6M_AVG:
+            continue
+
+        # Calculate gross margin percentage for each month
+        gm_percentages = []
+        for month in month_cols:
+            revenue = revenue_data[month].sum() if revenue_data is not None else 0
+            expense = expense_data[month].sum() if expense_data is not None else 0
+
+            # Calculate gross margin percentage
+            if revenue != 0:
+                gm_pct = ((revenue - expense) / revenue * 100)
+            else:
+                gm_pct = 0
+
+            gm_percentages.append({
+                'month': month,
+                'revenue': revenue,
+                'expense': expense,
+                'gm_pct': gm_pct
             })
+
+        # Compare current months against 6-month baseline
+        for i in range(MONTHS_6M_AVG, len(gm_percentages)):
+            curr_data = gm_percentages[i]
+            baseline_window = [gm_percentages[j]['gm_pct'] for j in range(i - MONTHS_6M_AVG, i)]
+
+            # Skip if no revenue in current month
+            if curr_data['revenue'] == 0:
+                continue
+
+            mean_gm = pd.Series(baseline_window).mean()
+            std_gm = pd.Series(baseline_window).std()
+            threshold = std_gm * STD_DEV_THRESHOLD
+
+            # Calculate change in gross margin
+            gm_change = curr_data['gm_pct'] - mean_gm
+
+            # Flag if gross margin changes significantly (either drop OR increase)
+            if abs(gm_change) > threshold and threshold > 0:
+                direction = "dropped" if gm_change < 0 else "increased"
+
+                flags.append({
+                    'Rule_ID': 'C1',
+                    'Priority': '🟡 Review',
+                    'Issue': f'Gross margin {direction} for {stream["name"]}',
+                    'Accounts': f'{stream["description"]}',
+                    'Period': curr_data['month'],
+                    'Revenue': f'{curr_data["revenue"]:,.0f}',
+                    'Expenses': f'{curr_data["expense"]:,.0f}',
+                    'Current_GM': f'{curr_data["gm_pct"]:.2f}%',
+                    'Baseline_GM': f'{mean_gm:.2f}%',
+                    'GM_Change': f'{gm_change:+.2f}%',
+                    'Reason': f'{stream["name"]}: GM {direction} to {curr_data["gm_pct"]:.2f}% from baseline {mean_gm:.2f}% (Revenue={curr_data["revenue"]:,.0f}, Expenses={curr_data["expense"]:,.0f})',
+                    'Flag_Trigger': f'GM% change > 2σ ({abs(gm_change):.2f}% vs threshold {threshold:.2f}%)'
+                })
+
     return flags
 
 
@@ -1221,12 +1366,16 @@ def check_rule_E6(bs_df, pl_df):
 # ============================================================================
 
 def check_rule_E3(bs_df, pl_df):
-    """E3 - Large VAT input"""
+    """E3 - Large VAT input - tax refund opportunity
+
+    Checks specific account 133100002 (not all 133xxx accounts)
+    """
     flags = []
     if bs_df is None or bs_df.empty:
         return flags
 
-    vat_accounts = get_account_pattern_data(bs_df, '133xxx')
+    # Check for specific account 133100002
+    vat_accounts = get_account_pattern_data(bs_df, '133100002')
     if vat_accounts.empty:
         return flags
 
@@ -1240,7 +1389,7 @@ def check_rule_E3(bs_df, pl_df):
                 'Rule_ID': 'E3',
                 'Priority': '🟢 Info',
                 'Issue': 'Large VAT input - tax refund opportunity',
-                'Accounts': '133xxx (VAT input)',
+                'Accounts': '133100002 (VAT input)',
                 'Period': month,
                 'Reason': f'VAT input balance is {vat_balance:,.0f} VND (threshold: 10B VND)',
                 'Flag_Trigger': 'VAT input > 10B'
@@ -1354,12 +1503,73 @@ def check_rule_F2(bs_df, pl_df):
     return flags
 
 
+def check_rule_F3(bs_df, pl_df):
+    """F3 - P&L line items with material month-over-month fluctuation
+
+    Flags any P&L account that fluctuates month-over-month by:
+    - More than 5% change (percentage threshold)
+    - AND more than 1 billion VND (absolute threshold)
+    """
+    flags = []
+    if pl_df is None or pl_df.empty:
+        return flags
+
+    month_cols = get_month_cols(pl_df)
+    if len(month_cols) < 2:
+        return flags
+
+    # Thresholds
+    PERCENTAGE_THRESHOLD = 0.05  # 5%
+    ABSOLUTE_THRESHOLD = 1_000_000_000  # 1 billion VND
+
+    # Check each P&L account
+    for idx, row in pl_df.iterrows():
+        account_code = row.get('Account Code', 'N/A')
+        account_line = row.get('Account Line', 'N/A')
+
+        # Compare each month with previous month
+        for i in range(1, len(month_cols)):
+            prev_month = month_cols[i-1]
+            curr_month = month_cols[i]
+
+            prev_value = row[prev_month]
+            curr_value = row[curr_month]
+
+            # Skip if previous value is zero (can't calculate percentage)
+            if prev_value == 0:
+                continue
+
+            # Calculate absolute change and percentage change
+            absolute_change = abs(curr_value - prev_value)
+            percentage_change = abs((curr_value - prev_value) / prev_value)
+
+            # Flag if BOTH thresholds are exceeded
+            if absolute_change > ABSOLUTE_THRESHOLD and percentage_change > PERCENTAGE_THRESHOLD:
+                direction = "increased" if curr_value > prev_value else "decreased"
+
+                flags.append({
+                    'Rule_ID': 'F3',
+                    'Priority': '🟡 Review',
+                    'Issue': f'Material P&L fluctuation - {account_line}',
+                    'Accounts': f'{account_code} ({account_line})',
+                    'Period': f"{prev_month} → {curr_month}",
+                    'Previous_Value': f'{prev_value:,.0f}',
+                    'Current_Value': f'{curr_value:,.0f}',
+                    'Absolute_Change': f'{absolute_change:,.0f}',
+                    'Percentage_Change': f'{percentage_change:.2%}',
+                    'Reason': f'{account_code} {direction} from {prev_value:,.0f} to {curr_value:,.0f} VND (change: {absolute_change:,.0f} VND, {percentage_change:.2%})',
+                    'Flag_Trigger': f'Change > 5% AND > 1B VND'
+                })
+
+    return flags
+
+
 # ============================================================================
 # MAIN RULE EXECUTION
 # ============================================================================
 
 def run_all_variance_rules(bs_df, pl_df):
-    """Run all 21 variance analysis rules"""
+    """Run all 22 variance analysis rules"""
     all_flags = []
 
     # Critical Rules (🔴)
@@ -1382,6 +1592,7 @@ def run_all_variance_rules(bs_df, pl_df):
     all_flags.extend(check_rule_E2(bs_df, pl_df))
     all_flags.extend(check_rule_E5(bs_df, pl_df))
     all_flags.extend(check_rule_E6(bs_df, pl_df))
+    all_flags.extend(check_rule_F3(bs_df, pl_df))  # P&L material fluctuation
 
     # Info Rules (🟢)
     all_flags.extend(check_rule_E3(bs_df, pl_df))
