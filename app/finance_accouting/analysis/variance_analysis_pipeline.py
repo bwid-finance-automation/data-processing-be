@@ -55,9 +55,16 @@ DAYS_IN_MONTH = {
 # Quarter-start months for E4
 QUARTER_START_MONTHS = ['Jan', 'Apr', 'Jul', 'Oct']
 
-# Regex patterns for BS and PL month detection
-BS_PAT = re.compile(r'^\s*as\s*of\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[\.\-\s]*(\d{2,4})\s*$', re.I)
-PL_PAT = re.compile(r'^\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[\.\-\s]*(\d{2,4})\s*$', re.I)
+# Regex patterns for BS and PL month detection (expanded for edge cases)
+BS_PAT = re.compile(
+    r'^\s*(as\s*of\s*|tinh\s*den\s*|tính\s*đến\s*|den\s*ngay\s*|đến\s*ngày\s*)?' +
+    r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[\.\-\s,]*(\d{2,4})\s*$',
+    re.I
+)
+PL_PAT = re.compile(
+    r'^\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[\.\-\s,]*(\d{2,4})\s*$',
+    re.I
+)
 
 
 # ============================================================================
@@ -65,21 +72,55 @@ PL_PAT = re.compile(r'^\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[\.\-
 # ============================================================================
 
 def extract_current_period_from_row4(xl_file, sheet_name):
-    """Extract current period from Row 4 (index 3) of Excel sheet."""
+    """Extract current period from Row 4 (index 3) of Excel sheet with fallbacks."""
     try:
-        df = pd.read_excel(xl_file, sheet_name=sheet_name, header=None, nrows=5, dtype=str)
-        row4_text = str(df.iloc[3, 0]).strip()  # Row 4, Column A
+        df = pd.read_excel(xl_file, sheet_name=sheet_name, header=None, nrows=10, dtype=str)
 
-        matches = re.findall(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{4})', row4_text, re.I)
+        # Try multiple rows (common locations for period info)
+        rows_to_check = [3, 2, 4, 1, 5]  # Row 4 first, then other common locations
 
-        if matches:
-            month_name, year = matches[-1]
-            month_num = MONTHS.index(month_name.lower()) + 1
-            return int(year), month_num, f"{month_name.title()} {year}"
-        else:
-            return None, None, None
-    except Exception:
-        return None, None, None
+        for row_idx in rows_to_check:
+            if row_idx >= len(df):
+                continue
+
+            # Check multiple columns (sometimes period is in B, C, etc.)
+            for col_idx in range(min(5, len(df.columns))):
+                try:
+                    cell_text = str(df.iloc[row_idx, col_idx]).strip()
+
+                    # Enhanced patterns to find dates
+                    # Pattern 1: "From Jan 2025 to Sep 2025" or "End of Sep 2025"
+                    matches = re.findall(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{4})', cell_text, re.I)
+                    if matches:
+                        month_name, year = matches[-1]  # Take the last match
+                        month_num = MONTHS.index(month_name.lower()) + 1
+                        return int(year), month_num, f"{month_name.title()} {year}"
+
+                    # Pattern 2: MM/YYYY or MM-YYYY
+                    match = re.search(r'(\d{1,2})[/\-](\d{4})', cell_text)
+                    if match:
+                        month_num = int(match.group(1))
+                        year = int(match.group(2))
+                        if 1 <= month_num <= 12:
+                            month_name = MONTHS[month_num - 1]
+                            return year, month_num, f"{month_name.title()} {year}"
+
+                    # Pattern 3: YYYY/MM or YYYY-MM
+                    match = re.search(r'(\d{4})[/\-](\d{1,2})', cell_text)
+                    if match:
+                        year = int(match.group(1))
+                        month_num = int(match.group(2))
+                        if 1 <= month_num <= 12:
+                            month_name = MONTHS[month_num - 1]
+                            return year, month_num, f"{month_name.title()} {year}"
+
+                except Exception:
+                    continue
+
+    except Exception as e:
+        print(f"Warning: Could not extract current period from {sheet_name}: {e}")
+
+    return None, None, None
 
 
 def filter_months_up_to_current(month_cols, current_year, current_month):
@@ -146,16 +187,38 @@ def month_key(label):
 
 
 def detect_header_row(xl, sheet):
-    """Find the row containing 'Financial row' header"""
+    """Find the row containing 'Financial row' header with multiple fallback patterns"""
     try:
-        probe = pd.read_excel(xl, sheet_name=sheet, header=None, nrows=40)
+        probe = pd.read_excel(xl, sheet_name=sheet, header=None, nrows=50, dtype=str)
+
+        # Common header patterns to search for
+        header_patterns = [
+            "financial row",
+            "financial item",
+            "account",
+            "line item",
+            "description",
+            "chỉ tiêu",  # Vietnamese: indicator/metric
+            "khoản mục",  # Vietnamese: item/account
+        ]
+
         for i in range(len(probe)):
             row_values = probe.iloc[i].astype(str).str.strip().str.lower()
-            if any("financial row" in v for v in row_values):
+
+            # Check for any header pattern
+            for pattern in header_patterns:
+                if any(pattern in v for v in row_values):
+                    return i
+
+            # Also check if row has "Entity" or similar organizational headers
+            if any(keyword in v for v in row_values for keyword in ["entity", "subsidiary", "company"]):
                 return i
-    except Exception:
-        pass
-    return 0
+
+    except Exception as e:
+        print(f"Warning: Header detection failed for {sheet}: {e}")
+
+    # Default fallback: row 5 (common in many templates)
+    return 5
 
 
 def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
@@ -169,39 +232,140 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
         df = df_raw.iloc[data_start:].copy()
         df.columns = [f'col_{i}' for i in range(len(df.columns))]
 
-        if mode == 'BS':
-            df = df.rename(columns={
-                'col_0': 'Financial_Row',
-                'col_1': 'Entity',
-                'col_2': 'Entity_Line',
-                'col_3': 'Account_Line'
-            })
-            filter_col = 'Account_Line'
-            month_start_col = 4
-        else:  # PL
-            df = df.rename(columns={
-                'col_0': 'Financial_Row',
-                'col_1': 'Entity',
-                'col_2': 'Account_Line'
-            })
-            filter_col = 'Account_Line'
-            month_start_col = 3
+        # === FLEXIBLE COLUMN STRUCTURE DETECTION ===
+        # Instead of hardcoding column positions, detect them from the header row
+        headers_lower = [str(h).lower().strip() for h in headers]
 
-        df['Financial_Row'] = df['Financial_Row'].fillna(method='ffill')
-        df = df[df[filter_col].notna() & (df[filter_col].astype(str).str.strip() != '')].copy()
+        print(f"DEBUG: ========== COLUMN STRUCTURE DETECTION for {sheet_name} ==========")
+        print(f"DEBUG: Headers (first 10): {headers[:10]}")
 
-        month_row = df_raw.iloc[header_row + 1]
+        # Find Financial Row column
+        financial_row_col = None
+        for i, h in enumerate(headers_lower):
+            if any(keyword in h for keyword in ['financial row', 'account code', 'financial code', 'mã tk']):
+                financial_row_col = i
+                print(f"DEBUG: Found 'Financial Row' at column {i}: '{headers[i]}'")
+                break
+
+        if financial_row_col is None:
+            financial_row_col = 0  # fallback
+            print(f"DEBUG: Using default col 0 for Financial Row")
+
+        # Find Account Line column
+        account_line_col = None
+        for i, h in enumerate(headers_lower):
+            if any(keyword in h for keyword in ['account line', 'account name', 'description', 'tên tk', 'diễn giải']):
+                account_line_col = i
+                print(f"DEBUG: Found 'Account Line' at column {i}: '{headers[i]}'")
+                break
+
+        if account_line_col is None:
+            # Fallback based on mode
+            account_line_col = 3 if mode == 'BS' else 2
+            print(f"DEBUG: Using default col {account_line_col} for Account Line (mode={mode})")
+
+        # Find Entity columns (optional)
+        entity_cols = []
+        for i, h in enumerate(headers_lower):
+            if 'entity' in h or 'subsidiary' in h or 'đơn vị' in h:
+                entity_cols.append(i)
+
+        # Determine where month columns likely start (after the last structural column)
+        structural_cols = [financial_row_col, account_line_col] + entity_cols
+        month_start_col = max(structural_cols) + 1
+
+        print(f"DEBUG: Financial Row column: {financial_row_col}")
+        print(f"DEBUG: Account Line column: {account_line_col}")
+        print(f"DEBUG: Entity columns: {entity_cols}")
+        print(f"DEBUG: Month columns expected to start at: {month_start_col}")
+
+        # Rename columns based on detection
+        df = df.rename(columns={f'col_{financial_row_col}': 'Financial_Row'})
+        df = df.rename(columns={f'col_{account_line_col}': 'Account_Line'})
+
+        for i, entity_idx in enumerate(entity_cols):
+            df = df.rename(columns={f'col_{entity_idx}': f'Entity_{i}'})
+
+        filter_col = 'Account_Line'
+
+        # Forward fill Financial Row and filter empty rows
+        if 'Financial_Row' in df.columns:
+            df['Financial_Row'] = df['Financial_Row'].fillna(method='ffill')
+
+        if filter_col in df.columns:
+            df = df[df[filter_col].notna() & (df[filter_col].astype(str).str.strip() != '')].copy()
+        else:
+            print(f"WARNING: {filter_col} column not found after renaming!")
+
+        # === FLEXIBLE MONTH COLUMN DETECTION ===
+        # Step 1: Try to detect where month columns actually start by checking ALL columns
+        # (not just from month_start_col) since structure may vary
+
         month_cols = []
         month_col_indices = []
-        for i in range(month_start_col, len(month_row)):
-            val = str(month_row.iloc[i]).strip()
-            if BS_PAT.match(val) or PL_PAT.match(val):
-                normalized = normalize_period_label(val)
-                val_lower = val.lower()
-                if not any(keyword in val_lower for keyword in ['ytd', 'ltm', 'amount ytd', 'amount ltm', 'year to date', 'last twelve']):
-                    if re.match(r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{4}$', normalized, re.I):
-                        month_cols.append(normalized)
-                        month_col_indices.append(i)
+        month_row_found = None
+
+        # Try ALL rows in the header area (not just near header_row)
+        rows_to_try = list(range(0, min(20, len(df_raw))))  # Check first 20 rows thoroughly
+
+        print(f"DEBUG: ========== MONTH HEADER DETECTION for {sheet_name} ==========")
+        print(f"DEBUG: Header row detected at: {header_row}")
+        print(f"DEBUG: Expected month_start_col (based on mode): {month_start_col}")
+        print(f"DEBUG: Will scan first 20 rows thoroughly to find month headers")
+
+        for row_idx in rows_to_try:
+            if row_idx >= len(df_raw):
+                continue
+
+            test_row = df_raw.iloc[row_idx]
+
+            # Show full row for debugging
+            sample_vals = [str(test_row.iloc[i]).strip() if i < len(test_row) else 'N/A' for i in range(min(15, len(test_row)))]
+
+            temp_month_cols = []
+            temp_month_indices = []
+
+            # Check EVERY column (from 0 onwards), not just month_start_col
+            for i in range(0, len(test_row)):
+                val = str(test_row.iloc[i]).strip()
+
+                if val == 'nan' or val == '':
+                    continue
+
+                # Try both patterns
+                bs_match = BS_PAT.match(val)
+                pl_match = PL_PAT.match(val)
+
+                if bs_match or pl_match:
+                    normalized = normalize_period_label(val)
+                    val_lower = val.lower()
+
+                    # Exclude YTD/LTM columns
+                    if not any(keyword in val_lower for keyword in ['ytd', 'ltm', 'amount ytd', 'amount ltm', 'year to date', 'last twelve']):
+                        if re.match(r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{4}$', normalized, re.I):
+                            temp_month_cols.append(normalized)
+                            temp_month_indices.append(i)
+
+            if temp_month_cols:
+                month_cols = temp_month_cols
+                month_col_indices = temp_month_indices
+                month_row_found = row_idx
+                print(f"DEBUG: ✓✓✓ FOUND {len(month_cols)} month columns in ROW {row_idx}")
+                print(f"DEBUG: Month columns: {month_cols[:8]}")
+                print(f"DEBUG: Column indices: {month_col_indices[:8]}")
+                print(f"DEBUG: Full row {row_idx}: {sample_vals}")
+                break
+            else:
+                # Only print rows that have non-empty values
+                if any(v not in ['nan', ''] for v in sample_vals):
+                    print(f"DEBUG: Row {row_idx:2d} [{len(temp_month_cols)} months]: {sample_vals}")
+
+        if not month_cols:
+            print(f"DEBUG: ✗✗✗ NO MONTH COLUMNS FOUND in {sheet_name}")
+            print(f"DEBUG: Dumping detailed first 20 rows for manual inspection:")
+            for idx in range(min(20, len(df_raw))):
+                row_sample = [str(df_raw.iloc[idx, col]).strip() for col in range(min(15, len(df_raw.columns)))]
+                print(f"  Row {idx:2d}: {row_sample}")
 
         for idx, month in zip(month_col_indices, month_cols):
             df = df.rename(columns={f'col_{idx}': month})
@@ -225,14 +389,26 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
             'Account_Line': 'Account Line'
         })
 
-        result = df.groupby(['Account Code', 'Account Line'], as_index=False).agg({
-            **{month: 'sum' for month in month_cols if month in df.columns}
-        })
+        # Check if we have any data to process
+        if df.empty:
+            print(f"Warning: No data rows found in {sheet_name} for {subsidiary}")
+            return pd.DataFrame(), []
+
+        # Check if we have month columns
+        available_month_cols = [month for month in month_cols if month in df.columns]
+        if not available_month_cols:
+            print(f"Warning: No month columns found in {sheet_name} for {subsidiary}")
+            return pd.DataFrame(), []
+
+        # Perform aggregation only if we have month columns
+        agg_dict = {month: 'sum' for month in available_month_cols}
+        result = df.groupby(['Account Code', 'Account Line'], as_index=False).agg(agg_dict)
 
         result['Account Name'] = result['Account Code']
-        final_column_order = ['Account Code', 'Account Line', 'Account Name'] + [m for m in month_cols if m in result.columns]
+        final_column_order = ['Account Code', 'Account Line', 'Account Name'] + available_month_cols
         result = result[final_column_order]
-        month_cols = sorted(month_cols, key=month_key)
+
+        month_cols = sorted(available_month_cols, key=month_key)
         filtered_month_cols = filter_months_up_to_current(month_cols, current_year, current_month)
 
         keep_cols = ['Account Code', 'Account Line', 'Account Name'] + filtered_month_cols
@@ -245,19 +421,57 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
         return pd.DataFrame(), []
 
 
+def find_sheet_by_pattern(wb, patterns):
+    """Find sheet that matches any of the given patterns (case-insensitive)"""
+    sheet_names_lower = {name.lower(): name for name in wb.sheetnames}
+
+    for pattern in patterns:
+        pattern_lower = pattern.lower()
+        # Exact match
+        if pattern_lower in sheet_names_lower:
+            return sheet_names_lower[pattern_lower]
+
+        # Partial match (contains pattern)
+        for lower_name, actual_name in sheet_names_lower.items():
+            if pattern_lower in lower_name or lower_name in pattern_lower:
+                return actual_name
+
+    return None
+
+
 def extract_subsidiary_name(xl_file):
-    """Extract subsidiary name from cell A2"""
+    """Extract subsidiary name from cell A2 with multiple fallback strategies"""
     try:
         wb = load_workbook(xl_file, read_only=True, data_only=True)
-        for sheet_name in ["BS Breakdown", "PL Breakdown"]:
-            if sheet_name in wb.sheetnames:
+
+        # Try common sheet name variations
+        bs_patterns = ["BS Breakdown", "BS breakdown", "bs breakdown", "Balance Sheet",
+                       "BS", "balance sheet breakdown", "BẢNG CÂN ĐỐI KẾ TOÁN"]
+        pl_patterns = ["PL Breakdown", "PL breakdown", "pl breakdown", "P&L", "P/L",
+                       "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH"]
+
+        # Try to find any sheet
+        for patterns in [bs_patterns, pl_patterns]:
+            sheet_name = find_sheet_by_pattern(wb, patterns)
+            if sheet_name:
                 sheet = wb[sheet_name]
+
+                # Try A2 first (most common)
                 cell_value = sheet["A2"].value
                 if isinstance(cell_value, str) and ":" in cell_value:
+                    wb.close()
                     return cell_value.split(":")[-1].strip()
+
+                # Try A1 as fallback
+                cell_value = sheet["A1"].value
+                if isinstance(cell_value, str) and ":" in cell_value:
+                    wb.close()
+                    return cell_value.split(":")[-1].strip()
+
         wb.close()
     except Exception:
         pass
+
     return "Subsidiary"
 
 
@@ -1392,12 +1606,35 @@ def process_variance_analysis(files: List[Tuple[str, bytes]]) -> bytes:
             # Extract subsidiary name
             subsidiary = extract_subsidiary_name(file_obj)
 
-            # Process BS and PL sheets
-            file_obj.seek(0)  # Reset file pointer
-            bs_df, _ = process_financial_tab(file_obj, "BS Breakdown", "BS", subsidiary)
+            # Find actual sheet names (case-insensitive and flexible)
+            file_obj.seek(0)
+            temp_wb = load_workbook(file_obj, read_only=True, data_only=True)
 
-            file_obj.seek(0)  # Reset file pointer
-            pl_df, _ = process_financial_tab(file_obj, "PL Breakdown", "PL", subsidiary)
+            bs_patterns = ["BS Breakdown", "BS breakdown", "bs breakdown", "Balance Sheet",
+                           "BS", "balance sheet breakdown", "BẢNG CÂN ĐỐI KẾ TOÁN"]
+            pl_patterns = ["PL Breakdown", "PL breakdown", "pl breakdown", "P&L", "P/L",
+                           "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH"]
+
+            bs_sheet_name = find_sheet_by_pattern(temp_wb, bs_patterns)
+            pl_sheet_name = find_sheet_by_pattern(temp_wb, pl_patterns)
+            temp_wb.close()
+
+            if not bs_sheet_name and not pl_sheet_name:
+                print(f"Warning: No BS or PL sheets found in {filename}")
+                print(f"Available sheets: {', '.join(temp_wb.sheetnames)}")
+                continue
+
+            # Process BS and PL sheets with found names
+            bs_df = pd.DataFrame()
+            pl_df = pd.DataFrame()
+
+            if bs_sheet_name:
+                file_obj.seek(0)  # Reset file pointer
+                bs_df, _ = process_financial_tab(file_obj, bs_sheet_name, "BS", subsidiary)
+
+            if pl_sheet_name:
+                file_obj.seek(0)  # Reset file pointer
+                pl_df, _ = process_financial_tab(file_obj, pl_sheet_name, "PL", subsidiary)
 
             if bs_df.empty and pl_df.empty:
                 print(f"Warning: No data could be extracted from {filename}")

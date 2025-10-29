@@ -36,8 +36,8 @@ async def process_python_analysis(
     logger.info(f"Processing {len(excel_files)} files for Python variance analysis")
 
     try:
-        # 1. Validate uploaded files
-        validation_results = await validate_file_list(excel_files, max_files=10)
+        # 1. Validate uploaded files (increased limit for batch processing)
+        validation_results = await validate_file_list(excel_files, max_files=50)
 
         # Check if any files failed validation
         failed_files = [result for result in validation_results if not result.get('is_valid', False)]
