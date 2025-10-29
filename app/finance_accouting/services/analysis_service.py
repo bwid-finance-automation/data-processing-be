@@ -14,6 +14,7 @@ from ..core.config import get_analysis_config
 from ..models.analysis import AnalysisSession, RevenueVarianceAnalysisResponse
 from .processing_service import process_all
 from ..analysis.revenue_analysis import analyze_revenue_variance_comprehensive
+from ..analysis.variance_analysis_pipeline import process_variance_analysis
 from ..utils.log_capture import LogCapture
 
 class AnalysisService:
@@ -81,7 +82,7 @@ class AnalysisService:
         mapping_file: Optional[UploadFile] = None,
         config_overrides: Optional[Dict[str, Any]] = None
     ) -> bytes:
-        """Process files using Python-based analysis."""
+        """Process files using Python-based analysis with 21-rule variance pipeline."""
         try:
             # Read files into memory
             files: List[Tuple[str, bytes]] = [
@@ -89,28 +90,9 @@ class AnalysisService:
                 for f in excel_files
             ]
 
-            # Handle mapping file if provided
-            corr_rules: Optional[pd.DataFrame] = None
-            season_rules: Optional[pd.DataFrame] = None
-            if mapping_file is not None:
-                mapping_bytes = await mapping_file.read()
-                corr_rules, season_rules = self._load_mapping_rules(mapping_bytes)
-
-            # Build configuration
-            config = get_analysis_config()
-            if config_overrides:
-                config.update(config_overrides)
-
-            # Disable AI for Python mode
-            config["use_llm_analysis"] = False
-
-            # Process files
-            xlsx_bytes: bytes = process_all(
-                files=files,
-                corr_rules=corr_rules,
-                season_rules=season_rules,
-                CONFIG=config,
-            )
+            # Use the new 21-rule variance analysis pipeline
+            # Configuration and mapping files are no longer used
+            xlsx_bytes: bytes = process_variance_analysis(files)
 
             return xlsx_bytes
 

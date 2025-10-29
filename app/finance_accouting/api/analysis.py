@@ -30,20 +30,10 @@ router = APIRouter(tags=["analysis"])
 async def process_python_analysis(
     request: Request,
     excel_files: List[UploadFile] = File(...),
-    mapping_file: Optional[UploadFile] = File(None),
-    materiality_vnd: Optional[float] = Form(None),
-    recurring_pct_threshold: Optional[float] = Form(None),
-    revenue_opex_pct_threshold: Optional[float] = Form(None),
-    bs_pct_threshold: Optional[float] = Form(None),
-    recurring_code_prefixes: Optional[str] = Form(None),
-    min_trend_periods: Optional[int] = Form(None),
-    gm_drop_threshold_pct: Optional[float] = Form(None),
-    dep_pct_only_prefixes: Optional[str] = Form(None),
-    customer_column_hints: Optional[str] = Form(None),
     settings: Settings = Depends(get_settings)
 ):
-    """Process Excel files using Python-based analysis with comprehensive validation."""
-    logger.info(f"Processing {len(excel_files)} files for Python analysis")
+    """Process Excel files using Python-based 21-rule variance analysis."""
+    logger.info(f"Processing {len(excel_files)} files for Python variance analysis")
 
     try:
         # 1. Validate uploaded files
@@ -61,42 +51,12 @@ async def process_python_analysis(
                 details="; ".join(error_details)
             )
 
-        # 2. Validate and sanitize analysis parameters
-        params = {
-            'materiality_vnd': materiality_vnd,
-            'recurring_pct_threshold': recurring_pct_threshold,
-            'revenue_opex_pct_threshold': revenue_opex_pct_threshold,
-            'bs_pct_threshold': bs_pct_threshold,
-            'recurring_code_prefixes': recurring_code_prefixes,
-            'min_trend_periods': min_trend_periods,
-            'gm_drop_threshold_pct': gm_drop_threshold_pct,
-            'dep_pct_only_prefixes': dep_pct_only_prefixes,
-            'customer_column_hints': customer_column_hints,
-        }
-
-        validated_params = validate_analysis_parameters(params)
-
-        # Build configuration overrides
-        config_overrides = build_config_overrides(
-            materiality_vnd=validated_params.materiality_vnd,
-            recurring_pct_threshold=validated_params.recurring_pct_threshold,
-            revenue_opex_pct_threshold=validated_params.revenue_opex_pct_threshold,
-            bs_pct_threshold=validated_params.bs_pct_threshold,
-            recurring_code_prefixes=validated_params.recurring_code_prefixes,
-            min_trend_periods=validated_params.min_trend_periods,
-            gm_drop_threshold_pct=validated_params.gm_drop_threshold_pct,
-            dep_pct_only_prefixes=validated_params.dep_pct_only_prefixes,
-            customer_column_hints=validated_params.customer_column_hints,
-        )
-
-        # 3. Process files
+        # 2. Process files using new 21-rule pipeline (no configuration needed)
         xlsx_bytes = await analysis_service.process_python_analysis(
-            excel_files=excel_files,
-            mapping_file=mapping_file,
-            config_overrides=config_overrides
+            excel_files=excel_files
         )
 
-        logger.info("Python analysis completed successfully")
+        logger.info("Python variance analysis completed successfully")
         return StreamingResponse(
             iter([xlsx_bytes]),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -337,16 +297,6 @@ async def list_debug_files(session_id: str):
 async def compare_excel_files(
     request: Request,
     excel_files: List[UploadFile] = File(..., description="Excel files to compare"),
-    mapping_file: Optional[UploadFile] = File(None),
-    materiality_vnd: Optional[float] = Form(None),
-    recurring_pct_threshold: Optional[float] = Form(None),
-    revenue_opex_pct_threshold: Optional[float] = Form(None),
-    bs_pct_threshold: Optional[float] = Form(None),
-    recurring_code_prefixes: Optional[str] = Form(None),
-    min_trend_periods: Optional[int] = Form(None),
-    gm_drop_threshold_pct: Optional[float] = Form(None),
-    dep_pct_only_prefixes: Optional[str] = Form(None),
-    customer_column_hints: Optional[str] = Form(None),
     settings: Settings = Depends(get_settings)
 ):
     """Compare Excel files - alias for /api/process endpoint."""
@@ -368,16 +318,6 @@ async def compare_excel_files(
     return await process_python_analysis(
         request=request,
         excel_files=excel_files,
-        mapping_file=mapping_file,
-        materiality_vnd=materiality_vnd,
-        recurring_pct_threshold=recurring_pct_threshold,
-        revenue_opex_pct_threshold=revenue_opex_pct_threshold,
-        bs_pct_threshold=bs_pct_threshold,
-        recurring_code_prefixes=recurring_code_prefixes,
-        min_trend_periods=min_trend_periods,
-        gm_drop_threshold_pct=gm_drop_threshold_pct,
-        dep_pct_only_prefixes=dep_pct_only_prefixes,
-        customer_column_hints=customer_column_hints,
         settings=settings
     )
 

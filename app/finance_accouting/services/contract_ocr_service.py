@@ -570,11 +570,22 @@ class ContractOCRService:
         logger.info(f"📊 Total token usage for this contract - Prompt: {total_usage['prompt_tokens']}, "
                    f"Completion: {total_usage['completion_tokens']}, "
                    f"Total: {total_usage['total_tokens']}")
+
+        # Calculate costs
+        input_cost = (total_usage['prompt_tokens'] / 1_000_000) * self.input_price_per_million
+        output_cost = (total_usage['completion_tokens'] / 1_000_000) * self.output_price_per_million
+        total_cost = input_cost + output_cost
+
         print("\n" + "="*80)
-        print(f"📊 TOTAL TOKEN USAGE FOR CONTRACT:")
-        print(f"   Prompt tokens: {total_usage['prompt_tokens']}")
-        print(f"   Completion tokens: {total_usage['completion_tokens']}")
-        print(f"   Total tokens: {total_usage['total_tokens']}")
+        print(f"💰 TOKEN USAGE & COST:")
+        print(f"   • Input tokens:  {total_usage['prompt_tokens']:,}")
+        print(f"   • Output tokens: {total_usage['completion_tokens']:,}")
+        print(f"   • TOTAL TOKENS:  {total_usage['total_tokens']:,}")
+        print("")
+        print(f"   • Input cost:    ${input_cost:.6f}")
+        print(f"   • Output cost:   ${output_cost:.6f}")
+        print(f"   • TOTAL COST:    ${total_cost:.6f} USD")
+        print(f"   • Model:         {self.model}")
         print("="*80 + "\n")
 
         return merged_data, total_usage
@@ -759,7 +770,6 @@ class ContractOCRService:
 
             logger.info(f"💰 Estimated cost: ${cost_estimate.total_cost:.6f} "
                        f"(input: ${cost_estimate.input_cost:.6f}, output: ${cost_estimate.output_cost:.6f})")
-            print(f"\n💰 Estimated cost for this contract: ${cost_estimate.total_cost:.6f} USD\n")
 
             return ContractExtractionResult(
                 success=True,
