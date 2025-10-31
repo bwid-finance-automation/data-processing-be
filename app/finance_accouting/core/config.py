@@ -59,6 +59,7 @@ class Settings:
         self.cors_methods = config.app.cors_methods
         self.cors_headers = config.app.cors_headers
         self.max_file_size = config.file_processing.max_file_size
+        self.max_files_per_request = config.file_processing.max_files_per_request
         self.allowed_file_extensions = config.file_processing.allowed_file_extensions
         self.default_months_to_analyze = config.revenue_analysis.months_to_analyze
         self.revenue_change_threshold_vnd = config.revenue_analysis.revenue_change_threshold_vnd

@@ -19,6 +19,7 @@ from ..utils.helpers import build_config_overrides
 from ..utils.file_validation import validate_file_list, FileValidator
 from ..utils.input_sanitization import validate_analysis_parameters, sanitize_session_id
 from ..core.config import get_settings, Settings
+from ..core.unified_config import get_unified_config
 from ..core.exceptions import FileProcessingError, ValidationError, SessionError
 from ..utils.logging_config import get_logger
 
@@ -29,15 +30,20 @@ router = APIRouter(tags=["analysis"])
 @router.post("/process")
 async def process_python_analysis(
     request: Request,
-    excel_files: List[UploadFile] = File(...),
-    settings: Settings = Depends(get_settings)
+    excel_files: List[UploadFile] = File(...)
 ):
     """Process Excel files using Python-based 21-rule variance analysis."""
     logger.info(f"Processing {len(excel_files)} files for Python variance analysis")
 
     try:
-        # 1. Validate uploaded files (increased limit for batch processing)
-        validation_results = await validate_file_list(excel_files, max_files=50)
+        # Get unified config to access file_processing settings
+        config = get_unified_config()
+
+        # 1. Validate uploaded files (use configured max files per request)
+        validation_results = await validate_file_list(
+            excel_files,
+            max_files=config.file_processing.max_files_per_request
+        )
 
         # Check if any files failed validation
         failed_files = [result for result in validation_results if not result.get('is_valid', False)]

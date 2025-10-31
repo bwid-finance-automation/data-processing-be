@@ -205,13 +205,20 @@ def detect_header_row(xl, sheet):
         for i in range(len(probe)):
             row_values = probe.iloc[i].astype(str).str.strip().str.lower()
 
-            # Check for any header pattern
+            # Check for specific "Financial Row" pattern first (most reliable)
+            if any("financial row" in v for v in row_values):
+                return i
+
+            # Check for other header patterns
             for pattern in header_patterns:
+                if pattern == "financial row":
+                    continue  # Already checked above
                 if any(pattern in v for v in row_values):
                     return i
 
-            # Also check if row has "Entity" or similar organizational headers
-            if any(keyword in v for v in row_values for keyword in ["entity", "subsidiary", "company"]):
+            # Also check if row has "Entity" as a column header (not in company description)
+            # Must be a short value to avoid matching company descriptions
+            if any(v == "entity" or v == "subsidiary" for v in row_values):
                 return i
 
     except Exception as e:
@@ -228,7 +235,9 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
         header_row = detect_header_row(xl_file, sheet_name)
         df_raw = pd.read_excel(xl_file, sheet_name=sheet_name, header=None, dtype=str)
         headers = df_raw.iloc[header_row].tolist()
-        data_start = header_row + 2
+        # Data typically starts 3 rows after header (header_row + month_header_row + empty_row + data)
+        # Row 7 (header) -> Row 8 (month headers) -> Row 9 (empty) -> Row 10 (data)
+        data_start = header_row + 3
         df = df_raw.iloc[data_start:].copy()
         df.columns = [f'col_{i}' for i in range(len(df.columns))]
 
@@ -298,7 +307,27 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
         if 'Financial_Row' in df.columns:
             df['Financial_Row'] = df['Financial_Row'].fillna(method='ffill')
 
-        if filter_col in df.columns:
+        # Filter rows: Keep rows with Account_Line OR rows that are total rows
+        # Total rows have keywords like "TỔNG CỘNG", "Total", etc. in Financial_Row
+        print(f"DEBUG: Filtering rows - filter_col={filter_col}, filter_col in df.columns={filter_col in df.columns}, Financial_Row in df.columns={'Financial_Row' in df.columns}")
+        if filter_col in df.columns and 'Financial_Row' in df.columns:
+            # Keep rows that either:
+            # 1. Have Account_Line (detail rows)
+            # 2. OR have total keywords in Financial_Row (total rows)
+            has_account_line = df[filter_col].notna() & (df[filter_col].astype(str).str.strip() != '')
+            is_total_row = df['Financial_Row'].astype(str).str.contains(
+                'TỔNG CỘNG|Total|TOTAL|Tổng cộng',
+                case=False,
+                na=False,
+                regex=True
+            )
+            print(f"DEBUG: Rows with Account_Line: {has_account_line.sum()}")
+            print(f"DEBUG: Rows with total keywords: {is_total_row.sum()}")
+            print(f"DEBUG: Total rows to keep: {(has_account_line | is_total_row).sum()}")
+            df = df[has_account_line | is_total_row].copy()
+            print(f"DEBUG: After filtering, df has {len(df)} rows")
+        elif filter_col in df.columns:
+            print(f"DEBUG: Using fallback filtering (Financial_Row not in columns)")
             df = df[df[filter_col].notna() & (df[filter_col].astype(str).str.strip() != '')].copy()
         else:
             print(f"WARNING: {filter_col} column not found after renaming!")
@@ -407,10 +436,27 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
             return pd.DataFrame(), []
 
         # Perform aggregation only if we have month columns
-        agg_dict = {month: 'sum' for month in available_month_cols}
-        result = df.groupby(['Account Code', 'Account Line'], as_index=False).agg(agg_dict)
+        # Split dataframe into detail rows (with Account Line) and total rows (without Account Line)
+        detail_rows = df[df['Account Line'].notna()].copy()
+        total_rows = df[df['Account Line'].isna()].copy()
 
-        result['Account Name'] = result['Account Code']
+        print(f"DEBUG: Before aggregation - detail_rows: {len(detail_rows)}, total_rows: {len(total_rows)}")
+
+        # Aggregate detail rows
+        agg_dict = {month: 'sum' for month in available_month_cols}
+        result_detail = detail_rows.groupby(['Account Code', 'Account Line'], as_index=False).agg(agg_dict)
+        result_detail['Account Name'] = result_detail['Account Code']
+
+        # For total rows, keep them as-is (no aggregation needed, they're already totals)
+        if not total_rows.empty:
+            total_rows['Account Name'] = total_rows['Account Code']
+            # Combine detail and total rows
+            result = pd.concat([result_detail, total_rows], ignore_index=True)
+        else:
+            result = result_detail
+
+        print(f"DEBUG: After aggregation - result has {len(result)} rows")
+
         final_column_order = ['Account Code', 'Account Line', 'Account Name'] + available_month_cols
         result = result[final_column_order]
 
@@ -451,10 +497,12 @@ def extract_subsidiary_name(xl_file):
         wb = load_workbook(xl_file, read_only=True, data_only=True)
 
         # Try common sheet name variations
-        bs_patterns = ["BS Breakdown", "BS breakdown", "bs breakdown", "Balance Sheet",
-                       "BS", "balance sheet breakdown", "BẢNG CÂN ĐỐI KẾ TOÁN"]
-        pl_patterns = ["PL Breakdown", "PL breakdown", "pl breakdown", "P&L", "P/L",
-                       "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH"]
+        # IMPORTANT: Include both "BS Breakdown" (with space) and "BSbreakdown" (no space)
+        # Priority: Try breakdown sheets first, then standalone sheets
+        bs_patterns = ["BS Breakdown", "BSbreakdown", "BS breakdown", "bs breakdown",
+                       "balance sheet breakdown", "BẢNG CÂN ĐỐI KẾ TOÁN", "Balance Sheet", "BS"]
+        pl_patterns = ["PL Breakdown", "PLBreakdown", "PL breakdown", "pl breakdown",
+                       "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH", "P&L", "P/L", "PL"]
 
         # Try to find any sheet
         for patterns in [bs_patterns, pl_patterns]:
@@ -776,8 +824,10 @@ def check_rule_A7(bs_df, pl_df):
 def check_rule_D1(bs_df, pl_df):
     """D1 - Balance sheet imbalance
 
-    CORRECT Formula: 1 + 2 = 3 + 4
-    Rearranged: 1 + 2 - 3 - 4 = 0
+    CORRECT Formula: Total Assets = Total Liabilities + Equity
+
+    For consolidated files with inter-company eliminations, we use the total rows.
+    For single-entity files, we sum by account line category (1xx, 2xx, 3xx, 4xx).
 
     Vietnamese Chart of Accounts:
     - 1xx: Assets (add)
@@ -792,46 +842,128 @@ def check_rule_D1(bs_df, pl_df):
         return flags
 
     month_cols = get_month_cols(bs_df)
+    if not month_cols:
+        return flags
 
     # Create a copy to avoid SettingWithCopyWarning
     bs_df_copy = bs_df.copy()
 
-    # CRITICAL: Use 'Account Line' for categorization!
-    # Account Line contains simplified codes (111, 211, 331, 411) - these are the category codes
-    # Account Code contains full account codes (112121132, 214710001, etc.) - these are specific accounts
-    # We need to categorize by the first digit of Account Line, NOT Account Code
-    bs_df_copy['Account_Line_Str'] = bs_df_copy['Account Line'].astype(str)
-    bs_df_copy['First_Digit'] = bs_df_copy['Account_Line_Str'].str[0]
+    # NEW APPROACH: Classify accounts by SECTION, not by account code first digit
+    # Reason: Some files (like BNH) have 2xx codes in Assets section (e.g., 231 Fixed Assets)
+    # and 1xx codes in Liabilities section (e.g., 136 Unearned Revenue)
+    #
+    # Strategy: Find the "TỔNG CỘNG TÀI SẢN" row (Total Assets) to split sections
+    # - Everything BEFORE this row with Account Line = Assets
+    # - Everything AFTER this row with Account Line = Liabilities+Equity
 
-    type_1 = bs_df_copy[bs_df_copy['First_Digit'] == '1']  # Assets (1xx)
-    type_2 = bs_df_copy[bs_df_copy['First_Digit'] == '2']  # Liabilities (2xx)
-    type_3 = bs_df_copy[bs_df_copy['First_Digit'] == '3']  # Contra-Liabilities (3xx)
-    type_4 = bs_df_copy[bs_df_copy['First_Digit'] == '4']  # Equity (4xx)
+    # Find the Total Assets row
+    print(f"DEBUG: D1 - Searching for Total Assets marker in {len(bs_df_copy)} rows")
+    print(f"DEBUG: D1 - Columns: {bs_df_copy.columns.tolist()}")
+    print(f"DEBUG: D1 - Sample Account Code values: {bs_df_copy['Account Code'].head(10).tolist()}")
 
-    for month in month_cols:
-        total_1 = type_1[month].sum() if not type_1.empty else 0
-        total_2 = type_2[month].sum() if not type_2.empty else 0
-        total_3 = type_3[month].sum() if not type_3.empty else 0
-        total_4 = type_4[month].sum() if not type_4.empty else 0
+    total_assets_marker_rows = bs_df_copy[
+        (bs_df_copy['Account Code'].astype(str).str.contains(
+            r'TỔNG CỘNG TÀI SẢN$|^Total Assets\s*$',
+            case=False,
+            na=False,
+            regex=True
+        )) &
+        (bs_df_copy['Account Line'].isna())  # Total row has no Account Line
+    ]
 
-        # CORRECT FORMULA: 1 + 2 = 3 + 4, rearranged as 1 + 2 - 3 - 4 = 0
-        balance = total_1 + total_2 - total_3 - total_4
+    print(f"DEBUG: D1 - Found {len(total_assets_marker_rows)} Total Assets markers")
 
-        if abs(balance) > 1:
-            flags.append({
-                'Rule_ID': 'D1',
-                'Priority': '🔴 Critical',
-                'Issue': 'Balance sheet imbalance',
-                'Accounts': 'Account Lines: 1xx + 2xx = 3xx + 4xx',
-                'Period': month,
-                'Type_1_Assets': f'{total_1:,.0f}',
-                'Type_2_Liabilities': f'{total_2:,.0f}',
-                'Type_3_Contra_Liabilities': f'{total_3:,.0f}',
-                'Type_4_Equity': f'{total_4:,.0f}',
-                'Balance': f'{balance:,.0f}',
-                'Reason': f'Balance sheet formula (1+2-3-4) = {balance:,.0f} VND (should be 0). Assets={total_1:,.0f}, Liabilities={total_2:,.0f}, Contra-Liabilities={total_3:,.0f}, Equity={total_4:,.0f}',
-                'Flag_Trigger': '(1 + 2) - (3 + 4) ≠ 0'
-            })
+    if not total_assets_marker_rows.empty:
+        # Use TOTAL ROWS approach - directly compare the total row values
+        # This is more reliable than summing account lines
+        print(f"DEBUG: D1 - Using total rows approach (found Total Assets marker)")
+
+        total_assets_row = total_assets_marker_rows.iloc[-1]
+
+        # Find Total Liabilities+Equity marker
+        total_liab_eq_marker_rows = bs_df_copy[
+            (bs_df_copy['Account Code'].astype(str).str.contains(
+                r'TỔNG CỘNG NGUỒN VỐN|Total.*Liabilities.*Equity|Total.*Equity',
+                case=False,
+                na=False,
+                regex=True
+            )) &
+            (bs_df_copy['Account Line'].isna())
+        ]
+
+        if not total_liab_eq_marker_rows.empty:
+            total_liab_eq_row = total_liab_eq_marker_rows.iloc[-1]
+
+            print(f"DEBUG: D1 - Found both total rows, comparing their values")
+
+            for month in month_cols:
+                total_assets = total_assets_row[month] if pd.notna(total_assets_row[month]) else 0
+                total_liab_equity = total_liab_eq_row[month] if pd.notna(total_liab_eq_row[month]) else 0
+
+                print(f"DEBUG: D1 - Month {month}: Assets={total_assets:,.0f}, Liab+Eq={total_liab_equity:,.0f}")
+
+                balance = total_assets - total_liab_equity
+
+                # Tolerance: 100M VND
+                if abs(balance) > 100_000_000:
+                    flags.append({
+                        'Rule_ID': 'D1',
+                        'Priority': '🔴 Critical',
+                        'Issue': 'Balance sheet imbalance',
+                        'Accounts': 'Total Assets vs Total Liabilities+Equity',
+                        'Period': month,
+                        'Total_Assets': f'{total_assets:,.0f}',
+                        'Total_Liabilities_Equity': f'{total_liab_equity:,.0f}',
+                        'Balance': f'{balance:,.0f}',
+                        'Reason': f'Total Assets - Total Liabilities+Equity = {balance:,.0f} VND (should be ~0). Assets={total_assets:,.0f}, Liab+Equity={total_liab_equity:,.0f}',
+                        'Flag_Trigger': 'Total Assets ≠ Total Liabilities+Equity'
+                    })
+        else:
+            print(f"DEBUG: D1 - Could not find Total Liabilities+Equity marker, falling back to account code approach")
+    else:
+        # Fallback to traditional account code approach if no Total Assets marker found
+        print(f"DEBUG: D1 - Using traditional account code approach (no Total Assets marker found)")
+
+        bs_detail = bs_df_copy[bs_df_copy['Account Line'].notna()].copy()
+
+        if bs_detail.empty:
+            print(f"DEBUG: D1 - No detail rows with Account Line found")
+            return flags
+
+        bs_detail['Account_Line_Str'] = bs_detail['Account Line'].astype(str).str.strip()
+        bs_detail['First_Digit'] = bs_detail['Account_Line_Str'].str[0]
+
+        type_1 = bs_detail[bs_detail['First_Digit'] == '1']  # Assets (1xx)
+        type_2 = bs_detail[bs_detail['First_Digit'] == '2']  # Liabilities (2xx)
+        type_3 = bs_detail[bs_detail['First_Digit'] == '3']  # Contra-Liabilities (3xx)
+        type_4 = bs_detail[bs_detail['First_Digit'] == '4']  # Equity (4xx)
+
+        for month in month_cols:
+            total_1 = type_1[month].sum() if not type_1.empty else 0
+            total_2 = type_2[month].sum() if not type_2.empty else 0
+            total_3 = type_3[month].sum() if not type_3.empty else 0
+            total_4 = type_4[month].sum() if not type_4.empty else 0
+
+            # CORRECT FORMULA: 1 + 2 = 3 + 4, rearranged as 1 + 2 - 3 - 4 = 0
+            balance = total_1 + total_2 - total_3 - total_4
+
+            # Tolerance: 100M VND
+            if abs(balance) > 100_000_000:
+                flags.append({
+                    'Rule_ID': 'D1',
+                    'Priority': '🔴 Critical',
+                    'Issue': 'Balance sheet imbalance',
+                    'Accounts': 'Account Lines: 1xx + 2xx = 3xx + 4xx',
+                    'Period': month,
+                    'Type_1_Assets': f'{total_1:,.0f}',
+                    'Type_2_Liabilities': f'{total_2:,.0f}',
+                    'Type_3_Contra_Liabilities': f'{total_3:,.0f}',
+                    'Type_4_Equity': f'{total_4:,.0f}',
+                    'Balance': f'{balance:,.0f}',
+                    'Reason': f'Balance sheet formula (1+2-3-4) = {balance:,.0f} VND (should be ~0). Assets={total_1:,.0f}, Liabilities={total_2:,.0f}, Contra-Liabilities={total_3:,.0f}, Equity={total_4:,.0f}',
+                    'Flag_Trigger': '(1 + 2) - (3 + 4) ≠ 0'
+                })
+
     return flags
 
 
@@ -1575,8 +1707,14 @@ def check_rule_F3(bs_df, pl_df):
 # MAIN RULE EXECUTION
 # ============================================================================
 
-def run_all_variance_rules(bs_df, pl_df):
-    """Run all 22 variance analysis rules"""
+def run_all_variance_rules(bs_df, pl_df, bs_df_full=None):
+    """Run all 22 variance analysis rules
+
+    Args:
+        bs_df: Entity-specific BS data
+        pl_df: Entity-specific PL data
+        bs_df_full: Full BS data (not split by entity) for D1 balance check
+    """
     all_flags = []
 
     # Critical Rules (🔴)
@@ -1586,7 +1724,8 @@ def run_all_variance_rules(bs_df, pl_df):
     all_flags.extend(check_rule_A4(bs_df, pl_df))
     all_flags.extend(check_rule_A5(bs_df, pl_df))
     all_flags.extend(check_rule_A7(bs_df, pl_df))
-    all_flags.extend(check_rule_D1(bs_df, pl_df))
+    # D1 uses full BS dataframe if available (for file-level balance check)
+    all_flags.extend(check_rule_D1(bs_df_full if bs_df_full is not None and not bs_df_full.empty else bs_df, pl_df))
     all_flags.extend(check_rule_E1(bs_df, pl_df))
 
     # Review Rules (🟡)
@@ -1828,10 +1967,12 @@ def process_variance_analysis(files: List[Tuple[str, bytes]]) -> bytes:
             file_obj.seek(0)
             temp_wb = load_workbook(file_obj, read_only=True, data_only=True)
 
-            bs_patterns = ["BS Breakdown", "BS breakdown", "bs breakdown", "Balance Sheet",
-                           "BS", "balance sheet breakdown", "BẢNG CÂN ĐỐI KẾ TOÁN"]
-            pl_patterns = ["PL Breakdown", "PL breakdown", "pl breakdown", "P&L", "P/L",
-                           "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH"]
+            # IMPORTANT: Include both "BS Breakdown" (with space) and "BSbreakdown" (no space)
+            # Priority: Try breakdown sheets first, then standalone sheets
+            bs_patterns = ["BS Breakdown", "BSbreakdown", "BS breakdown", "bs breakdown",
+                           "balance sheet breakdown", "BẢNG CÂN ĐỐI KẾ TOÁN", "Balance Sheet", "BS"]
+            pl_patterns = ["PL Breakdown", "PLBreakdown", "PL breakdown", "pl breakdown",
+                           "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH", "P&L", "P/L", "PL"]
 
             bs_sheet_name = find_sheet_by_pattern(temp_wb, bs_patterns)
             pl_sheet_name = find_sheet_by_pattern(temp_wb, pl_patterns)
@@ -1858,8 +1999,15 @@ def process_variance_analysis(files: List[Tuple[str, bytes]]) -> bytes:
                 print(f"Warning: No data could be extracted from {filename}")
                 continue
 
-            # Run variance rules
-            flags = run_all_variance_rules(bs_df, pl_df)
+            # For D1 balance check, we need the FULL BS sheet (not split by entity)
+            # because balance sheets should balance at the file level
+            bs_df_full = pd.DataFrame()
+            if bs_sheet_name:
+                file_obj.seek(0)
+                bs_df_full, _ = process_financial_tab(file_obj, bs_sheet_name, "BS", "ALL_ENTITIES")
+
+            # Run variance rules (pass both entity-specific and full BS dataframes)
+            flags = run_all_variance_rules(bs_df, pl_df, bs_df_full)
 
             # Add filename to each flag for identification
             for flag in flags:
