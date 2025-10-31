@@ -254,9 +254,15 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
         # Find Account Line column
         account_line_col = None
         for i, h in enumerate(headers_lower):
+            # More flexible matching for Account Line variations
             if any(keyword in h for keyword in ['account line', 'account name', 'description', 'tên tk', 'diễn giải']):
                 account_line_col = i
                 print(f"DEBUG: Found 'Account Line' at column {i}: '{headers[i]}'")
+                break
+            # Also check for patterns like "Account (Line): Mã số - Code"
+            if 'account' in h and ('line' in h or 'mã số' in h or 'code' in h):
+                account_line_col = i
+                print(f"DEBUG: Found 'Account Line' (pattern match) at column {i}: '{headers[i]}'")
                 break
 
         if account_line_col is None:
@@ -790,16 +796,17 @@ def check_rule_D1(bs_df, pl_df):
     # Create a copy to avoid SettingWithCopyWarning
     bs_df_copy = bs_df.copy()
 
-    # CRITICAL FIX: Use 'Account Code' NOT 'Account Line' for categorization!
-    # Account Line contains simplified codes (111, 232, etc.)
-    # Account Code contains full codes (112121132, 214710001, etc.)
-    bs_df_copy['Account_Code_Str'] = bs_df_copy['Account Code'].astype(str)
-    bs_df_copy['First_Digit'] = bs_df_copy['Account_Code_Str'].str[0]
+    # CRITICAL: Use 'Account Line' for categorization!
+    # Account Line contains simplified codes (111, 211, 331, 411) - these are the category codes
+    # Account Code contains full account codes (112121132, 214710001, etc.) - these are specific accounts
+    # We need to categorize by the first digit of Account Line, NOT Account Code
+    bs_df_copy['Account_Line_Str'] = bs_df_copy['Account Line'].astype(str)
+    bs_df_copy['First_Digit'] = bs_df_copy['Account_Line_Str'].str[0]
 
-    type_1 = bs_df_copy[bs_df_copy['First_Digit'] == '1']  # Assets
-    type_2 = bs_df_copy[bs_df_copy['First_Digit'] == '2']  # Liabilities
-    type_3 = bs_df_copy[bs_df_copy['First_Digit'] == '3']  # Contra-Liabilities
-    type_4 = bs_df_copy[bs_df_copy['First_Digit'] == '4']  # Equity
+    type_1 = bs_df_copy[bs_df_copy['First_Digit'] == '1']  # Assets (1xx)
+    type_2 = bs_df_copy[bs_df_copy['First_Digit'] == '2']  # Liabilities (2xx)
+    type_3 = bs_df_copy[bs_df_copy['First_Digit'] == '3']  # Contra-Liabilities (3xx)
+    type_4 = bs_df_copy[bs_df_copy['First_Digit'] == '4']  # Equity (4xx)
 
     for month in month_cols:
         total_1 = type_1[month].sum() if not type_1.empty else 0
@@ -1871,12 +1878,37 @@ def process_variance_analysis(files: List[Tuple[str, bytes]]) -> bytes:
             combined_flags.extend(flags)
 
         except Exception as e:
-            print(f"Error processing file {filename}: {e}")
+            error_msg = str(e)
+            print(f"❌ Error processing file '{filename}': {error_msg}")
+
+            # Provide user-friendly error messages based on error type
+            if "find sheet" in error_msg.lower() or "sheet" in error_msg.lower():
+                user_friendly_error = f"❌ File '{filename}': Missing required sheets. Please ensure your file contains both 'BS Breakdown' and 'PL Breakdown' sheets (case-insensitive)."
+            elif "header" in error_msg.lower() or "financial row" in error_msg.lower():
+                user_friendly_error = f"❌ File '{filename}': Could not find header row with 'Financial Row' or 'Account Code'. Please check the file structure."
+            elif "month" in error_msg.lower() or "period" in error_msg.lower():
+                user_friendly_error = f"❌ File '{filename}': Could not detect month columns. Please ensure month headers are in format 'Jan 2025', 'Feb 2025', etc."
+            elif "empty" in error_msg.lower():
+                user_friendly_error = f"❌ File '{filename}': The file contains no data after the header rows. Please ensure your sheets have financial data."
+            elif "account" in error_msg.lower():
+                user_friendly_error = f"❌ File '{filename}': Could not find 'Account Code' or 'Account Line' columns. Please check your file format."
+            else:
+                user_friendly_error = f"❌ File '{filename}': {error_msg}"
+
+            print(user_friendly_error)
+
             # Continue with next file instead of failing completely
             continue
 
     if not all_file_data:
-        raise ValueError("No data could be extracted from any of the provided files")
+        raise ValueError(
+            "❌ Could not process any files. Please check that:\n"
+            "  • Files are valid Excel files (.xlsx or .xls)\n"
+            "  • Files contain 'BS Breakdown' and 'PL Breakdown' sheets\n"
+            "  • Sheets have headers with 'Financial Row' or 'Account Code'\n"
+            "  • Month columns are in format 'Jan 2025', 'Feb 2025', etc.\n"
+            "  • Files contain financial data below the headers"
+        )
 
     # Create output Excel with all data
     xlsx_bytes = create_excel_output(all_file_data, combined_flags)
