@@ -346,68 +346,32 @@ class LLMFinancialAnalyzer:
 
         try:
             print(f"\n📋 STEP 1: Loading Raw Excel Sheets")
-            # Get all sheet names and let AI decide which are BS and PL
+            # Get all sheet names and use fuzzy matching
             print(f"   🔄 Reading Excel file structure...")
             excel_file = pd.ExcelFile(io.BytesIO(excel_bytes))
             sheet_names = excel_file.sheet_names
             print(f"   📋 Found {len(sheet_names)} sheets: {sheet_names}")
 
-            # Read all sheets and let AI identify BS and PL from content
-            print(f"   🔄 Reading all sheets for AI analysis...")
-            all_sheets_csv = {}
-            for sheet_name in sheet_names:
-                try:
-                    sheet_df = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=sheet_name, header=None, dtype=str)
-                    # Only include sheets with substantial data (at least 10 rows)
-                    if len(sheet_df) >= 10:
-                        sheet_csv = sheet_df.dropna(how='all').dropna(axis=1, how='all').to_csv(index=False, header=True, quoting=1, float_format='%.0f')
-                        # Limit to first 200 rows for sheet detection (save tokens)
-                        preview_df = sheet_df.head(200)
-                        sheet_csv_preview = preview_df.dropna(how='all').dropna(axis=1, how='all').to_csv(index=False, header=True, quoting=1, float_format='%.0f')
-                        all_sheets_csv[sheet_name] = (sheet_csv, sheet_csv_preview)
-                        print(f"      • '{sheet_name}': {len(sheet_df)} rows")
-                except Exception as e:
-                    print(f"      ⚠️  Could not read sheet '{sheet_name}': {e}")
+            # Use fuzzy matching to identify BS and PL sheets (no AI needed!)
+            print(f"   🔍 Using fuzzy matching to identify BS and PL sheets...")
+            bs_sheet = self._find_sheet_fuzzy(sheet_names, is_balance_sheet=True)
+            pl_sheet = self._find_sheet_fuzzy(sheet_names, is_balance_sheet=False)
 
-            if not all_sheets_csv:
-                raise ValueError(f"No readable sheets with data found in Excel file")
-
-            # Use AI to identify which sheets are BS and PL
-            print(f"   🤖 Using AI to identify BS and PL sheets...")
-            sheet_detection_prompt = self._create_sheet_detection_prompt(all_sheets_csv, subsidiary, filename)
-            sheet_detection_response = self._call_openai(
-                system_prompt=self._get_sheet_detection_system_prompt(),
-                user_prompt=sheet_detection_prompt
-            )
-
-            # Parse AI response to get sheet names
-            import json
-            detection_text = sheet_detection_response['message']['content']
-            if detection_text.startswith('```json'):
-                detection_text = detection_text[7:-3].strip()
-            elif detection_text.startswith('```'):
-                detection_text = detection_text[3:-3].strip()
-
-            sheet_mapping = json.loads(detection_text)
-            bs_sheet = sheet_mapping.get('bs_sheet')
-            pl_sheet = sheet_mapping.get('pl_sheet')
-
-            print(f"   ✅ AI identified sheets:")
+            print(f"   ✅ Fuzzy matching identified sheets:")
             print(f"      • BS Sheet: '{bs_sheet}'")
             print(f"      • PL Sheet: '{pl_sheet}'")
 
             if not bs_sheet or not pl_sheet:
-                raise ValueError(f"AI could not identify BS and PL sheets from: {list(all_sheets_csv.keys())}")
+                raise ValueError(f"Could not identify BS and PL sheets from: {sheet_names}. Please ensure sheets contain 'BS' or 'Balance' and 'PL' or 'Profit' in their names.")
 
-            # Use the full CSV data (not just preview) from identified sheets
-            bs_csv = all_sheets_csv[bs_sheet][0]
-            pl_csv = all_sheets_csv[pl_sheet][0]
-
-            # For logging, create simplified DataFrames
+            # Now read the identified sheets
+            print(f"   🔄 Reading BS sheet: '{bs_sheet}'...")
             bs_raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=bs_sheet, header=None, dtype=str)
+            print(f"   ✅ BS sheet loaded: {len(bs_raw)} rows, {len(bs_raw.columns)} columns")
+
+            print(f"   🔄 Reading PL sheet: '{pl_sheet}'...")
             pl_raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=pl_sheet, header=None, dtype=str)
-            print(f"   ✅ BS sheet '{bs_sheet}': {len(bs_raw)} rows, {len(bs_raw.columns)} columns")
-            print(f"   ✅ PL sheet '{pl_sheet}': {len(pl_raw)} rows, {len(pl_raw.columns)} columns")
+            print(f"   ✅ PL sheet loaded: {len(pl_raw)} rows, {len(pl_raw.columns)} columns")
 
             print(f"\n📝 STEP 2: Converting to CSV for AI Analysis")
             print(f"   🔄 Converting raw Excel data to CSV format...")
@@ -960,39 +924,35 @@ class LLMFinancialAnalyzer:
         return variances
 
     def _get_sheet_detection_system_prompt(self) -> str:
-        """System prompt for detecting which sheets are BS and PL."""
-        return """You are a financial document analyzer. Your job is to identify which Excel sheets contain Balance Sheet data and which contain Profit & Loss (Income Statement) data.
+        """System prompt for detecting which sheets are BS and PL based on sheet names only."""
+        return """You are a financial document analyzer. Your job is to identify which Excel sheets contain Balance Sheet data and which contain Profit & Loss (Income Statement) data based ONLY on the sheet names.
 
 🎯 YOUR TASK:
-Analyze the sheet previews and identify:
-- Which sheet contains Balance Sheet / Statement of Financial Position data
-- Which sheet contains Profit & Loss / Income Statement data
+Analyze the sheet names and identify:
+- Which sheet likely contains Balance Sheet / Statement of Financial Position data
+- Which sheet likely contains Profit & Loss / Income Statement data
 
-📊 IDENTIFICATION CLUES:
+📊 IDENTIFICATION CLUES FROM SHEET NAMES:
 
-**Balance Sheet typically contains:**
-- Assets (1xx accounts): Cash, Receivables, Fixed Assets, Investment Property
-- Liabilities (2xx/3xx accounts): Payables, Loans, Accrued Expenses
-- Equity (4xx accounts): Share Capital, Retained Earnings
-- Account codes starting with 1, 2, 3, 4
-- Terms: "Assets", "Liabilities", "Equity", "Balance", "Financial Position"
+**Balance Sheet / Statement of Financial Position:**
+- Sheet names containing: "BS", "Balance", "Financial Position", "Statement of Financial Position", "Assets", "Liabilities", "Equity"
+- Common patterns: "BS Breakdown", "Balance Sheet", "SOFP", "Statement of FP"
+- Languages: English, Vietnamese (e.g., "Bảng cân đối", "BCĐKT")
 
-**Profit & Loss typically contains:**
-- Revenue (5xx accounts): Sales Revenue, Service Revenue, Interest Income
-- Expenses (6xx accounts): COGS, Depreciation, Selling Expenses, Admin Expenses
-- Account codes starting with 5, 6
-- Terms: "Revenue", "Income", "Expenses", "Profit", "Loss", "P&L"
+**Profit & Loss / Income Statement:**
+- Sheet names containing: "PL", "P&L", "Profit", "Loss", "Income", "Revenue", "Expenses"
+- Common patterns: "PL Breakdown", "Profit & Loss", "Income Statement", "P&L"
+- Languages: English, Vietnamese (e.g., "Báo cáo kết quả", "KQKD")
 
 📋 REQUIRED OUTPUT FORMAT:
-Return ONLY valid JSON:
+Return ONLY valid JSON with EXACT sheet names from the provided list:
 
 {
-  "bs_sheet": "Sheet1",
-  "pl_sheet": "Sheet2",
-  "confidence": "high"
+  "bs_sheet": "exact_sheet_name_here",
+  "pl_sheet": "exact_sheet_name_here"
 }
 
-Use the EXACT sheet names as provided in the input."""
+⚠️ IMPORTANT: Use the EXACT sheet names as provided in the input list. Do not modify or create new names."""
 
     def _create_sheet_detection_prompt(self, all_sheets_csv, subsidiary, filename):
         """Create prompt for AI to detect which sheets are BS and PL."""
@@ -1018,6 +978,69 @@ Identify which sheet is the Balance Sheet and which is the Profit & Loss.
 Return JSON with exact sheet names.""")
 
         return "".join(prompt_parts)
+
+    def _find_sheet_fuzzy(self, sheet_names, is_balance_sheet=True):
+        """
+        Find sheet name using fuzzy matching (no AI needed).
+        Handles variations like:
+        - "BS Breakdown", "BS breakdown", "BSbreakdown", "bs breakdown"
+        - "PL Breakdown", "PL breakdown", "PLbreakdown", "pl breakdown"
+        - "Balance Sheet", "BẢNG CÂN ĐỐI KẾ TOÁN"
+        - "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH"
+        """
+        from difflib import SequenceMatcher
+
+        if is_balance_sheet:
+            # BS sheet patterns (priority order)
+            patterns = [
+                "bs breakdown", "bs_breakdown", "bsbreakdown",
+                "balance sheet breakdown", "balance_sheet",
+                "balance sheet", "bs", "bảng cân đối kế toán"
+            ]
+        else:
+            # PL sheet patterns (priority order)
+            patterns = [
+                "pl breakdown", "pl_breakdown", "plbreakdown",
+                "profit loss breakdown", "profit_loss",
+                "profit loss", "income statement", "p&l", "p/l", "pl",
+                "báo cáo kết quả kinh doanh"
+            ]
+
+        # Normalize sheet names for comparison
+        sheet_names_lower = {name.lower().replace(' ', '').replace('_', ''): name for name in sheet_names}
+
+        # Try exact matches first (ignoring case, spaces, underscores)
+        for pattern in patterns:
+            pattern_normalized = pattern.lower().replace(' ', '').replace('_', '')
+            for normalized, original in sheet_names_lower.items():
+                if pattern_normalized == normalized:
+                    return original
+
+        # Try contains match
+        for pattern in patterns:
+            pattern_normalized = pattern.lower().replace(' ', '').replace('_', '')
+            for normalized, original in sheet_names_lower.items():
+                if pattern_normalized in normalized or normalized in pattern_normalized:
+                    return original
+
+        # Try fuzzy matching with threshold
+        best_match = None
+        best_score = 0.0
+        threshold = 0.6  # 60% similarity required
+
+        for pattern in patterns:
+            pattern_normalized = pattern.lower().replace(' ', '').replace('_', '')
+            for normalized, original in sheet_names_lower.items():
+                score = SequenceMatcher(None, pattern_normalized, normalized).ratio()
+                if score > best_score and score >= threshold:
+                    best_score = score
+                    best_match = original
+
+        if best_match:
+            print(f"      ℹ️  Fuzzy matched '{best_match}' (score: {best_score:.2f})")
+            return best_match
+
+        return None
 
     def _filter_relevant_accounts(self, df, is_balance_sheet=True):
         """
@@ -1475,47 +1498,47 @@ Analyze the raw CSV data and identify variances based on the 22 rules below. For
 🔴 CRITICAL RULES (Priority: Critical)
 ═══════════════════════════════════════════════════════════════
 
-**A1 - Asset capitalized but depreciation not started**
+**A1 - Asset capitalized but depreciation not started** [SEVERITY: Critical]
 - Accounts: 217xxx (Investment Property) ↔ 632100001/632100002 (D&A)
 - Logic: IF Investment Property (217xxx) increased BUT Depreciation/Amortization (ONLY 632100001 or 632100002) did NOT increase
 - Flag Trigger: IP↑ BUT D&A ≤ previous
 - Note: Use ONLY accounts 632100001 (Amortization) and 632100002 (Depreciation), NOT all 632xxx
 
-**A2 - Loan drawdown but interest not recorded**
+**A2 - Loan drawdown but interest not recorded** [SEVERITY: Critical]
 - Accounts: 341xxx (Loans) ↔ 635xxx (Interest Expense) + 241xxx (CIP Interest)
 - Logic: IF Loans (341xxx) increased BUT day-adjusted Interest Expense (635xxx + 241xxx) did NOT increase
 - Flag Trigger: Loan↑ BUT Day-adjusted Interest ≤ previous
 - Note: Normalize interest by calendar days (Feb=28/30, Jan=31/30, etc.)
 
-**A3 - Capex incurred but VAT not recorded**
+**A3 - Capex incurred but VAT not recorded** [SEVERITY: Critical]
 - Accounts: 217xxx/241xxx (IP/CIP) ↔ 133xxx (VAT Input)
 - Logic: IF Investment Property OR CIP increased BUT VAT Input (133xxx) did NOT increase
 - Flag Trigger: Assets↑ BUT VAT input ≤ previous
 
-**A4 - Cash movement disconnected from interest**
+**A4 - Cash movement disconnected from interest** [SEVERITY: Critical]
 - Accounts: 111xxx/112xxx (Cash) ↔ 515xxx (Interest Income)
 - Logic: IF Cash increased BUT day-adjusted Interest Income decreased OR Cash decreased BUT Interest Income increased
 - Flag Trigger: Cash↑ BUT Interest↓ OR Cash↓ BUT Interest↑
 - Note: Normalize interest by calendar days
 
-**A5 - Lease termination but broker asset not written off**
+**A5 - Lease termination but broker asset not written off** [SEVERITY: Critical]
 - Accounts: 511xxx (Revenue) ↔ 242xxx (Broker Assets) ↔ 641xxx (Selling Expense)
 - Logic: IF Revenue ≤ 0 BUT Broker Assets (242xxx) unchanged AND Selling Expense (641xxx) unchanged
 - Flag Trigger: Revenue ≤ 0 BUT 242 unchanged AND 641 unchanged
 
-**A7 - Asset disposal but accumulated depreciation not written off**
+**A7 - Asset disposal but accumulated depreciation not written off** [SEVERITY: Critical]
 - Accounts: 217xxx (IP Cost) ↔ 217xxx (IP Accumulated Depreciation)
 - Logic: IF IP Cost decreased BUT Accumulated Depreciation did NOT decrease
 - Flag Trigger: IP cost↓ BUT Accumulated depreciation unchanged
 - Note: Filter by Account Name containing "cost" vs "accum" or "depreciation"
 
-**D1 - Balance sheet imbalance**
+**D1 - Balance sheet imbalance** [SEVERITY: Critical]
 - Accounts: Total Assets vs Total Liabilities+Equity
 - Logic: Check Balance Sheet equation: Total Assets = Total Liabilities + Equity
 - Flag Trigger: Total Assets ≠ Total Liabilities+Equity (tolerance: 100M VND)
 - Method: Use total rows "TỔNG CỘNG TÀI SẢN" and "TỔNG CỘNG NGUỒN VỐN" directly
 
-**E1 - Negative Net Book Value (NBV)**
+**E1 - Negative Net Book Value (NBV)** [SEVERITY: Critical]
 - Accounts: Account Lines 222/223, 228/229, 231/232
 - Logic: Check NBV = Cost + Accumulated Depreciation (accum dep is negative) > 0
 - Flag Trigger: NBV < 0 for any asset class
@@ -1525,22 +1548,22 @@ Analyze the raw CSV data and identify variances based on the 22 rules below. For
 🟡 REVIEW RULES (Priority: Review)
 ═══════════════════════════════════════════════════════════════
 
-**B1 - Rental revenue volatility**
+**B1 - Rental revenue volatility** [SEVERITY: Review]
 - Accounts: 511710001 (Rental Revenue)
 - Logic: IF current month rental revenue deviates > 2σ from 6-month average
 - Flag Trigger: abs(Current - Avg) > 2σ
 
-**B2 - Depreciation changes without asset movement**
+**B2 - Depreciation changes without asset movement** [SEVERITY: Review]
 - Accounts: 632100002 (Depreciation) + 217xxx (IP)
 - Logic: IF Depreciation deviates > 2σ from 6-month average BUT IP unchanged
 - Flag Trigger: Depreciation deviates > 2σ AND IP unchanged
 
-**B3 - Amortization changes**
+**B3 - Amortization changes** [SEVERITY: Review]
 - Accounts: 632100001 (Amortization)
 - Logic: IF Amortization deviates > 2σ from 6-month average
 - Flag Trigger: abs(Current - Avg) > 2σ
 
-**C1 - Gross margin by revenue stream**
+**C1 - Gross margin by revenue stream** [SEVERITY: Review]
 - Revenue Streams:
   * Utilities: 511800001 ↔ 632100011
   * Service Charges: 511600001/511600005 ↔ 632100008/632100015
@@ -1549,57 +1572,57 @@ Analyze the raw CSV data and identify variances based on the 22 rules below. For
 - Flag Trigger: GM% change > 2σ
 - Note: IGNORE rental/leasing revenue vs depreciation
 
-**C2 - Unbilled reimbursable expenses**
+**C2 - Unbilled reimbursable expenses** [SEVERITY: Review]
 - Accounts: 641xxx/632xxx (Reimbursable COGS) ↔ 511xxx (Revenue)
 - Logic: IF Reimbursable COGS increased BUT Revenue did NOT increase
 - Flag Trigger: Reimbursable COGS↑ BUT Revenue unchanged
 
-**D2 - Retained earnings reconciliation break**
+**D2 - Retained earnings reconciliation break** [SEVERITY: Review]
 - Accounts: Account Line 421/4211 (Retained Earnings) ↔ P&L components
 - Logic: Opening RE + Net Income ≠ Closing RE (tolerance: 1M VND)
 - Flag Trigger: |Calculated RE - Actual RE| > 1M VND
 - Formula: Closing RE = Opening RE + Net Income (from P&L lines 1,11,21,22,23,25,26,31,32,51,52)
 
 ═══════════════════════════════════════════════════════════════
-🔵 WATCH RULES (Priority: Watch)
+🟢 WATCH RULES (Priority: Info)
 ═══════════════════════════════════════════════════════════════
 
-**E2 - Revenue vs selling expense disconnect**
+**E2 - Revenue vs selling expense disconnect** [SEVERITY: Info]
 - Accounts: 511xxx (Revenue) ↔ 641xxx (Selling Expenses)
 - Logic: IF Revenue changed significantly BUT Selling Expense (641) unchanged
 - Flag Trigger: Revenue moves > 10% BUT 641 relatively flat
 
-**E3 - Revenue vs Advance Revenue (prepayments)**
+**E3 - Revenue vs Advance Revenue (prepayments)** [SEVERITY: Info]
 - Accounts: 511xxx (Revenue) ↔ 131xxx (A/R) ↔ 3387 (Unearned Revenue/Advances)
 - Logic: Monitor relationship between revenue recognition and advance payments
 - Flag Trigger: Unusual patterns in advance revenue movements
 
-**E4 - Monthly recurring charges**
+**E4 - Monthly recurring charges** [SEVERITY: Info]
 - Accounts: 511 (Total Revenue) vs specific recurring revenue streams
 - Logic: Check if recurring revenue streams remain stable month-over-month
 - Flag Trigger: Unexpected drops or spikes in normally recurring items
 
-**E5 - One-off revenue items**
+**E5 - One-off revenue items** [SEVERITY: Info]
 - Accounts: Non-recurring revenue accounts
 - Logic: Identify and highlight one-time revenue items
 - Flag Trigger: Unusual account activity that appears non-recurring
 
-**E6 - General & admin expense volatility (642xxx)**
+**E6 - General & admin expense volatility (642xxx)** [SEVERITY: Info]
 - Accounts: 642xxx (G&A Expenses)
 - Logic: IF G&A expenses deviate significantly from baseline
 - Flag Trigger: Unusual volatility in administrative costs
 
-**F1 - Operating expense volatility (641xxx excluding 641100xxx)**
+**F1 - Operating expense volatility (641xxx excluding 641100xxx)** [SEVERITY: Info]
 - Accounts: 641xxx (Operating Expenses), excluding 641100xxx
 - Logic: IF Operating expenses (excl. commissions) show unusual patterns
 - Flag Trigger: Significant deviation from baseline
 
-**F2 - Broker commission volatility (641100xxx)**
+**F2 - Broker commission volatility (641100xxx)** [SEVERITY: Info]
 - Accounts: 641100xxx (Broker Commissions) ↔ 511xxx (Revenue)
 - Logic: Check if commission expense scales appropriately with revenue
 - Flag Trigger: Commission % of revenue changes significantly
 
-**F3 - Personnel cost volatility (642100xxx)**
+**F3 - Personnel cost volatility (642100xxx)** [SEVERITY: Info]
 - Accounts: 642100xxx (Personnel Costs)
 - Logic: IF Personnel costs deviate from baseline (excluding known hiring/layoffs)
 - Flag Trigger: Unexpected changes in headcount-related expenses
