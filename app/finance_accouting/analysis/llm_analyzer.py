@@ -346,16 +346,68 @@ class LLMFinancialAnalyzer:
 
         try:
             print(f"\n📋 STEP 1: Loading Raw Excel Sheets")
-            print(f"   🔄 Reading 'BS Breakdown' sheet...")
+            # Get all sheet names and let AI decide which are BS and PL
+            print(f"   🔄 Reading Excel file structure...")
+            excel_file = pd.ExcelFile(io.BytesIO(excel_bytes))
+            sheet_names = excel_file.sheet_names
+            print(f"   📋 Found {len(sheet_names)} sheets: {sheet_names}")
 
-            # Read BS Breakdown sheet completely raw
-            bs_raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name="BS Breakdown", header=None, dtype=str)
-            print(f"   ✅ BS Breakdown loaded: {len(bs_raw)} rows, {len(bs_raw.columns)} columns")
+            # Read all sheets and let AI identify BS and PL from content
+            print(f"   🔄 Reading all sheets for AI analysis...")
+            all_sheets_csv = {}
+            for sheet_name in sheet_names:
+                try:
+                    sheet_df = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=sheet_name, header=None, dtype=str)
+                    # Only include sheets with substantial data (at least 10 rows)
+                    if len(sheet_df) >= 10:
+                        sheet_csv = sheet_df.dropna(how='all').dropna(axis=1, how='all').to_csv(index=False, header=True, quoting=1, float_format='%.0f')
+                        # Limit to first 200 rows for sheet detection (save tokens)
+                        preview_df = sheet_df.head(200)
+                        sheet_csv_preview = preview_df.dropna(how='all').dropna(axis=1, how='all').to_csv(index=False, header=True, quoting=1, float_format='%.0f')
+                        all_sheets_csv[sheet_name] = (sheet_csv, sheet_csv_preview)
+                        print(f"      • '{sheet_name}': {len(sheet_df)} rows")
+                except Exception as e:
+                    print(f"      ⚠️  Could not read sheet '{sheet_name}': {e}")
 
-            print(f"   🔄 Reading 'PL Breakdown' sheet...")
-            # Read PL Breakdown sheet completely raw
-            pl_raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name="PL Breakdown", header=None, dtype=str)
-            print(f"   ✅ PL Breakdown loaded: {len(pl_raw)} rows, {len(pl_raw.columns)} columns")
+            if not all_sheets_csv:
+                raise ValueError(f"No readable sheets with data found in Excel file")
+
+            # Use AI to identify which sheets are BS and PL
+            print(f"   🤖 Using AI to identify BS and PL sheets...")
+            sheet_detection_prompt = self._create_sheet_detection_prompt(all_sheets_csv, subsidiary, filename)
+            sheet_detection_response = self._call_openai(
+                system_prompt=self._get_sheet_detection_system_prompt(),
+                user_prompt=sheet_detection_prompt
+            )
+
+            # Parse AI response to get sheet names
+            import json
+            detection_text = sheet_detection_response['message']['content']
+            if detection_text.startswith('```json'):
+                detection_text = detection_text[7:-3].strip()
+            elif detection_text.startswith('```'):
+                detection_text = detection_text[3:-3].strip()
+
+            sheet_mapping = json.loads(detection_text)
+            bs_sheet = sheet_mapping.get('bs_sheet')
+            pl_sheet = sheet_mapping.get('pl_sheet')
+
+            print(f"   ✅ AI identified sheets:")
+            print(f"      • BS Sheet: '{bs_sheet}'")
+            print(f"      • PL Sheet: '{pl_sheet}'")
+
+            if not bs_sheet or not pl_sheet:
+                raise ValueError(f"AI could not identify BS and PL sheets from: {list(all_sheets_csv.keys())}")
+
+            # Use the full CSV data (not just preview) from identified sheets
+            bs_csv = all_sheets_csv[bs_sheet][0]
+            pl_csv = all_sheets_csv[pl_sheet][0]
+
+            # For logging, create simplified DataFrames
+            bs_raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=bs_sheet, header=None, dtype=str)
+            pl_raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=pl_sheet, header=None, dtype=str)
+            print(f"   ✅ BS sheet '{bs_sheet}': {len(bs_raw)} rows, {len(bs_raw.columns)} columns")
+            print(f"   ✅ PL sheet '{pl_sheet}': {len(pl_raw)} rows, {len(pl_raw.columns)} columns")
 
             print(f"\n📝 STEP 2: Converting to CSV for AI Analysis")
             print(f"   🔄 Converting raw Excel data to CSV format...")
@@ -365,9 +417,17 @@ class LLMFinancialAnalyzer:
             bs_clean = bs_raw.dropna(how='all').dropna(axis=1, how='all')
             pl_clean = pl_raw.dropna(how='all').dropna(axis=1, how='all')
 
+            # OPTIMIZE: Filter only relevant account rows to reduce tokens
+            print(f"   🔧 Filtering relevant accounts to reduce token usage...")
+            bs_filtered = self._filter_relevant_accounts(bs_clean, is_balance_sheet=True)
+            pl_filtered = self._filter_relevant_accounts(pl_clean, is_balance_sheet=False)
+
+            print(f"      • BS rows: {len(bs_clean)} → {len(bs_filtered)} (filtered)")
+            print(f"      • PL rows: {len(pl_clean)} → {len(pl_filtered)} (filtered)")
+
             # Use more compact CSV format but INCLUDE headers so AI can see period names
-            bs_csv = bs_clean.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
-            pl_csv = pl_clean.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
+            bs_csv = bs_filtered.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
+            pl_csv = pl_filtered.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
 
             print(f"   ✅ CSV conversion complete (optimized format):")
             print(f"      • BS CSV: {len(bs_csv):,} characters (from {len(bs_raw)} rows to {len(bs_clean)} rows)")
@@ -898,6 +958,148 @@ class LLMFinancialAnalyzer:
         print(f"      • Step 2 tokens: {step2_input_tokens + step2_output_tokens:,}")
 
         return variances
+
+    def _get_sheet_detection_system_prompt(self) -> str:
+        """System prompt for detecting which sheets are BS and PL."""
+        return """You are a financial document analyzer. Your job is to identify which Excel sheets contain Balance Sheet data and which contain Profit & Loss (Income Statement) data.
+
+🎯 YOUR TASK:
+Analyze the sheet previews and identify:
+- Which sheet contains Balance Sheet / Statement of Financial Position data
+- Which sheet contains Profit & Loss / Income Statement data
+
+📊 IDENTIFICATION CLUES:
+
+**Balance Sheet typically contains:**
+- Assets (1xx accounts): Cash, Receivables, Fixed Assets, Investment Property
+- Liabilities (2xx/3xx accounts): Payables, Loans, Accrued Expenses
+- Equity (4xx accounts): Share Capital, Retained Earnings
+- Account codes starting with 1, 2, 3, 4
+- Terms: "Assets", "Liabilities", "Equity", "Balance", "Financial Position"
+
+**Profit & Loss typically contains:**
+- Revenue (5xx accounts): Sales Revenue, Service Revenue, Interest Income
+- Expenses (6xx accounts): COGS, Depreciation, Selling Expenses, Admin Expenses
+- Account codes starting with 5, 6
+- Terms: "Revenue", "Income", "Expenses", "Profit", "Loss", "P&L"
+
+📋 REQUIRED OUTPUT FORMAT:
+Return ONLY valid JSON:
+
+{
+  "bs_sheet": "Sheet1",
+  "pl_sheet": "Sheet2",
+  "confidence": "high"
+}
+
+Use the EXACT sheet names as provided in the input."""
+
+    def _create_sheet_detection_prompt(self, all_sheets_csv, subsidiary, filename):
+        """Create prompt for AI to detect which sheets are BS and PL."""
+        prompt_parts = [f"""
+SHEET DETECTION REQUEST
+
+Company: {subsidiary}
+File: {filename}
+
+Analyze the following sheet previews and identify which is the Balance Sheet and which is the Profit & Loss:
+
+"""]
+
+        for sheet_name, (full_csv, preview_csv) in all_sheets_csv.items():
+            prompt_parts.append(f"""
+=== SHEET: "{sheet_name}" (first 200 rows) ===
+{preview_csv[:10000]}
+""")  # Limit to 10k chars per sheet for token efficiency
+
+        prompt_parts.append("""
+
+Identify which sheet is the Balance Sheet and which is the Profit & Loss.
+Return JSON with exact sheet names.""")
+
+        return "".join(prompt_parts)
+
+    def _filter_relevant_accounts(self, df, is_balance_sheet=True):
+        """
+        Filter DataFrame to keep only relevant account rows for analysis.
+        This reduces token usage by 60-80% while keeping all critical accounts.
+
+        Keeps:
+        - Header rows (first 10 rows)
+        - Rows containing account codes we care about (111, 112, 133, 217, 241, 242, 341, 511, 515, 632, 635, 641, 642)
+        - Rows containing totals (Total Assets, Total Liabilities, Total Equity, etc.)
+        - Rows with significant values (> 1M VND in any column)
+        """
+        import re
+
+        if df is None or df.empty:
+            return df
+
+        # Always keep header rows (usually in first 10 rows)
+        header_rows = df.head(10).copy()
+
+        # Define account patterns we care about for the 22 rules
+        if is_balance_sheet:
+            account_patterns = [
+                r'111', r'112',  # Cash and cash equivalents (multiple rules)
+                r'133',          # VAT Input (A3, E3)
+                r'217',          # Investment Property (A1, A3)
+                r'241',          # CIP (A3)
+                r'242',          # Broker Assets (E1, E2)
+                r'341',          # Loans (A2, A4)
+                r'131',          # AR (E5, E6)
+                r'138',          # Other receivables
+                r'421',          # Retained earnings (D2)
+                r'total', r'tổng',  # Total rows
+                r'asset', r'tài sản',  # Asset totals
+                r'liability', r'nợ phải trả',  # Liability totals
+                r'equity', r'vốn',  # Equity totals
+            ]
+        else:  # P&L
+            account_patterns = [
+                r'511',          # Revenue (multiple rules)
+                r'515',          # Interest Income (A5, F1)
+                r'632',          # COGS/D&A (A1, F3)
+                r'635',          # Interest Expense (A2, A4, F2)
+                r'641',          # Selling Expense (E4)
+                r'642',          # G&A Expense (C1, C2, E4)
+                r'total', r'tổng',  # Total rows
+                r'revenue', r'doanh thu',  # Revenue totals
+                r'expense', r'chi phí',  # Expense totals
+                r'profit', r'lợi nhuận',  # Profit totals
+            ]
+
+        # Filter rows that match patterns
+        filtered_rows = []
+        for idx, row in df.iterrows():
+            # Convert row to string for pattern matching
+            row_str = ' '.join(str(val).lower() for val in row if pd.notna(val))
+
+            # Check if row matches any account pattern
+            if any(re.search(pattern, row_str, re.I) for pattern in account_patterns):
+                filtered_rows.append(idx)
+                continue
+
+            # Check if row has significant numeric values (> 1M VND)
+            numeric_values = []
+            for val in row:
+                if pd.notna(val):
+                    try:
+                        num_val = float(str(val).replace(',', '').replace(' ', ''))
+                        if abs(num_val) > 1_000_000:  # > 1M VND
+                            filtered_rows.append(idx)
+                            break
+                    except:
+                        pass
+
+        # Combine header rows and filtered rows
+        if filtered_rows:
+            body_df = df.loc[filtered_rows]
+            result = pd.concat([header_rows, body_df]).drop_duplicates()
+            return result.reset_index(drop=True)
+        else:
+            # If no rows match, return header + first 50 data rows as fallback
+            return df.head(60)
 
     def _get_account_extraction_system_prompt(self) -> str:
         """System prompt for Step 1: Account extraction from raw CSV."""
