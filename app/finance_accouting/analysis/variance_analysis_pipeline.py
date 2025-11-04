@@ -582,14 +582,26 @@ def get_month_cols(df):
 # ============================================================================
 
 def check_rule_A1(bs_df, pl_df):
-    """A1 - Asset capitalized but depreciation not started"""
+    """A1 - Asset capitalized but depreciation not started
+
+    Checks if Investment Property increased but depreciation/amortization did not increase.
+    Only looks at actual D&A accounts (632100001 amortization, 632100002 depreciation),
+    NOT the total 632xxx which includes other cost of goods sold items.
+    """
     flags = []
     if bs_df is None or pl_df is None or bs_df.empty or pl_df.empty:
         return flags
 
     ip_accounts = get_account_pattern_data(bs_df, '217xxx')
-    dep_accounts = get_account_pattern_data(pl_df, '632xxx')
-    if ip_accounts.empty or dep_accounts.empty:
+
+    # Get ONLY depreciation and amortization accounts, not all 632xxx
+    # 632100001 = Amortization (Land Use Rights)
+    # 632100002 = Depreciation (Buildings/Assets)
+    dep_amort_accounts = pl_df[
+        pl_df['Account Line'].astype(str).isin(['632100001', '632100002'])
+    ].copy()
+
+    if ip_accounts.empty or dep_amort_accounts.empty:
         return flags
 
     month_cols = get_month_cols(bs_df)
@@ -601,17 +613,20 @@ def check_rule_A1(bs_df, pl_df):
         curr_month = month_cols[i]
 
         ip_change = ip_accounts[curr_month].sum() - ip_accounts[prev_month].sum()
-        dep_change = dep_accounts[curr_month].sum() - dep_accounts[prev_month].sum()
+        dep_prev = dep_amort_accounts[prev_month].sum() if prev_month in dep_amort_accounts.columns else 0
+        dep_curr = dep_amort_accounts[curr_month].sum() if curr_month in dep_amort_accounts.columns else 0
+        dep_change = dep_curr - dep_prev
 
+        # Flag if IP increased but D&A did not increase
         if ip_change > 0 and dep_change <= 0:
             flags.append({
                 'Rule_ID': 'A1',
                 'Priority': '🔴 Critical',
                 'Issue': 'Asset capitalized but depreciation not started',
-                'Accounts': '217xxx ↔ 632xxx',
+                'Accounts': '217xxx ↔ 632100001/632100002',
                 'Period': f"{prev_month} → {curr_month}",
-                'Reason': f'IP increased by {ip_change:,.0f} VND but Depreciation changed by {dep_change:,.0f} VND',
-                'Flag_Trigger': 'IP↑ BUT Depreciation ≤ previous'
+                'Reason': f'IP increased by {ip_change:,.0f} VND but D&A changed by {dep_change:,.0f} VND',
+                'Flag_Trigger': 'IP↑ BUT D&A ≤ previous'
             })
     return flags
 
