@@ -228,8 +228,10 @@ class LLMFinancialAnalyzer:
     # ===========================
     # OpenAI API Methods
     # ===========================
-    def _call_openai(self, system_prompt: str, user_prompt: str) -> dict:
-        """Call OpenAI API."""
+    def _call_openai(self, system_prompt: str, user_prompt: str, retry_count: int = 0, max_retries: int = 3) -> dict:
+        """Call OpenAI API with retry logic for rate limits."""
+        import time
+
         try:
             total_chars = len(system_prompt) + len(user_prompt)
             estimated_tokens = total_chars // 4
@@ -247,7 +249,7 @@ class LLMFinancialAnalyzer:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=4000
+                max_tokens=16000  # Increased to handle large consolidation responses
             )
 
             print(f"   ✅ OpenAI API call completed successfully")
@@ -321,6 +323,33 @@ class LLMFinancialAnalyzer:
                     "cost": cost_info
                 }
         except Exception as e:
+            import time
+            from openai import RateLimitError
+
+            # Handle rate limit errors with retry logic
+            if isinstance(e, RateLimitError) and retry_count < max_retries:
+                # Extract wait time from error message
+                error_msg = str(e)
+                wait_time = 15  # Default wait time
+
+                # Try to parse suggested wait time from error message
+                if "Please try again in" in error_msg:
+                    try:
+                        # Extract seconds from "Please try again in 11.65s"
+                        import re
+                        match = re.search(r'try again in ([\d.]+)s', error_msg)
+                        if match:
+                            wait_time = float(match.group(1)) + 2  # Add 2 second buffer
+                    except:
+                        pass
+
+                print(f"   ⚠️  Rate limit hit. Waiting {wait_time:.1f}s before retry {retry_count + 1}/{max_retries}...")
+                time.sleep(wait_time)
+
+                # Recursive retry
+                return self._call_openai(system_prompt, user_prompt, retry_count + 1, max_retries)
+
+            # For non-rate-limit errors or exhausted retries, raise the error
             print(f"   ❌ OpenAI API call failed: {str(e)}")
             print(f"      • Error type: {type(e)}")
             import traceback
@@ -394,8 +423,11 @@ class LLMFinancialAnalyzer:
             pl_csv = pl_filtered.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
 
             print(f"   ✅ CSV conversion complete (optimized format):")
-            print(f"      • BS CSV: {len(bs_csv):,} characters (from {len(bs_raw)} rows to {len(bs_clean)} rows)")
-            print(f"      • PL CSV: {len(pl_csv):,} characters (from {len(pl_raw)} rows to {len(pl_clean)} rows)")
+            print(f"      • BS CSV: {len(bs_csv):,} characters (from {len(bs_raw)} rows to {len(bs_filtered)} filtered rows)")
+            print(f"      • PL CSV: {len(pl_csv):,} characters (from {len(pl_raw)} rows to {len(pl_filtered)} filtered rows)")
+            print(f"   📊 Sample of filtered BS accounts (first 5 non-header rows):")
+            for idx, row in bs_filtered.iloc[10:15].iterrows():
+                print(f"      Row {idx}: {list(row[:3])}...")
 
             # Debug: Show sample of CSV data
             print(f"   🔍 Debug: BS CSV sample (first 500 chars):")
@@ -413,13 +445,14 @@ class LLMFinancialAnalyzer:
             print(f"      • Estimated prompt length: {estimated_prompt_length:,} characters")
             print(f"      • Estimated input tokens: {estimated_tokens:,}")
 
-            # GPT-4o has 128k context window
-            # For 22-rule analysis, we use two-step AI process for large data
-            if estimated_tokens > 80000:  # Leave buffer for 128k limit
-                print(f"   ⚠️  Data large ({estimated_tokens:,} tokens), using two-step AI process...")
-                print(f"   📋 Step 1: AI will extract and group accounts from raw CSV")
-                print(f"   📋 Step 2: AI will apply 22 rules to grouped account data")
-                return self._analyze_with_two_step_process(bs_csv, pl_csv, subsidiary, filename, config)
+            # GPT-4o has 128k context window, but we have 30K TPM limit
+            # For 22-rule analysis, we use three-step AI process for large data
+            if estimated_tokens > 25000:  # Stay under 30K TPM limit
+                print(f"   ⚠️  Data large ({estimated_tokens:,} tokens), using three-step AI process...")
+                print(f"   📋 Step 1: AI will extract accounts from raw CSV in chunks (< 30K tokens each)")
+                print(f"   📋 Step 2: AI will consolidate and validate all extracted accounts")
+                print(f"   📋 Step 3: AI will apply 22 rules to validated account data")
+                return self._analyze_with_three_step_process(bs_csv, pl_csv, subsidiary, filename, config)
 
             prompt = self._create_raw_excel_prompt(bs_csv, pl_csv, subsidiary, filename, config)
             prompt_length = len(prompt)
@@ -789,137 +822,201 @@ class LLMFinancialAnalyzer:
                 "sheet_type": "Error"
             }]
 
-    def _analyze_with_two_step_process(self, bs_csv, pl_csv, subsidiary, filename, config):
+    def _analyze_with_three_step_process(self, bs_csv, pl_csv, subsidiary, filename, config):
         """
-        Two-step AI process for large datasets with any Excel format.
+        Three-step AI process for large datasets with chunking to handle 30K TPM limit.
 
-        STEP 1: AI extracts and groups accounts from raw CSV (format-agnostic)
-        STEP 2: AI applies 22 rules to the grouped account data
-        STEP 3: Python formats output consistently
+        STEP 1: AI extracts accounts from raw CSV in CHUNKS (each < 30K tokens)
+        STEP 2: AI consolidates and validates all extracted account groups
+        STEP 3: AI applies 22 rules to the validated grouped data
 
-        This works with ANY Excel format - no column name assumptions!
+        This works with ANY Excel format and stays under API rate limits!
         """
-        print(f"\n   🎯 TWO-STEP AI ANALYSIS PROCESS")
+        print(f"\n   🎯 THREE-STEP AI ANALYSIS PROCESS (with chunking)")
         print(f"   " + "="*70)
 
         # ============================================================
-        # STEP 1: AI ACCOUNT EXTRACTION & GROUPING
+        # STEP 1: CHUNKED ACCOUNT EXTRACTION
         # ============================================================
-        print(f"\n   📊 STEP 1: Account Extraction & Grouping")
+        print(f"\n   📊 STEP 1: Chunked Account Extraction (< 30K tokens per chunk)")
         print(f"   ─────────────────────────────────────────")
-        print(f"   🔄 Sending raw CSV to AI for account extraction...")
 
-        step1_prompt = self._create_account_extraction_prompt(bs_csv, pl_csv, subsidiary, filename)
+        # Split CSV into chunks (targeting 20K tokens per chunk, well under 30K limit)
+        bs_chunks = self._split_csv_into_chunks(bs_csv, max_tokens=20000)
+        pl_chunks = self._split_csv_into_chunks(pl_csv, max_tokens=20000)
 
-        try:
-            step1_response = self._call_openai(
+        print(f"   📦 Data split into {len(bs_chunks)} BS chunks + {len(pl_chunks)} PL chunks")
+
+        all_extracted_accounts = []
+        step1_total_tokens = 0
+
+        # Process BS chunks
+        for i, bs_chunk in enumerate(bs_chunks, 1):
+            print(f"   🔄 Processing BS chunk {i}/{len(bs_chunks)}...")
+            chunk_prompt = self._create_chunk_extraction_prompt(bs_chunk, "", subsidiary, filename, f"BS Chunk {i}")
+
+            chunk_response = self._call_openai(
                 system_prompt=self._get_account_extraction_system_prompt(),
-                user_prompt=step1_prompt
+                user_prompt=chunk_prompt
             )
 
-            if not step1_response or 'message' not in step1_response:
-                raise RuntimeError("Step 1 failed: No response from AI")
+            if chunk_response and 'message' in chunk_response:
+                extracted = self._parse_extraction_response(chunk_response['message']['content'])
+                all_extracted_accounts.extend(extracted.get('accounts', []))
+                step1_total_tokens += chunk_response.get('total_tokens', 0)
+                print(f"      ✅ Extracted {len(extracted.get('accounts', []))} accounts")
 
-            # Parse the grouped account data
-            import json
-            grouped_accounts_text = step1_response['message']['content']
+        # Process PL chunks
+        for i, pl_chunk in enumerate(pl_chunks, 1):
+            print(f"   🔄 Processing PL chunk {i}/{len(pl_chunks)}...")
+            chunk_prompt = self._create_chunk_extraction_prompt("", pl_chunk, subsidiary, filename, f"PL Chunk {i}")
 
-            # Clean and parse JSON
-            if grouped_accounts_text.startswith('```json'):
-                grouped_accounts_text = grouped_accounts_text[7:]
-            if grouped_accounts_text.endswith('```'):
-                grouped_accounts_text = grouped_accounts_text[:-3]
-            grouped_accounts_text = grouped_accounts_text.strip()
+            chunk_response = self._call_openai(
+                system_prompt=self._get_account_extraction_system_prompt(),
+                user_prompt=chunk_prompt
+            )
 
-            grouped_accounts = json.loads(grouped_accounts_text)
+            if chunk_response and 'message' in chunk_response:
+                extracted = self._parse_extraction_response(chunk_response['message']['content'])
+                all_extracted_accounts.extend(extracted.get('accounts', []))
+                step1_total_tokens += chunk_response.get('total_tokens', 0)
+                print(f"      ✅ Extracted {len(extracted.get('accounts', []))} accounts")
 
-            print(f"   ✅ Step 1 complete: Accounts extracted and grouped")
-            print(f"      • BS accounts found: {len(grouped_accounts.get('bs_accounts', {}))}")
-            print(f"      • PL accounts found: {len(grouped_accounts.get('pl_accounts', {}))}")
-            print(f"      • Months detected: {grouped_accounts.get('months', [])}")
-
-            # Track tokens from Step 1
-            step1_input_tokens = step1_response.get('prompt_eval_count', 0)
-            step1_output_tokens = step1_response.get('eval_count', 0)
-            step1_cost = step1_response.get('cost', {}).get('total_cost', 0)
-
-        except Exception as e:
-            print(f"   ❌ Step 1 failed: {str(e)}")
-            return [{
-                "subsidiary": subsidiary,
-                "account_code": "STEP1_ERROR",
-                "rule_name": "Account Extraction Failed",
-                "description": f"AI could not extract accounts from raw CSV: {str(e)[:100]}",
-                "details": f"Step 1 error: {str(e)}",
-                "current_value": 0,
-                "previous_value": 0,
-                "change_amount": 0,
-                "change_percent": 0,
-                "severity": "High",
-                "sheet_type": "Error"
-            }]
+        print(f"   ✅ Step 1 complete: {len(all_extracted_accounts)} account entries from {len(bs_chunks) + len(pl_chunks)} chunks")
+        print(f"      • Total Step 1 tokens: {step1_total_tokens:,}")
 
         # ============================================================
-        # STEP 2: AI RULE APPLICATION
+        # STEP 2: CONSOLIDATION & VALIDATION
         # ============================================================
-        print(f"\n   📋 STEP 2: Applying 22 Variance Analysis Rules")
+        print(f"\n   🔍 STEP 2: Consolidation & Validation")
         print(f"   ─────────────────────────────────────────")
-        print(f"   🔄 Sending grouped accounts to AI for rule analysis...")
+        print(f"   🔄 Consolidating {len(all_extracted_accounts)} extracted account entries...")
 
-        step2_prompt = self._create_rule_application_prompt(grouped_accounts, subsidiary, filename, config)
+        consolidation_prompt = self._create_consolidation_prompt(all_extracted_accounts, subsidiary, filename)
 
         try:
             step2_response = self._call_openai(
-                system_prompt=self._get_raw_excel_system_prompt(),  # Use the 22-rule prompt
-                user_prompt=step2_prompt
+                system_prompt=self._get_consolidation_system_prompt(),
+                user_prompt=consolidation_prompt
             )
 
             if not step2_response or 'message' not in step2_response:
                 raise RuntimeError("Step 2 failed: No response from AI")
 
-            # Parse variance flags
-            variances = self._parse_llm_response(step2_response['message']['content'], subsidiary)
+            consolidated_text = step2_response['message']['content']
+            grouped_accounts = self._parse_extraction_response(consolidated_text)
 
-            print(f"   ✅ Step 2 complete: Rules applied")
-            print(f"      • Variances detected: {len(variances)}")
+            step2_tokens = step2_response.get('total_tokens', 0)
 
-            # Track tokens from Step 2
-            step2_input_tokens = step2_response.get('prompt_eval_count', 0)
-            step2_output_tokens = step2_response.get('eval_count', 0)
-            step2_cost = step2_response.get('cost', {}).get('total_cost', 0)
+            print(f"   ✅ Step 2 complete: Validated account groups")
+            bs_accounts = grouped_accounts.get('bs_accounts', {})
+            pl_accounts = grouped_accounts.get('pl_accounts', {})
+            print(f"      • BS accounts: {len(bs_accounts)}")
+            print(f"      • PL accounts: {len(pl_accounts)}")
+            print(f"      • Months: {grouped_accounts.get('months', [])}")
+            print(f"      • Step 2 tokens: {step2_tokens:,}")
+
+            # Print detailed account breakdown
+            print(f"\n   📊 Consolidated BS Accounts:")
+            for acc_code, acc_data in list(bs_accounts.items())[:10]:  # Show first 10
+                acc_name = acc_data.get('name', 'Unknown')
+                values = acc_data.get('values', [])
+                if values:
+                    print(f"      • {acc_code} - {acc_name}: {len(values)} months, Latest: {values[-1] if values else 0:,.0f} VND")
+            if len(bs_accounts) > 10:
+                print(f"      ... and {len(bs_accounts) - 10} more BS accounts")
+
+            print(f"\n   📊 Consolidated PL Accounts:")
+            for acc_code, acc_data in list(pl_accounts.items())[:10]:  # Show first 10
+                acc_name = acc_data.get('name', 'Unknown')
+                values = acc_data.get('values', [])
+                if values:
+                    print(f"      • {acc_code} - {acc_name}: {len(values)} months, Latest: {values[-1] if values else 0:,.0f} VND")
+            if len(pl_accounts) > 10:
+                print(f"      ... and {len(pl_accounts) - 10} more PL accounts")
 
         except Exception as e:
             print(f"   ❌ Step 2 failed: {str(e)}")
             return [{
-                "subsidiary": subsidiary,
-                "account_code": "STEP2_ERROR",
-                "rule_name": "Rule Application Failed",
-                "description": f"AI could not apply 22 rules: {str(e)[:100]}",
-                "details": f"Step 2 error: {str(e)}. Grouped accounts were extracted successfully in Step 1.",
-                "current_value": 0,
-                "previous_value": 0,
-                "change_amount": 0,
-                "change_percent": 0,
-                "severity": "High",
-                "sheet_type": "Error"
+                "File": subsidiary,
+                "Rule_ID": "STEP2_ERROR",
+                "Priority": "🔴 Critical",
+                "Issue": "Account Consolidation Failed",
+                "Accounts": "N/A",
+                "Period": "Current",
+                "Reason": f"AI consolidation failed: {str(e)[:100]}",
+                "Flag_Trigger": "STEP2_ERROR"
+            }]
+
+        # ============================================================
+        # STEP 3: AI RULE APPLICATION
+        # ============================================================
+        print(f"\n   🎯 STEP 3: Applying 22 Variance Analysis Rules")
+        print(f"   ─────────────────────────────────────────")
+        print(f"   🔄 Sending consolidated accounts to AI for rule analysis...")
+
+        step3_prompt = self._create_rule_application_prompt(grouped_accounts, subsidiary, filename, config)
+
+        try:
+            step3_response = self._call_openai(
+                system_prompt=self._get_raw_excel_system_prompt(),  # Use the 22-rule prompt
+                user_prompt=step3_prompt
+            )
+
+            if not step3_response or 'message' not in step3_response:
+                raise RuntimeError("Step 3 failed: No response from AI")
+
+            # Parse variance flags
+            variances = self._parse_llm_response(step3_response['message']['content'], subsidiary)
+
+            step3_tokens = step3_response.get('total_tokens', 0)
+
+            print(f"   ✅ Step 3 complete: {len(variances)} variance flags detected")
+            print(f"      • Step 3 tokens: {step3_tokens:,}")
+
+            # Print detailed variance breakdown
+            if variances:
+                print(f"\n   🚨 Variance Flags Found:")
+                for i, var in enumerate(variances[:10], 1):  # Show first 10
+                    rule_id = var.get('Rule_ID', var.get('analysis_type', 'Unknown'))
+                    priority = var.get('Priority', var.get('severity', 'Unknown'))
+                    issue = var.get('Issue', var.get('description', 'No description'))
+                    print(f"      {i}. [{priority}] {rule_id}: {issue[:80]}")
+                if len(variances) > 10:
+                    print(f"      ... and {len(variances) - 10} more variances")
+            else:
+                print(f"\n   ℹ️  No variance flags detected")
+                print(f"      This could mean:")
+                print(f"      • All 22 rules passed (good financial hygiene)")
+                print(f"      • AI needs more explicit data (check filtered accounts above)")
+                print(f"      • Account filtering removed critical data (verify sample above)")
+
+        except Exception as e:
+            print(f"   ❌ Step 3 failed: {str(e)}")
+            return [{
+                "File": subsidiary,
+                "Rule_ID": "STEP3_ERROR",
+                "Priority": "🔴 Critical",
+                "Issue": "Rule Application Failed",
+                "Accounts": "N/A",
+                "Period": "Current",
+                "Reason": f"AI rule application failed: {str(e)[:100]}",
+                "Flag_Trigger": "STEP3_ERROR"
             }]
 
         # ============================================================
         # SUMMARY
         # ============================================================
-        total_input_tokens = step1_input_tokens + step2_input_tokens
-        total_output_tokens = step1_output_tokens + step2_output_tokens
-        total_cost = step1_cost + step2_cost
-        total_tokens = total_input_tokens + total_output_tokens
+        total_tokens = step1_total_tokens + step2_tokens + step3_tokens
 
-        print(f"\n   ✅ TWO-STEP ANALYSIS COMPLETE")
+        print(f"\n   ✅ THREE-STEP ANALYSIS COMPLETE")
         print(f"   " + "="*70)
         print(f"      • Total variances: {len(variances)}")
+        print(f"      • Total API calls: {len(bs_chunks) + len(pl_chunks) + 2}")
         print(f"      • Total tokens: {total_tokens:,}")
-        if total_cost > 0:
-            print(f"      • Total cost: ${total_cost:.6f} USD")
-        print(f"      • Step 1 tokens: {step1_input_tokens + step1_output_tokens:,}")
-        print(f"      • Step 2 tokens: {step2_input_tokens + step2_output_tokens:,}")
+        print(f"      • Step 1 (Chunked Extraction): {step1_total_tokens:,} tokens")
+        print(f"      • Step 2 (Consolidation): {step2_tokens:,} tokens")
+        print(f"      • Step 3 (Rule Application): {step3_tokens:,} tokens")
 
         return variances
 
@@ -1491,6 +1588,16 @@ The "analysis_type" field should match the rule ID and name from the 22 rules ab
 
 🎯 YOUR TASK:
 Analyze the raw CSV data and identify variances based on the 22 rules below. For each variance found, return a JSON object with the rule details.
+
+⚠️ IMPORTANT: You MUST actively look for violations of ALL 22 rules. Do NOT say "no variances detected" unless you have thoroughly checked EVERY rule. Most financial data will have MULTIPLE variances - your job is to find them all. Be thorough and suspicious - look for:
+- Account relationships that seem unusual or disconnected
+- Values that changed month-to-month in unexpected ways
+- Missing correlations between related accounts
+- Balance sheet equation violations
+- Negative values where they shouldn't be
+- Large changes without corresponding impacts
+
+If you find NO variances, explain WHY each rule was checked and why it didn't trigger.
 
 📋 THE 22 VARIANCE ANALYSIS RULES:
 
@@ -2270,6 +2377,173 @@ Return detailed JSON analysis with specific investigation steps and management q
 
         except Exception:
             return self._create_fallback_analysis(response or "", subsidiary, "GENERAL_PARSE_ERROR")
+
+    def _split_csv_into_chunks(self, csv_data: str, max_tokens: int = 20000) -> List[str]:
+        """
+        Split CSV data into chunks that stay under max_tokens limit.
+        Each chunk includes the header row.
+        """
+        if not csv_data:
+            return []
+
+        lines = csv_data.split('\n')
+        if len(lines) <= 1:
+            return [csv_data]  # Just header or empty
+
+        header = lines[0]
+        data_lines = lines[1:]
+
+        chunks = []
+        current_chunk_lines = [header]
+        current_tokens = len(header) // 4  # Rough estimate: 4 chars per token
+
+        for line in data_lines:
+            line_tokens = len(line) // 4
+            if current_tokens + line_tokens > max_tokens and len(current_chunk_lines) > 1:
+                # Save current chunk and start new one
+                chunks.append('\n'.join(current_chunk_lines))
+                current_chunk_lines = [header, line]
+                current_tokens = (len(header) + len(line)) // 4
+            else:
+                current_chunk_lines.append(line)
+                current_tokens += line_tokens
+
+        # Add the last chunk
+        if len(current_chunk_lines) > 1:
+            chunks.append('\n'.join(current_chunk_lines))
+
+        return chunks if chunks else [csv_data]
+
+    def _create_chunk_extraction_prompt(self, bs_csv: str, pl_csv: str, subsidiary: str, filename: str, chunk_name: str) -> str:
+        """Create prompt for extracting accounts from a single chunk."""
+        return f"""
+CHUNKED ACCOUNT EXTRACTION
+
+Company: {subsidiary}
+File: {filename}
+Chunk: {chunk_name}
+
+Extract all account codes and their values from this data chunk.
+
+{"=== BALANCE SHEET DATA (CHUNK) ===" if bs_csv else ""}
+{bs_csv if bs_csv else ""}
+
+{"=== PROFIT & LOSS DATA (CHUNK) ===" if pl_csv else ""}
+{pl_csv if pl_csv else ""}
+
+Return JSON array with extracted accounts:
+[
+  {{
+    "account_code": "111000000",
+    "account_name": "Cash",
+    "type": "BS" or "PL",
+    "values": {{"Jan 2025": 1000000, "Feb 2025": 1500000}}
+  }}
+]
+"""
+
+    def _parse_extraction_response(self, response_text: str) -> dict:
+        """Parse JSON response from account extraction or consolidation."""
+        import json
+
+        cleaned = response_text.strip()
+        if cleaned.startswith('```json'):
+            cleaned = cleaned[7:]
+        if cleaned.startswith('```'):
+            cleaned = cleaned[3:]
+        if cleaned.endswith('```'):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+        try:
+            data = json.loads(cleaned)
+
+            # Handle array format (Step 1 extraction)
+            if isinstance(data, list):
+                return {"accounts": data}
+
+            # Handle dict format (Step 2 consolidation)
+            elif isinstance(data, dict):
+                # Check if it's already in the expected format (has bs_accounts, pl_accounts, months)
+                if 'bs_accounts' in data or 'pl_accounts' in data:
+                    return data
+                # Otherwise treat it as accounts array wrapper
+                elif 'accounts' in data:
+                    return data
+                else:
+                    return {"accounts": []}
+
+            else:
+                return {"accounts": []}
+
+        except json.JSONDecodeError as e:
+            print(f"      ❌ JSON parse error: {e}")
+            print(f"      📄 Response text (first 500 chars): {cleaned[:500]}")
+            return {"accounts": []}
+
+    def _create_consolidation_prompt(self, all_extracted_accounts: List[dict], subsidiary: str, filename: str) -> str:
+        """Create prompt for consolidating extracted accounts from multiple chunks."""
+        import json
+
+        accounts_json = json.dumps(all_extracted_accounts, indent=2)
+
+        return f"""
+ACCOUNT CONSOLIDATION & VALIDATION
+
+Company: {subsidiary}
+File: {filename}
+
+You have received account data from multiple chunks. Your task is to:
+1. Merge duplicate accounts (same account_code)
+2. Combine all values from the same account
+3. Detect all available month/period columns
+4. Organize into BS and PL categories
+5. Return a consolidated structure
+
+=== RAW EXTRACTED ACCOUNTS (from chunks) ===
+{accounts_json}
+
+IMPORTANT: Return JSON in this EXACT format:
+{{
+  "bs_accounts": {{
+    "111000000": {{"name": "Cash", "Jan 2025": 1000000, "Feb 2025": 1500000, ...}},
+    "217000000": {{"name": "Investment Property", "Jan 2025": 50000000, ...}}
+  }},
+  "pl_accounts": {{
+    "511000000": {{"name": "Revenue", "Jan 2025": 5000000, "Feb 2025": 5500000, ...}},
+    "632100002": {{"name": "Depreciation", "Jan 2025": 200000, ...}}
+  }},
+  "months": ["Jan 2025", "Feb 2025", "Mar 2025", ...]
+}}
+
+KEY RULES:
+- Use account_code as the key in bs_accounts/pl_accounts
+- Include "name" field for each account
+- Include all detected month columns with their values
+- List all months in chronological order
+- Return ONLY valid JSON, no other text
+"""
+
+    def _get_consolidation_system_prompt(self) -> str:
+        """System prompt for Step 2: Consolidation."""
+        return """You are a financial data consolidation specialist.
+
+Your task is to merge account data from multiple chunks into a single, validated structure.
+
+CONSOLIDATION RULES:
+1. Merge accounts with the same account_code
+2. If values conflict, use the most recent/complete data
+3. Ensure all months are listed in chronological order
+4. Separate BS (Balance Sheet) and PL (Profit & Loss) accounts
+5. Return ONLY valid JSON - no explanatory text
+
+OUTPUT FORMAT:
+{
+  "bs_accounts": {"account_code": {"name": "...", "Jan 2025": value, ...}},
+  "pl_accounts": {"account_code": {"name": "...", "Jan 2025": value, ...}},
+  "months": ["Jan 2025", "Feb 2025", ...]
+}
+"""
 
     def _create_fallback_analysis(self, response: str, subsidiary: str, error_type: str) -> List[Dict[str, Any]]:
         analysis_content = response[:800] if response else "No response received"
