@@ -389,9 +389,13 @@ class LLMFinancialAnalyzer:
             print(f"      • Estimated prompt length: {estimated_prompt_length:,} characters")
             print(f"      • Estimated input tokens: {estimated_tokens:,}")
 
-            if estimated_tokens > 25000:  # Leave buffer for 30k limit
-                print(f"   ⚠️  Data too large, implementing chunking strategy...")
-                return self._analyze_with_chunking(bs_clean, pl_clean, subsidiary, filename, config)
+            # GPT-4o has 128k context window
+            # For 22-rule analysis, we use two-step AI process for large data
+            if estimated_tokens > 80000:  # Leave buffer for 128k limit
+                print(f"   ⚠️  Data large ({estimated_tokens:,} tokens), using two-step AI process...")
+                print(f"   📋 Step 1: AI will extract and group accounts from raw CSV")
+                print(f"   📋 Step 2: AI will apply 22 rules to grouped account data")
+                return self._analyze_with_two_step_process(bs_csv, pl_csv, subsidiary, filename, config)
 
             prompt = self._create_raw_excel_prompt(bs_csv, pl_csv, subsidiary, filename, config)
             prompt_length = len(prompt)
@@ -761,121 +765,259 @@ class LLMFinancialAnalyzer:
                 "sheet_type": "Error"
             }]
 
-    def _analyze_with_chunking(self, bs_df, pl_df, subsidiary, filename, config):
-        """Analyze large datasets by processing in chunks."""
-        print(f"   🔄 Starting chunked analysis...")
+    def _analyze_with_two_step_process(self, bs_csv, pl_csv, subsidiary, filename, config):
+        """
+        Two-step AI process for large datasets with any Excel format.
 
-        all_anomalies = []
+        STEP 1: AI extracts and groups accounts from raw CSV (format-agnostic)
+        STEP 2: AI applies 22 rules to the grouped account data
+        STEP 3: Python formats output consistently
 
-        # Track token usage and costs across all chunks
-        total_input_tokens = 0
-        total_output_tokens = 0
-        total_cost = 0.0
+        This works with ANY Excel format - no column name assumptions!
+        """
+        print(f"\n   🎯 TWO-STEP AI ANALYSIS PROCESS")
+        print(f"   " + "="*70)
 
-        # Split BS data into chunks
-        bs_chunk_size = 150
-        pl_chunk_size = 75
+        # ============================================================
+        # STEP 1: AI ACCOUNT EXTRACTION & GROUPING
+        # ============================================================
+        print(f"\n   📊 STEP 1: Account Extraction & Grouping")
+        print(f"   ─────────────────────────────────────────")
+        print(f"   🔄 Sending raw CSV to AI for account extraction...")
 
-        # Calculate total number of chunks for progress tracking
-        bs_chunks_count = (len(bs_df) + bs_chunk_size - 1) // bs_chunk_size
-        pl_chunks_count = (len(pl_df) + pl_chunk_size - 1) // pl_chunk_size
-        total_chunks = bs_chunks_count * pl_chunks_count
-        current_chunk = 0
+        step1_prompt = self._create_account_extraction_prompt(bs_csv, pl_csv, subsidiary, filename)
 
-        # Progress range for chunking: assume we're between 35% and 75%
-        chunk_start_progress = 35
-        chunk_end_progress = 75
-        progress_range = chunk_end_progress - chunk_start_progress
+        try:
+            step1_response = self._call_openai(
+                system_prompt=self._get_account_extraction_system_prompt(),
+                user_prompt=step1_prompt
+            )
 
-        for i in range(0, len(bs_df), bs_chunk_size):
-            bs_chunk = bs_df.iloc[i:i+bs_chunk_size]
+            if not step1_response or 'message' not in step1_response:
+                raise RuntimeError("Step 1 failed: No response from AI")
 
-            # For each BS chunk, process with a smaller PL chunk
-            for j in range(0, len(pl_df), pl_chunk_size):
-                pl_chunk = pl_df.iloc[j:j+pl_chunk_size]
-                current_chunk += 1
+            # Parse the grouped account data
+            import json
+            grouped_accounts_text = step1_response['message']['content']
 
-                # Calculate current progress percentage
-                chunk_progress = chunk_start_progress + int((current_chunk / total_chunks) * progress_range)
+            # Clean and parse JSON
+            if grouped_accounts_text.startswith('```json'):
+                grouped_accounts_text = grouped_accounts_text[7:]
+            if grouped_accounts_text.endswith('```'):
+                grouped_accounts_text = grouped_accounts_text[:-3]
+            grouped_accounts_text = grouped_accounts_text.strip()
 
-                chunk_msg = f"Processing chunk {current_chunk}/{total_chunks}: BS[{i}:{i+len(bs_chunk)}] + PL[{j}:{j+len(pl_chunk)}]"
-                print(f"   📊 {chunk_msg}")
+            grouped_accounts = json.loads(grouped_accounts_text)
 
-                # Send progress update
-                if self.progress_callback:
-                    self.progress_callback(chunk_progress, chunk_msg)
+            print(f"   ✅ Step 1 complete: Accounts extracted and grouped")
+            print(f"      • BS accounts found: {len(grouped_accounts.get('bs_accounts', {}))}")
+            print(f"      • PL accounts found: {len(grouped_accounts.get('pl_accounts', {}))}")
+            print(f"      • Months detected: {grouped_accounts.get('months', [])}")
 
-                bs_csv = bs_chunk.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
-                pl_csv = pl_chunk.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
+            # Track tokens from Step 1
+            step1_input_tokens = step1_response.get('prompt_eval_count', 0)
+            step1_output_tokens = step1_response.get('eval_count', 0)
+            step1_cost = step1_response.get('cost', {}).get('total_cost', 0)
 
-                prompt = self._create_raw_excel_prompt(bs_csv, pl_csv, subsidiary, filename, config)
+        except Exception as e:
+            print(f"   ❌ Step 1 failed: {str(e)}")
+            return [{
+                "subsidiary": subsidiary,
+                "account_code": "STEP1_ERROR",
+                "rule_name": "Account Extraction Failed",
+                "description": f"AI could not extract accounts from raw CSV: {str(e)[:100]}",
+                "details": f"Step 1 error: {str(e)}",
+                "current_value": 0,
+                "previous_value": 0,
+                "change_amount": 0,
+                "change_percent": 0,
+                "severity": "High",
+                "sheet_type": "Error"
+            }]
 
-                try:
-                    response = self._call_openai(
-                        system_prompt=self._get_raw_excel_system_prompt(),
-                        user_prompt=prompt
-                    )
+        # ============================================================
+        # STEP 2: AI RULE APPLICATION
+        # ============================================================
+        print(f"\n   📋 STEP 2: Applying 22 Variance Analysis Rules")
+        print(f"   ─────────────────────────────────────────")
+        print(f"   🔄 Sending grouped accounts to AI for rule analysis...")
 
-                    if response and response.get('message', {}).get('content'):
-                        chunk_anomalies = self._parse_llm_response(response['message']['content'], subsidiary)
-                        all_anomalies.extend(chunk_anomalies)
+        step2_prompt = self._create_rule_application_prompt(grouped_accounts, subsidiary, filename, config)
 
-                        # Accumulate token usage and costs
-                        if 'prompt_eval_count' in response:
-                            total_input_tokens += response.get('prompt_eval_count', 0)
-                        if 'eval_count' in response:
-                            total_output_tokens += response.get('eval_count', 0)
-                        if 'cost' in response:
-                            total_cost += response['cost'].get('total_cost', 0)
+        try:
+            step2_response = self._call_openai(
+                system_prompt=self._get_raw_excel_system_prompt(),  # Use the 22-rule prompt
+                user_prompt=step2_prompt
+            )
 
-                        success_msg = f"Found {len(chunk_anomalies)} anomalies in chunk {current_chunk}/{total_chunks}"
-                        print(f"      ✅ {success_msg}")
+            if not step2_response or 'message' not in step2_response:
+                raise RuntimeError("Step 2 failed: No response from AI")
 
-                        # Send detailed log update
-                        if self.progress_callback:
-                            self.progress_callback(chunk_progress, success_msg)
+            # Parse variance flags
+            variances = self._parse_llm_response(step2_response['message']['content'], subsidiary)
 
-                except Exception as e:
-                    error_msg = f"Chunk {current_chunk}/{total_chunks} failed: {str(e)[:100]}"
-                    print(f"      ⚠️  {error_msg}")
+            print(f"   ✅ Step 2 complete: Rules applied")
+            print(f"      • Variances detected: {len(variances)}")
 
-                    # Send error log but continue processing
-                    if self.progress_callback:
-                        self.progress_callback(chunk_progress, error_msg)
-                    continue
+            # Track tokens from Step 2
+            step2_input_tokens = step2_response.get('prompt_eval_count', 0)
+            step2_output_tokens = step2_response.get('eval_count', 0)
+            step2_cost = step2_response.get('cost', {}).get('total_cost', 0)
 
-        completion_msg = f"Chunked analysis complete: {len(all_anomalies)} total anomalies found across {total_chunks} chunks"
-        print(f"   ✅ {completion_msg}")
+        except Exception as e:
+            print(f"   ❌ Step 2 failed: {str(e)}")
+            return [{
+                "subsidiary": subsidiary,
+                "account_code": "STEP2_ERROR",
+                "rule_name": "Rule Application Failed",
+                "description": f"AI could not apply 22 rules: {str(e)[:100]}",
+                "details": f"Step 2 error: {str(e)}. Grouped accounts were extracted successfully in Step 1.",
+                "current_value": 0,
+                "previous_value": 0,
+                "change_amount": 0,
+                "change_percent": 0,
+                "severity": "High",
+                "sheet_type": "Error"
+            }]
 
-        # Send completion progress update
-        if self.progress_callback:
-            self.progress_callback(chunk_end_progress, completion_msg)
-
-        # Print comprehensive summary banner
+        # ============================================================
+        # SUMMARY
+        # ============================================================
+        total_input_tokens = step1_input_tokens + step2_input_tokens
+        total_output_tokens = step1_output_tokens + step2_output_tokens
+        total_cost = step1_cost + step2_cost
         total_tokens = total_input_tokens + total_output_tokens
-        if total_tokens > 0:
-            print("\n" + "="*80)
-            print("✅ AI ANALYSIS COMPLETE - SUMMARY")
-            print("="*80)
-            print(f"📄 Subsidiary: {subsidiary}")
-            print(f"📊 Anomalies detected: {len(all_anomalies)}")
-            print(f"📦 Chunks processed: {total_chunks}")
-            print("")
-            print("💰 TOKEN USAGE & COST:")
-            print(f"   • Input tokens:  {total_input_tokens:,}")
-            print(f"   • Output tokens: {total_output_tokens:,}")
-            print(f"   • TOTAL TOKENS:  {total_tokens:,}")
-            if total_cost > 0:
-                print("")
-                input_cost = (total_input_tokens / 1_000_000) * self.input_price_per_million
-                output_cost = (total_output_tokens / 1_000_000) * self.output_price_per_million
-                print(f"   • Input cost:    ${input_cost:.6f}")
-                print(f"   • Output cost:   ${output_cost:.6f}")
-                print(f"   • TOTAL COST:    ${total_cost:.6f} USD")
-            print(f"   • Model:         {self.openai_model}")
-            print("="*80 + "\n")
 
-        return all_anomalies
+        print(f"\n   ✅ TWO-STEP ANALYSIS COMPLETE")
+        print(f"   " + "="*70)
+        print(f"      • Total variances: {len(variances)}")
+        print(f"      • Total tokens: {total_tokens:,}")
+        if total_cost > 0:
+            print(f"      • Total cost: ${total_cost:.6f} USD")
+        print(f"      • Step 1 tokens: {step1_input_tokens + step1_output_tokens:,}")
+        print(f"      • Step 2 tokens: {step2_input_tokens + step2_output_tokens:,}")
+
+        return variances
+
+    def _get_account_extraction_system_prompt(self) -> str:
+        """System prompt for Step 1: Account extraction from raw CSV."""
+        return """You are a financial data extraction specialist. Your job is to extract and group account data from raw Excel CSV files in ANY format.
+
+🎯 YOUR TASK:
+Extract account codes, names, and values from the raw CSV data. Handle ANY Excel format:
+- Account codes might be in column A, B, C, or embedded in text
+- Headers might be at row 1, 5, 10, or any row
+- Month columns might be named "Jan 2025", "As of Jan 2025", "M01", etc.
+- Account codes might be formatted as "217", "217xxx", "(217)", "217 - Investment Property", etc.
+
+📊 EXTRACTION STRATEGY:
+1. **Identify Headers**: Find the row containing month/period names (look for date patterns, month names)
+2. **Identify Account Codes**: Scan for numeric patterns that look like Vietnamese chart of accounts (111, 217, 341, 511, 632, etc.)
+3. **Extract Values**: Get the corresponding values for each account in each month
+4. **Group by Account Family**: Organize accounts by their 3-digit prefix (217xxx, 511xxx, etc.)
+
+📋 REQUIRED OUTPUT FORMAT:
+Return ONLY valid JSON (no markdown, no code blocks):
+
+{
+  "months": ["Jan 2025", "Feb 2025", "Mar 2025"],
+  "bs_accounts": {
+    "111": {"name": "Cash", "values": [1000000, 1200000, 1300000]},
+    "217": {"name": "Investment Property", "values": [5000000, 7000000, 7500000]},
+    "341": {"name": "Loans", "values": [9000000, 9500000, 10000000]}
+  },
+  "pl_accounts": {
+    "511": {"name": "Revenue", "values": [2000000, 2200000, 2400000]},
+    "632100001": {"name": "Amortization", "values": [100000, 105000, 110000]},
+    "632100002": {"name": "Depreciation", "values": [200000, 195000, 190000]}
+  }
+}
+
+🔍 IMPORTANT NOTES:
+- Values array should match the months array length
+- Group similar accounts together (all 217xxx under "217", all 511xxx under "511")
+- Sum up sub-accounts if needed (217001 + 217002 = total for "217")
+- Extract ACTUAL values from the CSV, not zeros
+- Handle Vietnamese account names and formats
+
+Return comprehensive account extraction covering all major account families."""
+
+    def _create_account_extraction_prompt(self, bs_csv, pl_csv, subsidiary, filename):
+        """Create prompt for Step 1: Account extraction."""
+        return f"""
+ACCOUNT EXTRACTION REQUEST
+
+Company: {subsidiary}
+File: {filename}
+
+=== RAW BALANCE SHEET CSV ===
+{bs_csv}
+
+=== RAW PROFIT & LOSS CSV ===
+{pl_csv}
+
+=== INSTRUCTIONS ===
+
+Extract all accounts and their values from the raw CSV data above.
+
+Focus on these account families:
+- BS: 111 (Cash), 112 (Cash Equivalents), 133 (VAT Input), 217 (Investment Property), 241 (CIP), 242 (Broker Assets), 341 (Loans), and any total rows
+- PL: 511 (Revenue), 515 (Interest Income), 632 (COGS/D&A), 635 (Interest Expense), 641 (Selling Expense), 642 (G&A Expense)
+
+Identify all available month columns and extract values for each account across all months.
+
+Return structured JSON with grouped account data."""
+
+    def _create_rule_application_prompt(self, grouped_accounts, subsidiary, filename, config):
+        """Create prompt for Step 2: Apply 22 rules to grouped data."""
+        import json
+
+        accounts_json = json.dumps(grouped_accounts, indent=2)
+
+        # Use string concatenation instead of f-string to avoid format specifier issues with JSON braces
+        prompt = """
+22-RULE VARIANCE ANALYSIS REQUEST
+
+Company: """ + subsidiary + """
+File: """ + filename + """
+
+=== EXTRACTED & GROUPED ACCOUNT DATA ===
+""" + accounts_json + """
+
+=== INSTRUCTIONS ===
+
+You have been provided with pre-extracted and grouped account data.
+
+Apply ALL 22 variance analysis rules (from your system prompt) to this data.
+
+The data is already organized by account families, so you can easily check cross-account relationships:
+- A1: Check if "217" increased but "632100001"/"632100002" did not
+- A2: Check if "341" increased but "635" did not (with day adjustment)
+- A3: Check if "217"/"241" increased but "133" did not
+- D1: Check balance sheet equation using total rows
+- And so on for all 22 rules...
+
+Return JSON array with variance flags for any rules that triggered.
+
+Use the ACTUAL month names from the "months" array in the period field.
+
+📋 REQUIRED OUTPUT FORMAT:
+
+Return a JSON array where each variance flag has these fields:
+
+{
+  "analysis_type": "A1 - Asset capitalized but depreciation not started",
+  "account": "217xxx ↔ 632100001/632100002",
+  "description": "Investment Property increased but depreciation did not increase",
+  "explanation": "Detailed explanation of the variance and why it matters",
+  "period": "Jan 2025 → Feb 2025",
+  "severity": "Critical",  // Critical, Review, or Info
+  "details": "IP increased by 2,000,000 VND but D&A unchanged"
+}
+
+The "analysis_type" field should match the rule ID and name from the 22 rules above."""
+
+        return prompt
 
     def analyze_comprehensive_revenue_impact(
         self,
@@ -1119,20 +1261,146 @@ class LLMFinancialAnalyzer:
     # Prompts for Raw Excel Analysis
     # ===========================
     def _get_raw_excel_system_prompt(self) -> str:
-        """Enhanced system prompt for comprehensive revenue impact analysis matching core.py functionality."""
-        return """You are a senior financial auditor with 15+ years experience in Vietnamese enterprises. You will perform COMPREHENSIVE REVENUE IMPACT ANALYSIS matching the detailed methodology used in our core analysis system.
+        """System prompt for 22-rule variance analysis using AI."""
+        return """You are a senior financial auditor with 15+ years experience in Vietnamese enterprises. You will analyze raw Excel financial data (BS Breakdown and PL Breakdown sheets) and apply the following 22 VARIANCE ANALYSIS RULES:
 
-🎯 COMPREHENSIVE ANALYSIS APPROACH:
-You will analyze COMPLETE RAW EXCEL DATA to provide the same depth of analysis as our core.py implementation, including:
+🎯 YOUR TASK:
+Analyze the raw CSV data and identify variances based on the 22 rules below. For each variance found, return a JSON object with the rule details.
 
-🔍 PRIMARY FOCUS AREAS (Vietnamese Chart of Accounts):
-1. REVENUE ANALYSIS (511*): Complete revenue account breakdown with entity-level impact analysis
-2. SG&A EXPENSE ANALYSIS (641*): Detailed 641* account analysis with entity-level variance tracking
-3. SG&A EXPENSE ANALYSIS (642*): Detailed 642* account analysis with entity-level variance tracking
-4. COMBINED SG&A ANALYSIS: Calculate SG&A ratios as percentage of revenue with trend analysis
-5. GROSS MARGIN ANALYSIS: (Revenue - Cost)/Revenue analysis with risk identification
-6. UTILITY ANALYSIS: Revenue vs cost pairing for utility accounts
-7. RISK ASSESSMENT: Identify significant changes and flag concerning trends
+📋 THE 22 VARIANCE ANALYSIS RULES:
+
+═══════════════════════════════════════════════════════════════
+🔴 CRITICAL RULES (Priority: Critical)
+═══════════════════════════════════════════════════════════════
+
+**A1 - Asset capitalized but depreciation not started**
+- Accounts: 217xxx (Investment Property) ↔ 632100001/632100002 (D&A)
+- Logic: IF Investment Property (217xxx) increased BUT Depreciation/Amortization (ONLY 632100001 or 632100002) did NOT increase
+- Flag Trigger: IP↑ BUT D&A ≤ previous
+- Note: Use ONLY accounts 632100001 (Amortization) and 632100002 (Depreciation), NOT all 632xxx
+
+**A2 - Loan drawdown but interest not recorded**
+- Accounts: 341xxx (Loans) ↔ 635xxx (Interest Expense) + 241xxx (CIP Interest)
+- Logic: IF Loans (341xxx) increased BUT day-adjusted Interest Expense (635xxx + 241xxx) did NOT increase
+- Flag Trigger: Loan↑ BUT Day-adjusted Interest ≤ previous
+- Note: Normalize interest by calendar days (Feb=28/30, Jan=31/30, etc.)
+
+**A3 - Capex incurred but VAT not recorded**
+- Accounts: 217xxx/241xxx (IP/CIP) ↔ 133xxx (VAT Input)
+- Logic: IF Investment Property OR CIP increased BUT VAT Input (133xxx) did NOT increase
+- Flag Trigger: Assets↑ BUT VAT input ≤ previous
+
+**A4 - Cash movement disconnected from interest**
+- Accounts: 111xxx/112xxx (Cash) ↔ 515xxx (Interest Income)
+- Logic: IF Cash increased BUT day-adjusted Interest Income decreased OR Cash decreased BUT Interest Income increased
+- Flag Trigger: Cash↑ BUT Interest↓ OR Cash↓ BUT Interest↑
+- Note: Normalize interest by calendar days
+
+**A5 - Lease termination but broker asset not written off**
+- Accounts: 511xxx (Revenue) ↔ 242xxx (Broker Assets) ↔ 641xxx (Selling Expense)
+- Logic: IF Revenue ≤ 0 BUT Broker Assets (242xxx) unchanged AND Selling Expense (641xxx) unchanged
+- Flag Trigger: Revenue ≤ 0 BUT 242 unchanged AND 641 unchanged
+
+**A7 - Asset disposal but accumulated depreciation not written off**
+- Accounts: 217xxx (IP Cost) ↔ 217xxx (IP Accumulated Depreciation)
+- Logic: IF IP Cost decreased BUT Accumulated Depreciation did NOT decrease
+- Flag Trigger: IP cost↓ BUT Accumulated depreciation unchanged
+- Note: Filter by Account Name containing "cost" vs "accum" or "depreciation"
+
+**D1 - Balance sheet imbalance**
+- Accounts: Total Assets vs Total Liabilities+Equity
+- Logic: Check Balance Sheet equation: Total Assets = Total Liabilities + Equity
+- Flag Trigger: Total Assets ≠ Total Liabilities+Equity (tolerance: 100M VND)
+- Method: Use total rows "TỔNG CỘNG TÀI SẢN" and "TỔNG CỘNG NGUỒN VỐN" directly
+
+**E1 - Negative Net Book Value (NBV)**
+- Accounts: Account Lines 222/223, 228/229, 231/232
+- Logic: Check NBV = Cost + Accumulated Depreciation (accum dep is negative) > 0
+- Flag Trigger: NBV < 0 for any asset class
+- Pairs: 222/223, 228/229, 231/232
+
+═══════════════════════════════════════════════════════════════
+🟡 REVIEW RULES (Priority: Review)
+═══════════════════════════════════════════════════════════════
+
+**B1 - Rental revenue volatility**
+- Accounts: 511710001 (Rental Revenue)
+- Logic: IF current month rental revenue deviates > 2σ from 6-month average
+- Flag Trigger: abs(Current - Avg) > 2σ
+
+**B2 - Depreciation changes without asset movement**
+- Accounts: 632100002 (Depreciation) + 217xxx (IP)
+- Logic: IF Depreciation deviates > 2σ from 6-month average BUT IP unchanged
+- Flag Trigger: Depreciation deviates > 2σ AND IP unchanged
+
+**B3 - Amortization changes**
+- Accounts: 632100001 (Amortization)
+- Logic: IF Amortization deviates > 2σ from 6-month average
+- Flag Trigger: abs(Current - Avg) > 2σ
+
+**C1 - Gross margin by revenue stream**
+- Revenue Streams:
+  * Utilities: 511800001 ↔ 632100011
+  * Service Charges: 511600001/511600005 ↔ 632100008/632100015
+  * Other Revenue: 511800002 ↔ 632199999
+- Logic: IF Gross Margin % deviates > 2σ from 6-month baseline
+- Flag Trigger: GM% change > 2σ
+- Note: IGNORE rental/leasing revenue vs depreciation
+
+**C2 - Unbilled reimbursable expenses**
+- Accounts: 641xxx/632xxx (Reimbursable COGS) ↔ 511xxx (Revenue)
+- Logic: IF Reimbursable COGS increased BUT Revenue did NOT increase
+- Flag Trigger: Reimbursable COGS↑ BUT Revenue unchanged
+
+**D2 - Retained earnings reconciliation break**
+- Accounts: Account Line 421/4211 (Retained Earnings) ↔ P&L components
+- Logic: Opening RE + Net Income ≠ Closing RE (tolerance: 1M VND)
+- Flag Trigger: |Calculated RE - Actual RE| > 1M VND
+- Formula: Closing RE = Opening RE + Net Income (from P&L lines 1,11,21,22,23,25,26,31,32,51,52)
+
+═══════════════════════════════════════════════════════════════
+🔵 WATCH RULES (Priority: Watch)
+═══════════════════════════════════════════════════════════════
+
+**E2 - Revenue vs selling expense disconnect**
+- Accounts: 511xxx (Revenue) ↔ 641xxx (Selling Expenses)
+- Logic: IF Revenue changed significantly BUT Selling Expense (641) unchanged
+- Flag Trigger: Revenue moves > 10% BUT 641 relatively flat
+
+**E3 - Revenue vs Advance Revenue (prepayments)**
+- Accounts: 511xxx (Revenue) ↔ 131xxx (A/R) ↔ 3387 (Unearned Revenue/Advances)
+- Logic: Monitor relationship between revenue recognition and advance payments
+- Flag Trigger: Unusual patterns in advance revenue movements
+
+**E4 - Monthly recurring charges**
+- Accounts: 511 (Total Revenue) vs specific recurring revenue streams
+- Logic: Check if recurring revenue streams remain stable month-over-month
+- Flag Trigger: Unexpected drops or spikes in normally recurring items
+
+**E5 - One-off revenue items**
+- Accounts: Non-recurring revenue accounts
+- Logic: Identify and highlight one-time revenue items
+- Flag Trigger: Unusual account activity that appears non-recurring
+
+**E6 - General & admin expense volatility (642xxx)**
+- Accounts: 642xxx (G&A Expenses)
+- Logic: IF G&A expenses deviate significantly from baseline
+- Flag Trigger: Unusual volatility in administrative costs
+
+**F1 - Operating expense volatility (641xxx excluding 641100xxx)**
+- Accounts: 641xxx (Operating Expenses), excluding 641100xxx
+- Logic: IF Operating expenses (excl. commissions) show unusual patterns
+- Flag Trigger: Significant deviation from baseline
+
+**F2 - Broker commission volatility (641100xxx)**
+- Accounts: 641100xxx (Broker Commissions) ↔ 511xxx (Revenue)
+- Logic: Check if commission expense scales appropriately with revenue
+- Flag Trigger: Commission % of revenue changes significantly
+
+**F3 - Personnel cost volatility (642100xxx)**
+- Accounts: 642100xxx (Personnel Costs)
+- Logic: IF Personnel costs deviate from baseline (excluding known hiring/layoffs)
+- Flag Trigger: Unexpected changes in headcount-related expenses
 
 📊 DETAILED ANALYSIS REQUIREMENTS:
 
@@ -1735,19 +2003,42 @@ Return detailed JSON analysis with specific investigation steps and management q
                 # Keep notes simple and clean for Excel output
                 detailed_notes = base_explanation or "AI analysis completed - review variance details"
 
+                # Map severity to priority with emojis (matching Python mode)
+                severity = anom.get("severity", "Medium")
+                if severity == "High" or severity == "Critical":
+                    priority = "🔴 Critical"
+                elif severity == "Medium" or severity == "Review":
+                    priority = "🟡 Review"
+                else:
+                    priority = "🟢 Info"
+
+                # Extract rule ID from analysis_type if available
+                analysis_type = anom.get("analysis_type", "AI Analysis")
+                rule_id = analysis_type.split("-")[0].strip() if "-" in analysis_type else "AI"
+
+                # Format accounts field
+                account = anom.get("account", f"AI_DETECTED_{i}")
+
+                # Build reason from description and explanation
+                reason = anom.get("description", "AI autonomous anomaly detection")
+                if base_explanation and base_explanation != reason:
+                    reason = f"{reason}. {base_explanation}"
+
+                # Flag trigger from details
+                flag_trigger = anom.get("details", "AI detected variance")
+                if len(flag_trigger) > 100:
+                    flag_trigger = flag_trigger[:97] + "..."
+
+                # Python mode format
                 anomalies.append({
-                    "subsidiary": subsidiary,
-                    "account_code": anom.get("account", f"AI_DETECTED_{i}"),
-                    "rule_name": f"AI Autonomous Analysis - {anom.get('severity', 'Medium')} Priority",
-                    "description": anom.get("description", "AI autonomous anomaly detection"),
-                    "details": detailed_notes,
-                    "period": anom.get("period", "Current"),
-                    "current_value": anom.get("current_value", 0) or 0,
-                    "previous_value": anom.get("previous_value", 0) or 0,
-                    "change_amount": anom.get("change_amount", 0) or 0,
-                    "change_percent": anom.get("change_percent", 0) or 0,
-                    "severity": anom.get("severity", "Medium"),
-                    "sheet_type": anom.get("type", "AI Analysis")
+                    "File": subsidiary,  # Map subsidiary to File
+                    "Rule_ID": rule_id,
+                    "Priority": priority,
+                    "Issue": anom.get("description", "AI autonomous anomaly detection"),
+                    "Accounts": account,
+                    "Period": anom.get("period", "Current"),
+                    "Reason": reason,
+                    "Flag_Trigger": flag_trigger
                 })
 
             return anomalies

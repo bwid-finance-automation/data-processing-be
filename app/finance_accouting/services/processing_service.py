@@ -170,20 +170,17 @@ def process_all_ai_mode(
     CONFIG: dict = DEFAULT_CONFIG,
     progress_callback=None
 ) -> tuple[bytes, list[tuple[str, bytes]]]:
-    """AI-powered analysis mode."""
+    """AI-powered analysis mode using same Excel format as Python mode."""
     logger.info("🚀 ===== STARTING AI VARIANCE ANALYSIS PROCESSING =====")
     logger.info(f"📥 Processing {len(files)} Excel file(s) for AI analysis")
     logger.info(f"🤖 LLM Model: {CONFIG.get('llm_model', 'gpt-4o')}")
     logger.info(f"🔧 AI-Only Mode: {CONFIG.get('use_llm_analysis', True)}")
 
-    # === EXCEL WORKBOOK INITIALIZATION ===
-    logger.info("📊 Initializing Excel workbook for results...")
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Anomalies Summary"
-    all_anoms: list[pd.DataFrame] = []
-    debug_files: list[tuple[str, bytes]] = []  # Store debug files for download
-    logger.info("✅ Excel workbook initialized successfully")
+    # Collect variance flags in Python mode format
+    all_variance_flags: list[dict] = []
+    all_file_data: list[dict] = []
+    debug_files: list[tuple[str, bytes]] = []
+    logger.info("✅ Starting AI analysis processing...")
 
     # === MULTI-FILE PROCESSING LOOP ===
     logger.info(f"🔄 Starting processing loop for {len(files)} file(s)...")
@@ -210,111 +207,55 @@ def process_all_ai_mode(
         if progress_callback:
             progress_callback(file_start + 5, f"Starting AI analysis for {sub}")
 
-        # === AI ANALYSIS ===
+        # === AI ANALYSIS (Returns Python mode format) ===
         logger.info(f"🤖 Starting AI analysis for '{sub}'...")
-        anoms = build_anoms_ai_mode(sub, xl_bytes, fname, CONFIG, progress_callback=progress_callback, initial_progress=file_start + 5)
+        from ..analysis.llm_analyzer import LLMFinancialAnalyzer
+
+        llm_analyzer = LLMFinancialAnalyzer(CONFIG.get("llm_model", "gpt-4o"), progress_callback=progress_callback, initial_progress=file_start + 5)
+        variance_flags = llm_analyzer.analyze_raw_excel_file(xl_bytes, fname, sub, CONFIG)
 
         if progress_callback:
             progress_callback(file_end - 5, f"AI analysis complete for {sub}")
 
-        if anoms is not None and not anoms.empty:
-            logger.info("✅ AI analysis completed successfully")
-            logger.info(f"   • Anomalies detected: {len(anoms)}")
-            if len(anoms) > 0:
-                ai_status_count = anoms['Status'].value_counts().to_dict()
-                for status, count in ai_status_count.items():
-                    logger.info(f"   • {status}: {count}")
-            all_anoms.append(anoms)
-        else:
-            logger.warning("⚠️  No anomalies detected or AI analysis returned empty result")
+        logger.info(f"✅ AI analysis completed for '{sub}'")
+        logger.info(f"   • Variance flags detected: {len(variance_flags)}")
+
+        # Convert variance flags to Python mode format
+        for flag in variance_flags:
+            all_variance_flags.append(flag)
+
+        # Also collect BS/PL data for raw data sheets
+        try:
+            bs_df, bs_cols = process_financial_tab_from_bytes(xl_bytes, "BS Breakdown", "BS", sub)
+            pl_df, pl_cols = process_financial_tab_from_bytes(xl_bytes, "PL Breakdown", "PL", sub)
+
+            all_file_data.append({
+                'subsidiary': sub,
+                'filename': fname,
+                'bs_df': bs_df,
+                'pl_df': pl_df
+            })
+            logger.info(f"✅ Collected BS/PL data for {sub}")
+        except Exception as e:
+            logger.warning(f"⚠️  Could not collect BS/PL data for {sub}: {e}")
 
         logger.info(f"✅ File '{fname}' processing completed")
 
-    # === CONSOLIDATION & EXCEL GENERATION ===
-    logger.info("📊 ===== CONSOLIDATING RESULTS =====")
-    logger.info(f"📈 Processed {len(files)} file(s) successfully")
+    # === EXCEL GENERATION (Using Python mode format) ===
+    logger.info("📊 ===== GENERATING EXCEL OUTPUT (Python Mode Format) =====")
 
-    if all_anoms:
-        logger.info(f"🔗 Consolidating {len(all_anoms)} result set(s)...")
-        anom_df = pd.concat(all_anoms, ignore_index=True)
-        logger.info("✅ Consolidation completed")
-        logger.info(f"   • Total anomalies: {len(anom_df)}")
+    # Import Python mode's Excel generation function
+    from ..analysis.variance_analysis_pipeline import create_excel_output
 
-        # Summary by subsidiary
-        if len(anom_df) > 0:
-            sub_summary = anom_df['Subsidiary'].value_counts()
-            logger.info("📋 Anomaly summary by subsidiary:")
-            for sub, count in sub_summary.items():
-                logger.info(f"   • {sub}: {count} anomalies")
+    logger.info(f"   • Total variance flags: {len(all_variance_flags)}")
+    logger.info(f"   • Files processed: {len(all_file_data)}")
 
-            status_summary = anom_df['Status'].value_counts()
-            logger.info("🔍 Analysis status summary:")
-            for status, count in status_summary.items():
-                logger.info(f"   • {status}: {count}")
-    else:
-        logger.warning("⚠️  No anomalies detected across all files")
-        anom_df = pd.DataFrame(columns=[
-            "Subsidiary","Account","Period","Pct Change","Abs Change (VND)",
-            "Trigger(s)","Suggested likely cause","Status","Notes"
-        ])
+    # Use Python mode's Excel generation
+    xlsx_bytes = create_excel_output(all_file_data, all_variance_flags)
 
-    # === WRITE TO WORKSHEET ===
-    logger.info("📝 Writing results to Excel worksheet...")
-    row_count = 0
-    for r in dataframe_to_rows(anom_df, index=False, header=True):
-        ws.append(r)
-        row_count += 1
-    logger.info(f"✅ Written {row_count} rows to worksheet (including header)")
-
-    # === VISUAL FORMATTING ===
-    logger.info("🎨 Applying visual formatting to Excel output...")
-    apply_excel_formatting_ws(ws, anom_df, CONFIG)
-    logger.info("✅ Excel formatting applied successfully")
-
-    # === ADD CLEANED SHEETS FOR EACH FILE (AI MODE) ===
-    logger.info("📊 Adding cleaned BS and PL sheets to AI analysis...")
-    try:
-        for idx, (fname, xl_bytes) in enumerate(files):
-            sub = extract_subsidiary_name_from_bytes(xl_bytes, fname)
-            file_prefix = f"{sub}_{idx+1}" if len(files) > 1 else sub
-
-            # Add cleaned Balance Sheet
-            try:
-                bs_df, bs_cols = process_financial_tab_from_bytes(xl_bytes, "BS Breakdown", "BS", sub)
-                if not bs_df.empty:
-                    bs_ws = wb.create_sheet(title=f"{file_prefix}_BS_Cleaned"[:CONFIG["max_sheet_name_length"]])
-                    for r in dataframe_to_rows(bs_df, index=False, header=True):
-                        bs_ws.append(r)
-                    logger.info(f"✅ Added cleaned BS sheet for {sub}")
-            except Exception as e:
-                logger.warning(f"⚠️  Could not add cleaned BS sheet for {sub}: {e}")
-
-            # Add cleaned Profit & Loss Sheet
-            try:
-                pl_df, pl_cols = process_financial_tab_from_bytes(xl_bytes, "PL Breakdown", "PL", sub)
-                if not pl_df.empty:
-                    pl_ws = wb.create_sheet(title=f"{file_prefix}_PL_Cleaned"[:CONFIG["max_sheet_name_length"]])
-                    for r in dataframe_to_rows(pl_df, index=False, header=True):
-                        pl_ws.append(r)
-                    logger.info(f"✅ Added cleaned PL sheet for {sub}")
-            except Exception as e:
-                logger.warning(f"⚠️  Could not add cleaned PL sheet for {sub}: {e}")
-
-    except Exception as e:
-        logger.error(f"⚠️  Error adding cleaned sheets to AI analysis: {e}", exc_info=True)
-
-    # === RETURN BYTES ===
-    logger.info("💾 Generating final Excel file...")
-    bio = io.BytesIO()
-    wb.save(bio)
-    final_size = len(bio.getvalue())
-    logger.info("✅ Excel file generated successfully")
+    final_size = len(xlsx_bytes)
+    logger.info("✅ Excel file generated successfully (Python mode format)")
     logger.info(f"   • Output size: {final_size:,} bytes ({final_size/1024:.1f} KB)")
 
-    logger.info("📊 Debug Files Summary:")
-    logger.info(f"   • Debug files created: {len(debug_files)}")
-    for debug_name, debug_bytes in debug_files:
-        logger.info(f"     - {debug_name}: {len(debug_bytes):,} bytes ({len(debug_bytes)/1024:.1f} KB)")
-
     logger.info("🎉 ===== AI VARIANCE ANALYSIS COMPLETED =====")
-    return bio.getvalue(), debug_files
+    return xlsx_bytes, debug_files
