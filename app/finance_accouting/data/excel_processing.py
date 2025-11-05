@@ -210,9 +210,16 @@ def process_financial_tab_from_bytes(
 def extract_subsidiary_name_from_bytes(xl_bytes: bytes, fallback_filename: str) -> str:
     """Try to find a name on A2 of BS/PL sheets like 'Subsidiary: XYZ'. Fallback to filename stem."""
     try:
+        from ..utils.sheet_detection import detect_sheets_from_bytes
+
+        # Use fuzzy matching to find BS/PL sheets
+        bs_sheet, pl_sheet = detect_sheets_from_bytes(xl_bytes)
+
         wb = load_workbook(io.BytesIO(xl_bytes), read_only=True, data_only=True)
-        for sheet_name in ["BS Breakdown", "PL Breakdown"]:
-            if sheet_name in wb.sheetnames:
+
+        # Try BS sheet first, then PL sheet
+        for sheet_name in [bs_sheet, pl_sheet]:
+            if sheet_name and sheet_name in wb.sheetnames:
                 sheet = wb[sheet_name]
                 cell_value = sheet["A2"].value
                 if isinstance(cell_value, str) and ":" in cell_value:
@@ -1337,7 +1344,17 @@ def _add_month_to_month_analysis_to_sheet(ws, revenue_analysis: dict, variance_a
     try:
         # Load the Excel file using pandas
         import io
-        pl_df = pd.read_excel(io.BytesIO(xl_bytes), sheet_name="PL Breakdown", header=None)
+        from ..utils.sheet_detection import detect_sheets_from_bytes
+
+        # Detect PL sheet using fuzzy matching
+        _, pl_sheet = detect_sheets_from_bytes(xl_bytes)
+
+        if not pl_sheet:
+            logger.warning("⚠️  Could not detect PL sheet for month-to-month analysis")
+            # Fall back to default sheet name
+            pl_sheet = "PL Breakdown"
+
+        pl_df = pd.read_excel(io.BytesIO(xl_bytes), sheet_name=pl_sheet, header=None)
 
         # Read row 4 (index 3 in pandas, 0-indexed)
         row_4_values = pl_df.iloc[3].fillna('').astype(str).tolist()

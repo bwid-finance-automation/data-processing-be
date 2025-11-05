@@ -100,13 +100,17 @@ stop_container() {
 
 # Build Docker image
 build_image() {
+    local no_cache_flag="${1:-}"
     print_header "Building Docker Image"
 
     print_blue "Building ${IMAGE_NAME}..."
+    if [ "$no_cache_flag" = "--no-cache" ]; then
+        print_yellow "Building without cache (this will take longer)..."
+    fi
     print_blue "This will take a few minutes (installs Tesseract OCR, Python packages, etc.)"
     echo ""
 
-    docker build -t ${IMAGE_NAME} .
+    docker build $no_cache_flag -t ${IMAGE_NAME} .
 
     print_green "Image built successfully"
 }
@@ -209,6 +213,14 @@ main() {
             wait_for_health && show_info
             ;;
 
+        rebuild-nocache)
+            check_env_file
+            stop_container
+            build_image --no-cache
+            run_container
+            wait_for_health && show_info
+            ;;
+
         "")
             # Default: build and run
             check_env_file
@@ -234,10 +246,11 @@ main() {
             print_red "Unknown command: $1"
             echo ""
             echo "Usage:"
-            echo "  ./RUN_DOCKER.sh          # Build and run"
-            echo "  ./RUN_DOCKER.sh rebuild  # Force rebuild"
-            echo "  ./RUN_DOCKER.sh stop     # Stop and remove container"
-            echo "  ./RUN_DOCKER.sh logs     # View logs"
+            echo "  ./RUN_DOCKER.sh                # Build and run"
+            echo "  ./RUN_DOCKER.sh rebuild        # Force rebuild"
+            echo "  ./RUN_DOCKER.sh rebuild-nocache # Force rebuild without cache"
+            echo "  ./RUN_DOCKER.sh stop           # Stop and remove container"
+            echo "  ./RUN_DOCKER.sh logs           # View logs"
             exit 1
             ;;
     esac

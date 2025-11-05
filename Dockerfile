@@ -5,11 +5,12 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Install system dependencies including Tesseract OCR
-RUN apt-get update && apt-get install -y \
+# Note: Skipping libtesseract-dev temporarily due to package mirror sync issues
+RUN apt-get update && \
+    apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
     tesseract-ocr-vie \
-    libtesseract-dev \
     poppler-utils \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*

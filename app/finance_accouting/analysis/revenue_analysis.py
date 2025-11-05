@@ -393,12 +393,20 @@ def analyze_revenue_variance_comprehensive(xl_bytes: bytes, filename: str, CONFI
         Dictionary with comprehensive variance analysis results
     """
     try:
+        from ..utils.sheet_detection import detect_sheets_from_bytes
+
+        # Detect PL sheet using fuzzy matching
+        _, pl_sheet = detect_sheets_from_bytes(xl_bytes)
+
+        if not pl_sheet:
+            return {"error": "PL sheet not found in file"}
+
         xls = pd.ExcelFile(io.BytesIO(xl_bytes))
 
-        if 'PL Breakdown' not in xls.sheet_names:
-            return {"error": "PL Breakdown sheet not found"}
+        if pl_sheet not in xls.sheet_names:
+            return {"error": f"Detected PL sheet '{pl_sheet}' not found"}
 
-        pl_df = pd.read_excel(xls, sheet_name='PL Breakdown')
+        pl_df = pd.read_excel(xls, sheet_name=pl_sheet)
 
         # Find data start row
         data_start_row = None
@@ -754,12 +762,20 @@ def analyze_comprehensive_revenue_impact_from_bytes(xl_bytes: bytes, filename: s
     5. SG&A expense analysis (641* and 642*) for expense management insights
     """
     try:
+        from ..utils.sheet_detection import detect_sheets_from_bytes
+
+        # Detect PL sheet using fuzzy matching
+        _, pl_sheet = detect_sheets_from_bytes(xl_bytes)
+
+        if not pl_sheet:
+            return {"error": "PL sheet not found in file"}
+
         xls = pd.ExcelFile(io.BytesIO(xl_bytes))
 
-        if 'PL Breakdown' not in xls.sheet_names:
-            return {"error": "PL Breakdown sheet not found"}
+        if pl_sheet not in xls.sheet_names:
+            return {"error": f"Detected PL sheet '{pl_sheet}' not found"}
 
-        pl_df = pd.read_excel(xls, sheet_name='PL Breakdown')
+        pl_df = pd.read_excel(xls, sheet_name=pl_sheet)
 
         # Find data start row
         data_start_row = None
@@ -1368,12 +1384,20 @@ def analyze_revenue_impact_from_bytes(xl_bytes: bytes, filename: str, CONFIG: di
     Returns structured data for frontend display
     """
     try:
+        from ..utils.sheet_detection import detect_sheets_from_bytes
+
+        # Detect PL sheet using fuzzy matching
+        _, pl_sheet = detect_sheets_from_bytes(xl_bytes)
+
+        if not pl_sheet:
+            return {"error": "PL sheet not found in file"}
+
         xls = pd.ExcelFile(io.BytesIO(xl_bytes))
 
-        if 'PL Breakdown' not in xls.sheet_names:
-            return {"error": "PL Breakdown sheet not found"}
+        if pl_sheet not in xls.sheet_names:
+            return {"error": f"Detected PL sheet '{pl_sheet}' not found"}
 
-        pl_df = pd.read_excel(xls, sheet_name='PL Breakdown')
+        pl_df = pd.read_excel(xls, sheet_name=pl_sheet)
 
         # Find data start row
         data_start_row = None

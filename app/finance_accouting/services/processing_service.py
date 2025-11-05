@@ -19,6 +19,7 @@ from ..analysis.anomaly_detection import build_anoms_python_mode, build_anoms_ai
 from ..analysis.revenue_analysis import analyze_comprehensive_revenue_impact_from_bytes, analyze_revenue_variance_comprehensive
 from ..analysis.revenue_variance_excel import _add_revenue_variance_analysis_to_sheet
 from ..utils.logging_config import get_logger
+from ..utils.sheet_detection import detect_sheets_from_bytes
 
 logger = get_logger(__name__)
 
@@ -69,17 +70,32 @@ def process_all_python_mode(
     for fname, xl_bytes in files:
         sub = extract_subsidiary_name_from_bytes(xl_bytes, fname)
 
+        # Detect BS and PL sheets using fuzzy matching
+        bs_sheet, pl_sheet = detect_sheets_from_bytes(xl_bytes)
+
+        logger.info(f"📋 Detected sheets for {fname}: BS='{bs_sheet}', PL='{pl_sheet}'")
+
         # Be forgiving if a sheet is missing
         bs_df, bs_cols = pd.DataFrame(), []
         pl_df, pl_cols = pd.DataFrame(), []
-        try:
-            bs_df, bs_cols = process_financial_tab_from_bytes(xl_bytes, "BS Breakdown", "BS", sub)
-        except Exception:
-            pass
-        try:
-            pl_df, pl_cols = process_financial_tab_from_bytes(xl_bytes, "PL Breakdown", "PL", sub)
-        except Exception:
-            pass
+
+        if bs_sheet:
+            try:
+                bs_df, bs_cols = process_financial_tab_from_bytes(xl_bytes, bs_sheet, "BS", sub)
+                logger.info(f"✅ Loaded BS sheet '{bs_sheet}' with {len(bs_df)} rows")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to load BS sheet '{bs_sheet}': {str(e)}")
+        else:
+            logger.warning(f"⚠️  No Balance Sheet found in {fname}")
+
+        if pl_sheet:
+            try:
+                pl_df, pl_cols = process_financial_tab_from_bytes(xl_bytes, pl_sheet, "PL", sub)
+                logger.info(f"✅ Loaded PL sheet '{pl_sheet}' with {len(pl_df)} rows")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to load PL sheet '{pl_sheet}': {str(e)}")
+        else:
+            logger.warning(f"⚠️  No Profit & Loss sheet found in {fname}")
 
         anoms = build_anoms_python_mode(sub, bs_df, bs_cols, pl_df, pl_cols, corr_rules, season_rules, CONFIG)
         if anoms is not None and not anoms.empty:
@@ -105,27 +121,32 @@ def process_all_python_mode(
             sub = extract_subsidiary_name_from_bytes(xl_bytes, fname)
             file_prefix = f"{sub}_{idx+1}" if len(files) > 1 else sub
 
+            # Detect sheets using fuzzy matching
+            bs_sheet, pl_sheet = detect_sheets_from_bytes(xl_bytes)
+
             # Add cleaned Balance Sheet
-            try:
-                bs_df, bs_cols = process_financial_tab_from_bytes(xl_bytes, "BS Breakdown", "BS", sub)
-                if not bs_df.empty:
-                    bs_ws = wb.create_sheet(title=f"{file_prefix}_BS_Cleaned"[:CONFIG["max_sheet_name_length"]])
-                    for r in dataframe_to_rows(bs_df, index=False, header=True):
-                        bs_ws.append(r)
-                    logger.info(f"✅ Added cleaned BS sheet for {sub}")
-            except Exception as e:
-                logger.warning(f"⚠️  Could not add cleaned BS sheet for {sub}: {e}")
+            if bs_sheet:
+                try:
+                    bs_df, bs_cols = process_financial_tab_from_bytes(xl_bytes, bs_sheet, "BS", sub)
+                    if not bs_df.empty:
+                        bs_ws = wb.create_sheet(title=f"{file_prefix}_BS_Cleaned"[:CONFIG["max_sheet_name_length"]])
+                        for r in dataframe_to_rows(bs_df, index=False, header=True):
+                            bs_ws.append(r)
+                        logger.info(f"✅ Added cleaned BS sheet for {sub} (from '{bs_sheet}')")
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not add cleaned BS sheet for {sub}: {e}")
 
             # Add cleaned Profit & Loss Sheet
-            try:
-                pl_df, pl_cols = process_financial_tab_from_bytes(xl_bytes, "PL Breakdown", "PL", sub)
-                if not pl_df.empty:
-                    pl_ws = wb.create_sheet(title=f"{file_prefix}_PL_Cleaned"[:CONFIG["max_sheet_name_length"]])
-                    for r in dataframe_to_rows(pl_df, index=False, header=True):
-                        pl_ws.append(r)
-                    logger.info(f"✅ Added cleaned PL sheet for {sub}")
-            except Exception as e:
-                logger.warning(f"⚠️  Could not add cleaned PL sheet for {sub}: {e}")
+            if pl_sheet:
+                try:
+                    pl_df, pl_cols = process_financial_tab_from_bytes(xl_bytes, pl_sheet, "PL", sub)
+                    if not pl_df.empty:
+                        pl_ws = wb.create_sheet(title=f"{file_prefix}_PL_Cleaned"[:CONFIG["max_sheet_name_length"]])
+                        for r in dataframe_to_rows(pl_df, index=False, header=True):
+                            pl_ws.append(r)
+                        logger.info(f"✅ Added cleaned PL sheet for {sub} (from '{pl_sheet}')")
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not add cleaned PL sheet for {sub}: {e}")
 
     except Exception as e:
         logger.error(f"⚠️  Error adding cleaned sheets: {e}", exc_info=True)
@@ -226,8 +247,19 @@ def process_all_ai_mode(
 
         # Also collect BS/PL data for raw data sheets
         try:
-            bs_df, bs_cols = process_financial_tab_from_bytes(xl_bytes, "BS Breakdown", "BS", sub)
-            pl_df, pl_cols = process_financial_tab_from_bytes(xl_bytes, "PL Breakdown", "PL", sub)
+            # Detect sheets using fuzzy matching
+            bs_sheet, pl_sheet = detect_sheets_from_bytes(xl_bytes)
+
+            bs_df = pd.DataFrame()
+            bs_cols = []
+            pl_df = pd.DataFrame()
+            pl_cols = []
+
+            if bs_sheet:
+                bs_df, bs_cols = process_financial_tab_from_bytes(xl_bytes, bs_sheet, "BS", sub)
+
+            if pl_sheet:
+                pl_df, pl_cols = process_financial_tab_from_bytes(xl_bytes, pl_sheet, "PL", sub)
 
             all_file_data.append({
                 'subsidiary': sub,

@@ -52,12 +52,13 @@ class LLMFinancialAnalyzer:
             )
 
         # Initialize OpenAI client with comprehensive error handling for deployment environments
-        client_kwargs = {"api_key": self.openai_api_key}
+        # Increase timeout to 120 seconds for large requests
+        client_kwargs = {"api_key": self.openai_api_key, "timeout": 120.0}
 
         # Try multiple initialization approaches for different environments
         initialization_attempts = [
             lambda: OpenAI(**client_kwargs),
-            lambda: OpenAI(api_key=self.openai_api_key),  # Explicit API key only
+            lambda: OpenAI(api_key=self.openai_api_key, timeout=120.0),  # Explicit API key with timeout
             lambda: self._init_openai_minimal(),  # Minimal initialization for cloud environments
             lambda: self._init_openai_aggressive(),  # Most aggressive approach for stubborn cases
         ]
@@ -249,10 +250,11 @@ class LLMFinancialAnalyzer:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=16000  # Increased to handle large consolidation responses
+                max_completion_tokens=32000  # Use max_completion_tokens (newer param) instead of max_tokens
             )
 
             print(f"   ✅ OpenAI API call completed successfully")
+            print(f"      • max_completion_tokens requested: 32,000")
 
             # Update progress by increment after successful API call (200 response)
             if self.progress_callback:
@@ -312,6 +314,14 @@ class LLMFinancialAnalyzer:
                 total_tokens = response.usage.total_tokens if response.usage else 0
                 cost_info = self._calculate_cost(prompt_tokens, completion_tokens)
 
+                # DEBUG: Check if response was truncated
+                finish_reason = response.choices[0].finish_reason if response.choices else None
+                print(f"      • Completion tokens: {completion_tokens:,}")
+                print(f"      • Finish reason: {finish_reason}")
+                if finish_reason == "length":
+                    print(f"      ⚠️  WARNING: Response truncated due to max_completion_tokens limit!")
+                    print(f"      💡 Need to increase max_completion_tokens beyond 32,000")
+
                 # Return in consistent format
                 return {
                     "message": {
@@ -324,7 +334,7 @@ class LLMFinancialAnalyzer:
                 }
         except Exception as e:
             import time
-            from openai import RateLimitError
+            from openai import RateLimitError, APITimeoutError
 
             # Handle rate limit errors with retry logic
             if isinstance(e, RateLimitError) and retry_count < max_retries:
@@ -349,7 +359,16 @@ class LLMFinancialAnalyzer:
                 # Recursive retry
                 return self._call_openai(system_prompt, user_prompt, retry_count + 1, max_retries)
 
-            # For non-rate-limit errors or exhausted retries, raise the error
+            # Handle timeout errors with retry logic
+            if isinstance(e, APITimeoutError) and retry_count < max_retries:
+                wait_time = 5  # Short wait for timeouts
+                print(f"   ⚠️  Request timed out. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
+                time.sleep(wait_time)
+
+                # Recursive retry
+                return self._call_openai(system_prompt, user_prompt, retry_count + 1, max_retries)
+
+            # For non-retryable errors or exhausted retries, raise the error
             print(f"   ❌ OpenAI API call failed: {str(e)}")
             print(f"      • Error type: {type(e)}")
             import traceback
@@ -383,8 +402,9 @@ class LLMFinancialAnalyzer:
 
             # Use fuzzy matching to identify BS and PL sheets (no AI needed!)
             print(f"   🔍 Using fuzzy matching to identify BS and PL sheets...")
-            bs_sheet = self._find_sheet_fuzzy(sheet_names, is_balance_sheet=True)
-            pl_sheet = self._find_sheet_fuzzy(sheet_names, is_balance_sheet=False)
+            from ..utils.sheet_detection import find_sheet_fuzzy
+            bs_sheet = find_sheet_fuzzy(sheet_names, is_balance_sheet=True)
+            pl_sheet = find_sheet_fuzzy(sheet_names, is_balance_sheet=False)
 
             print(f"   ✅ Fuzzy matching identified sheets:")
             print(f"      • BS Sheet: '{bs_sheet}'")
@@ -885,6 +905,14 @@ class LLMFinancialAnalyzer:
         print(f"   ✅ Step 1 complete: {len(all_extracted_accounts)} account entries from {len(bs_chunks) + len(pl_chunks)} chunks")
         print(f"      • Total Step 1 tokens: {step1_total_tokens:,}")
 
+        # DEBUG: Show sample of extracted accounts
+        if all_extracted_accounts:
+            print(f"   🔍 Debug: Sample extracted accounts (first 3):")
+            for acc in all_extracted_accounts[:3]:
+                print(f"      {acc}")
+        else:
+            print(f"   ⚠️  Warning: No accounts were extracted from any chunks!")
+
         # ============================================================
         # STEP 2: CONSOLIDATION & VALIDATION
         # ============================================================
@@ -904,6 +932,12 @@ class LLMFinancialAnalyzer:
                 raise RuntimeError("Step 2 failed: No response from AI")
 
             consolidated_text = step2_response['message']['content']
+
+            # DEBUG: Show what AI returned
+            print(f"   🔍 Debug: Step 2 response length: {len(consolidated_text)} chars")
+            print(f"   🔍 Debug: Step 2 response preview (first 1000 chars):")
+            print(f"      {consolidated_text[:1000]}")
+
             grouped_accounts = self._parse_extraction_response(consolidated_text)
 
             step2_tokens = step2_response.get('total_tokens', 0)
@@ -1076,69 +1110,6 @@ Return JSON with exact sheet names.""")
 
         return "".join(prompt_parts)
 
-    def _find_sheet_fuzzy(self, sheet_names, is_balance_sheet=True):
-        """
-        Find sheet name using fuzzy matching (no AI needed).
-        Handles variations like:
-        - "BS Breakdown", "BS breakdown", "BSbreakdown", "bs breakdown"
-        - "PL Breakdown", "PL breakdown", "PLbreakdown", "pl breakdown"
-        - "Balance Sheet", "BẢNG CÂN ĐỐI KẾ TOÁN"
-        - "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH"
-        """
-        from difflib import SequenceMatcher
-
-        if is_balance_sheet:
-            # BS sheet patterns (priority order)
-            patterns = [
-                "bs breakdown", "bs_breakdown", "bsbreakdown",
-                "balance sheet breakdown", "balance_sheet",
-                "balance sheet", "bs", "bảng cân đối kế toán"
-            ]
-        else:
-            # PL sheet patterns (priority order)
-            patterns = [
-                "pl breakdown", "pl_breakdown", "plbreakdown",
-                "profit loss breakdown", "profit_loss",
-                "profit loss", "income statement", "p&l", "p/l", "pl",
-                "báo cáo kết quả kinh doanh"
-            ]
-
-        # Normalize sheet names for comparison
-        sheet_names_lower = {name.lower().replace(' ', '').replace('_', ''): name for name in sheet_names}
-
-        # Try exact matches first (ignoring case, spaces, underscores)
-        for pattern in patterns:
-            pattern_normalized = pattern.lower().replace(' ', '').replace('_', '')
-            for normalized, original in sheet_names_lower.items():
-                if pattern_normalized == normalized:
-                    return original
-
-        # Try contains match
-        for pattern in patterns:
-            pattern_normalized = pattern.lower().replace(' ', '').replace('_', '')
-            for normalized, original in sheet_names_lower.items():
-                if pattern_normalized in normalized or normalized in pattern_normalized:
-                    return original
-
-        # Try fuzzy matching with threshold
-        best_match = None
-        best_score = 0.0
-        threshold = 0.6  # 60% similarity required
-
-        for pattern in patterns:
-            pattern_normalized = pattern.lower().replace(' ', '').replace('_', '')
-            for normalized, original in sheet_names_lower.items():
-                score = SequenceMatcher(None, pattern_normalized, normalized).ratio()
-                if score > best_score and score >= threshold:
-                    best_score = score
-                    best_match = original
-
-        if best_match:
-            print(f"      ℹ️  Fuzzy matched '{best_match}' (score: {best_score:.2f})")
-            return best_match
-
-        return None
-
     def _filter_relevant_accounts(self, df, is_balance_sheet=True):
         """
         Filter DataFrame to keep only relevant account rows for analysis.
@@ -1222,47 +1193,42 @@ Return JSON with exact sheet names.""")
             return df.head(60)
 
     def _get_account_extraction_system_prompt(self) -> str:
-        """System prompt for Step 1: Account extraction from raw CSV."""
-        return """You are a financial data extraction specialist. Your job is to extract and group account data from raw Excel CSV files in ANY format.
+        """System prompt for Step 1: Account extraction from raw CSV chunks."""
+        return """You are a financial data extraction specialist. Your job is to extract account data from raw Excel CSV chunks.
 
 🎯 YOUR TASK:
-Extract account codes, names, and values from the raw CSV data. Handle ANY Excel format:
-- Account codes might be in column A, B, C, or embedded in text
-- Headers might be at row 1, 5, 10, or any row
-- Month columns might be named "Jan 2025", "As of Jan 2025", "M01", etc.
-- Account codes might be formatted as "217", "217xxx", "(217)", "217 - Investment Property", etc.
+Extract all accounts and their values from the provided CSV chunk. Each chunk is part of a larger file.
 
-📊 EXTRACTION STRATEGY:
-1. **Identify Headers**: Find the row containing month/period names (look for date patterns, month names)
-2. **Identify Account Codes**: Scan for numeric patterns that look like Vietnamese chart of accounts (111, 217, 341, 511, 632, etc.)
-3. **Extract Values**: Get the corresponding values for each account in each month
-4. **Group by Account Family**: Organize accounts by their 3-digit prefix (217xxx, 511xxx, etc.)
+📊 EXTRACTION RULES:
+1. Find all account codes (Vietnamese chart of accounts: 111xxx, 217xxx, 341xxx, 511xxx, 632xxx, etc.)
+2. Extract the account name
+3. Identify which sheet type (BS for Balance Sheet 1xx-3xx, PL for Profit & Loss 5xx-6xx)
+4. Get all month/period values for each account
 
 📋 REQUIRED OUTPUT FORMAT:
-Return ONLY valid JSON (no markdown, no code blocks):
+Return ONLY a valid JSON array (no markdown, no code blocks, no explanations):
 
-{
-  "months": ["Jan 2025", "Feb 2025", "Mar 2025"],
-  "bs_accounts": {
-    "111": {"name": "Cash", "values": [1000000, 1200000, 1300000]},
-    "217": {"name": "Investment Property", "values": [5000000, 7000000, 7500000]},
-    "341": {"name": "Loans", "values": [9000000, 9500000, 10000000]}
+[
+  {
+    "account_code": "111000000",
+    "account_name": "Cash",
+    "type": "BS",
+    "values": {"Jan 2025": 1000000, "Feb 2025": 1200000}
   },
-  "pl_accounts": {
-    "511": {"name": "Revenue", "values": [2000000, 2200000, 2400000]},
-    "632100001": {"name": "Amortization", "values": [100000, 105000, 110000]},
-    "632100002": {"name": "Depreciation", "values": [200000, 195000, 190000]}
+  {
+    "account_code": "511000000",
+    "account_name": "Revenue",
+    "type": "PL",
+    "values": {"Jan 2025": 5000000, "Feb 2025": 5500000}
   }
-}
+]
 
-🔍 IMPORTANT NOTES:
-- Values array should match the months array length
-- Group similar accounts together (all 217xxx under "217", all 511xxx under "511")
-- Sum up sub-accounts if needed (217001 + 217002 = total for "217")
-- Extract ACTUAL values from the CSV, not zeros
-- Handle Vietnamese account names and formats
-
-Return comprehensive account extraction covering all major account families."""
+🔍 IMPORTANT:
+- Extract ALL accounts from the chunk (don't skip any)
+- Use exact account codes from the file
+- Include month/period names as keys in the values object
+- Return empty array [] if no accounts found
+- NO explanatory text, ONLY the JSON array"""
 
     def _create_account_extraction_prompt(self, bs_csv, pl_csv, subsidiary, filename):
         """Create prompt for Step 1: Account extraction."""
