@@ -4,38 +4,32 @@ This file combines both:
 - Finance Accounting module
 - FP&A module
 into a single FastAPI application.
+
+Architecture: N-Layer Monolith
+- Presentation Layer: API routers (presentation/api/)
+- Application Layer: Use cases and orchestration (application/)
+- Domain Layer: Business logic (domain/)
+- Infrastructure Layer: External dependencies (infrastructure/)
 """
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from typing import Optional
-from datetime import datetime
-from pathlib import Path
 
-# Import routers from finance accounting module
-from app.finance_accouting.api import health as finance_health
-from app.finance_accouting.api import analysis as finance_analysis
-from app.finance_accouting.api import billing as finance_billing
-from app.finance_accouting.api import contract_ocr as finance_contract_ocr
+# Import routers from presentation layer (Department + Function Structure)
+from app.presentation.api import health_router
+from app.presentation.api.finance import variance_analysis_router
+from app.presentation.api.finance import utility_billing_router
+from app.presentation.api.finance import contract_ocr_router
+from app.presentation.api.fpa import excel_comparison_router
 
-# Note: FP&A doesn't use APIRouter pattern, we'll need to handle it separately
-from app.fpa.main import (
-    health_check as fpa_health_check,
-    compare_files as fpa_compare_files,
-    download_file as fpa_download_file,
-    list_output_files as fpa_list_output_files,
-    delete_file as fpa_delete_file,
-    cleanup_old_files as fpa_cleanup_old_files,
-    UPLOAD_DIR,
-    OUTPUT_DIR
-)
+# Import FPA use case for startup cleanup
+from app.application.fpa.excel_comparison.compare_excel_files import CompareExcelFilesUseCase
 
 # Create the root application
 app = FastAPI(
     title="Data Processing Backend (Unified)",
-    description="Unified API for Finance Accounting and FP&A modules",
-    version="2.0.0",
+    description="Unified API for Finance Accounting and FP&A modules | N-Layer Architecture",
+    version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -49,59 +43,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include Finance Accounting routers with /api/finance prefix
-app.include_router(finance_health.router, prefix="/api/finance", tags=["Finance - Health"])
-app.include_router(finance_analysis.router, prefix="/api/finance")
-app.include_router(finance_billing.router, prefix="/api/finance")
-app.include_router(finance_contract_ocr.router, prefix="/api/finance")
+# Include Finance Department routers with /api/finance prefix
+app.include_router(health_router.router, prefix="/api/finance", tags=["Finance - Health"])
+app.include_router(variance_analysis_router.router, prefix="/api/finance")
+app.include_router(utility_billing_router.router, prefix="/api/finance")
+app.include_router(contract_ocr_router.router, prefix="/api/finance")
 
-# Add FP&A endpoints with /api/fpa prefix
+# Include FP&A Department router with /api prefix (already has /fpa prefix in router)
+app.include_router(excel_comparison_router.router, prefix="/api")
+
+# Startup event for cleanup
 @app.on_event("startup")
 async def startup_event():
     """Run cleanup on startup"""
-    fpa_cleanup_old_files()
-
-@app.get("/api/fpa/health", tags=["FP&A - Health"])
-async def fpa_health():
-    """Health check endpoint for FP&A module"""
-    return await fpa_health_check()
-
-@app.post("/api/fpa/compare", tags=["FP&A - Compare"])
-async def fpa_compare(
-    old_file: UploadFile = File(..., description="Previous month Excel file"),
-    new_file: UploadFile = File(..., description="Current month Excel file")
-):
-    """
-    Compare two Excel files and return comparison results.
-
-    This endpoint:
-    1. Generates an output Excel file with new_rows and update_rows sheets
-    2. Applies highlighting to the current file (yellow for new rows, blue for changed cells)
-    3. Returns both files for download along with comparison statistics
-    """
-    return await fpa_compare_files(old_file, new_file)
-
-@app.get("/api/fpa/download/{filename}", tags=["FP&A - Files"])
-async def fpa_download(filename: str):
-    """Download generated output file"""
-    return await fpa_download_file(filename)
-
-@app.get("/api/fpa/files", tags=["FP&A - Files"])
-async def fpa_list_files():
-    """List all available output files"""
-    return await fpa_list_output_files()
-
-@app.delete("/api/fpa/files/{filename}", tags=["FP&A - Files"])
-async def fpa_delete(filename: str):
-    """Delete an output file"""
-    return await fpa_delete_file(filename)
+    fpa_use_case = CompareExcelFilesUseCase()
+    fpa_use_case.cleanup_old_files()
 
 # Root health check
 @app.get("/", tags=["Root"])
 def root():
     return {
         "message": "Unified Data Processing Backend running",
-        "version": "2.0.0",
+        "version": "3.0.0",
+        "architecture": "N-Layer Monolith",
+        "layers": {
+            "presentation": "API routers, middleware, request/response schemas",
+            "application": "Use cases, orchestration, application services",
+            "domain": "Business logic, domain models, domain services",
+            "infrastructure": "External dependencies (Excel, AI, OCR, storage)"
+        },
         "modules": {
             "finance": {
                 "description": "Finance Accounting module",
