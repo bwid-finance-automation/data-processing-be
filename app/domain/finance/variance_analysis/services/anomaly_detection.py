@@ -229,6 +229,17 @@ def build_anoms_ai_mode(
                 logger.debug(f"   • Skipping anomaly {idx}: No change detected (both amount and percent are 0)")
                 continue
 
+            # Map severity to emoji for Excel coloring
+            severity = anom.get("severity", "Low")
+            if severity == "Critical":
+                priority_emoji = "🔴 Critical"
+            elif severity == "High":
+                priority_emoji = "🔴 High"
+            elif severity == "Medium":
+                priority_emoji = "🟡 Review"
+            else:  # Low
+                priority_emoji = "🟢 Info"
+
             anomalies.append({
                 "Subsidiary": anom["subsidiary"],
                 "Account": anom["account_code"],
@@ -238,6 +249,7 @@ def build_anoms_ai_mode(
                 "Trigger(s)": anom["rule_name"],
                 "Suggested likely cause": anom["details"],
                 "Status": "AI Analysis",
+                "Priority": priority_emoji,
                 "Notes": anom["details"],
             })
         logger.info("✅ Successfully converted all AI results to report format")
