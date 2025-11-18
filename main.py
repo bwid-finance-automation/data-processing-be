@@ -20,6 +20,7 @@ from app.presentation.api import health_router
 from app.presentation.api.finance import variance_analysis_router
 from app.presentation.api.finance import utility_billing_router
 from app.presentation.api.finance import contract_ocr_router
+from app.presentation.api.finance import bank_statement_parser_router
 from app.presentation.api.fpa import excel_comparison_router
 
 # Import FPA use case for startup cleanup
@@ -48,6 +49,7 @@ app.include_router(health_router.router, prefix="/api/finance", tags=["Finance -
 app.include_router(variance_analysis_router.router, prefix="/api/finance")
 app.include_router(utility_billing_router.router, prefix="/api/finance")
 app.include_router(contract_ocr_router.router, prefix="/api/finance")
+app.include_router(bank_statement_parser_router.router, prefix="/api/finance")
 
 # Include FP&A Department router with /api prefix (already has /fpa prefix in router)
 app.include_router(excel_comparison_router.router, prefix="/api")
@@ -80,7 +82,8 @@ def root():
                     "/api/finance/process",
                     "/api/finance/start-analysis",
                     "/api/finance/billing/*",
-                    "/api/finance/contract-ocr/*"
+                    "/api/finance/contract-ocr/*",
+                    "/api/finance/bank-statements/*"
                 ]
             },
             "fpa": {
