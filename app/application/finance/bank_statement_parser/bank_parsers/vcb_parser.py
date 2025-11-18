@@ -23,9 +23,16 @@ class VCBParser(BaseBankParser):
 
         Logic from fxLooksLike_VCB:
         - Template 1: Has "VCB CASHUP" or "STATEMENT OF ACCOUNT"
+        - Template 3 (HTML): Has "SAO KÊ TÀI KHOẢN" and HTML tags
         - Read first 20 rows for detection
         """
         try:
+            # Check if HTML file
+            if self._is_html_file(file_bytes):
+                content = file_bytes.decode('utf-8', errors='ignore')
+                return "SAO KÊ TÀI KHOẢN" in content and "VIETCOMBANK" in content.upper()
+
+            # Excel file
             xls = pd.ExcelFile(io.BytesIO(file_bytes))
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -49,15 +56,21 @@ class VCBParser(BaseBankParser):
 
     def parse_transactions(self, file_bytes: bytes, file_name: str) -> List[BankTransaction]:
         """
-        Parse VCB transactions - handles BOTH templates.
+        Parse VCB transactions - handles BOTH templates and HTML.
 
         Logic from fxParse_VCB_Transactions:
         - Template detection: Simple format has "Ngày giao dịch" as column 0, Multi has "STT" as column 0
         - Map: Debit = "Credit/Remittance" (CÓ), Credit = "Debit" (NỢ) - SWAPPED!
         - Template 1 (Multi-account): Multiple account sections
         - Template 2 (Simple): Single account
+        - Template 3 (HTML): HTML table format
         """
         try:
+            # Check if HTML file
+            if self._is_html_file(file_bytes):
+                return self._parse_html_template(file_bytes)
+
+            # Excel file
             xls = pd.ExcelFile(io.BytesIO(file_bytes))
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -85,6 +98,11 @@ class VCBParser(BaseBankParser):
         - Fallback: Last balance in transaction table
         """
         try:
+            # Check if HTML file
+            if self._is_html_file(file_bytes):
+                return self._parse_html_balances(file_bytes)
+
+            # Excel file
             xls = pd.ExcelFile(io.BytesIO(file_bytes))
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
@@ -420,7 +438,7 @@ class VCBParser(BaseBankParser):
     def _fix_date_vcb(self, value) -> Optional[datetime]:
         """
         VCB-specific date parser.
-        Handles DD/MM/YYYY format and datetime strings.
+        Handles DD/MM/YYYY format, YYYY-MM-DD format, and datetime strings.
         """
         if value is None or pd.isna(value):
             return None
@@ -440,6 +458,12 @@ class VCBParser(BaseBankParser):
         if " " in txt:
             txt = txt.split(" ")[0]
 
+        # Try YYYY-MM-DD format (HTML format)
+        try:
+            return datetime.strptime(txt, "%Y-%m-%d").date()
+        except:
+            pass
+
         # Try DD/MM/YYYY format
         try:
             return datetime.strptime(txt, "%d/%m/%Y").date()
@@ -450,4 +474,152 @@ class VCBParser(BaseBankParser):
         try:
             return pd.to_datetime(txt, dayfirst=True).date()
         except:
+            return None
+
+    def _is_html_file(self, file_bytes: bytes) -> bool:
+        """Check if file is HTML format."""
+        try:
+            # Check first 100 bytes for HTML markers
+            header = file_bytes[:100].decode('utf-8', errors='ignore').lower()
+            return '<html' in header or '<!doctype html' in header
+        except:
+            return False
+
+    def _parse_html_template(self, file_bytes: bytes) -> List[BankTransaction]:
+        """Parse VCB HTML template transactions."""
+        try:
+            # Read HTML tables
+            from io import StringIO
+            content = file_bytes.decode('utf-8', errors='ignore')
+            tables = pd.read_html(StringIO(content))
+
+            if not tables:
+                return []
+
+            # The main table contains all data
+            df = tables[0]
+
+            # Extract account number (row 3, column 1)
+            acc_no = None
+            if len(df) > 3 and len(df.columns) > 1:
+                acc_text = str(df.iloc[3, 1])
+                acc_no = ''.join(c for c in acc_text if c.isdigit())
+
+            # Extract currency (row 6, column 1)
+            currency = "VND"
+            if len(df) > 6 and len(df.columns) > 1:
+                currency_text = str(df.iloc[6, 1]).upper()
+                if any(curr in currency_text for curr in ["VND", "USD", "EUR"]):
+                    currency = currency_text.strip()
+
+            # Find transaction header row (contains "Ngày giao dịch")
+            header_idx = None
+            for idx, row in df.iterrows():
+                row_text = " ".join([str(cell) for cell in row if pd.notna(cell)]).upper()
+                if "NGÀY GIAO DỊCH" in row_text:
+                    header_idx = int(idx)
+                    break
+
+            if header_idx is None:
+                return []
+
+            # Extract transactions
+            transactions = []
+            for idx in range(header_idx + 1, len(df)):
+                row = df.iloc[idx]
+
+                # Stop at total row
+                row_text = " ".join([str(cell) for cell in row if pd.notna(cell)]).upper()
+                if "TỔNG SỐ" in row_text or "TOTAL" in row_text:
+                    break
+
+                # Get transaction data
+                if len(row) < 5:
+                    continue
+
+                date_val = row.iloc[0] if pd.notna(row.iloc[0]) else None
+                tx_id = str(row.iloc[1]) if pd.notna(row.iloc[1]) else ""
+                debit_val = row.iloc[2] if pd.notna(row.iloc[2]) else None  # "Số tiền ghi nợ" = money out = credit in our system
+                credit_val = row.iloc[3] if pd.notna(row.iloc[3]) else None  # "Số tiền ghi có" = money in = debit in our system
+                desc = str(row.iloc[4]) if pd.notna(row.iloc[4]) else ""
+
+                # Skip if both amounts are zero/blank
+                debit_num = self.fix_number(debit_val)
+                credit_num = self.fix_number(credit_val)
+
+                if (debit_num is None or debit_num == 0) and (credit_num is None or credit_num == 0):
+                    continue
+
+                tx = BankTransaction(
+                    bank_name="VCB",
+                    acc_no=acc_no or "",
+                    debit=credit_num if credit_num else None,  # SWAPPED: Ghi có = money in = debit
+                    credit=debit_num if debit_num else None,  # SWAPPED: Ghi nợ = money out = credit
+                    date=self._fix_date_vcb(date_val),
+                    description=desc,
+                    currency=currency,
+                    transaction_id=tx_id,
+                    beneficiary_bank="",
+                    beneficiary_acc_no="",
+                    beneficiary_acc_name=""
+                )
+
+                transactions.append(tx)
+
+            return transactions
+
+        except Exception as e:
+            print(f"Error parsing VCB HTML transactions: {e}")
+            return []
+
+    def _parse_html_balances(self, file_bytes: bytes) -> Optional[BankBalance]:
+        """Parse VCB HTML template balances."""
+        try:
+            # Read HTML tables
+            from io import StringIO
+            content = file_bytes.decode('utf-8', errors='ignore')
+            tables = pd.read_html(StringIO(content))
+
+            if not tables:
+                return None
+
+            df = tables[0]
+
+            # Extract account number (row 3, column 1)
+            acc_no = None
+            if len(df) > 3 and len(df.columns) > 1:
+                acc_text = str(df.iloc[3, 1])
+                acc_no = ''.join(c for c in acc_text if c.isdigit())
+
+            # Extract currency (row 6, column 1)
+            currency = "VND"
+            if len(df) > 6 and len(df.columns) > 1:
+                currency_text = str(df.iloc[6, 1]).upper()
+                if any(curr in currency_text for curr in ["VND", "USD", "EUR"]):
+                    currency = currency_text.strip()
+
+            # Find balance row (contains "Số dư đầu kỳ" and "Số dư cuối kỳ")
+            opening = None
+            closing = None
+
+            for idx, row in df.iterrows():
+                row_text = " ".join([str(cell) for cell in row if pd.notna(cell)]).upper()
+                if "SỐ DƯ ĐẦU KỲ" in row_text:
+                    # Opening balance is in column 1, closing in column 3
+                    if len(row) > 1:
+                        opening = self.fix_number(row.iloc[1])
+                    if len(row) > 3:
+                        closing = self.fix_number(row.iloc[3])
+                    break
+
+            return BankBalance(
+                bank_name="VCB",
+                acc_no=acc_no or "",
+                currency=currency,
+                opening_balance=opening or 0.0,
+                closing_balance=closing or 0.0
+            )
+
+        except Exception as e:
+            print(f"Error parsing VCB HTML balances: {e}")
             return None

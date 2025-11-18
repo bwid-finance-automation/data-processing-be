@@ -124,6 +124,11 @@ class OCBParser(BaseBankParser):
             transactions = []
 
             for _, row in data.iterrows():
+                # Skip rows without a valid date (filters out summary rows)
+                date_val = row.get("Date") if "Date" in row else None
+                if date_val is None or pd.isna(date_val):
+                    continue
+
                 debit_val = row.get("Debit") if "Debit" in row else None
                 credit_val = row.get("Credit") if "Credit" in row else None
 
@@ -137,7 +142,7 @@ class OCBParser(BaseBankParser):
                     acc_no=acc_no or "",
                     debit=debit_val if pd.notna(debit_val) else None,
                     credit=credit_val if pd.notna(credit_val) else None,
-                    date=row.get("Date") if "Date" in row and pd.notna(row.get("Date")) else None,
+                    date=date_val,  # Already validated above
                     description=self.to_text(row.get("Description", "")) if "Description" in row else "",
                     currency=currency or "VND",
                     transaction_id=self.to_text(row.get("TransactionID", "")) if "TransactionID" in row else "",
