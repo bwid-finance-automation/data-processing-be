@@ -2,7 +2,8 @@
 
 from typing import List, Tuple, Dict, Any
 import pandas as pd
-from io import BytesIO
+import csv
+from io import BytesIO, StringIO
 
 from app.domain.finance.bank_statement_parser.models import BankStatement, BankTransaction, BankBalance
 from .bank_parsers.parser_factory import ParserFactory
@@ -255,3 +256,99 @@ class ParseBankStatementsUseCase:
 
         output.seek(0)
         return output.read()
+
+    def export_to_netsuite_csv(
+        self,
+        all_transactions: List[BankTransaction],
+        _all_balances: List[BankBalance]
+    ) -> bytes:
+        """
+        Export parsed data to NetSuite CSV format.
+
+        Creates CSV with 15 columns for NetSuite import:
+        External ID, Date, Bank Name, Account Number, GL Account, Subsidiary,
+        Currency, Debit, Credit, Net Amount, Description, Transaction ID,
+        Beneficiary Name, Beneficiary Account, Beneficiary Bank
+
+        Args:
+            all_transactions: List of all transactions
+            all_balances: List of all balances (not used in CSV, kept for consistency)
+
+        Returns:
+            CSV file as bytes (UTF-8 with BOM)
+        """
+        output = StringIO()
+        writer = csv.writer(output)
+
+        # Write header row (15 columns)
+        headers = [
+            "External ID",
+            "Date",
+            "Bank Name",
+            "Account Number",
+            "GL Account",
+            "Subsidiary",
+            "Currency",
+            "Debit",
+            "Credit",
+            "Net Amount",
+            "Description",
+            "Transaction ID",
+            "Beneficiary Name",
+            "Beneficiary Account",
+            "Beneficiary Bank"
+        ]
+        writer.writerow(headers)
+
+        # Write transaction rows
+        seq = 0
+        for tx in all_transactions:
+            seq += 1
+
+            # Generate External ID: BT-{YYYYMMDD}-{BANK}-{SEQ:06d}
+            if tx.date:
+                date_str = tx.date.strftime("%Y%m%d")
+                formatted_date = tx.date.strftime("%m/%d/%Y")
+            else:
+                date_str = "00000000"
+                formatted_date = ""
+
+            external_id = f"BT-{date_str}-{tx.bank_name}-{seq:06d}"
+
+            # Handle Debit/Credit: empty if None or 0
+            debit_val = "" if (tx.debit is None or tx.debit == 0) else tx.debit
+            credit_val = "" if (tx.credit is None or tx.credit == 0) else tx.credit
+
+            # Calculate Net Amount: (debit or 0) - (credit or 0)
+            net_amount = (tx.debit or 0) - (tx.credit or 0)
+
+            # Truncate description to 500 characters
+            description = (tx.description or "")[:500]
+
+            # Currency: default to VND if empty
+            currency = tx.currency if tx.currency else "VND"
+
+            row = [
+                external_id,
+                formatted_date,
+                tx.bank_name,
+                tx.acc_no,
+                "",  # GL Account - leave empty
+                "",  # Subsidiary - leave empty
+                currency,
+                debit_val,
+                credit_val,
+                net_amount,
+                description,
+                tx.transaction_id or "",
+                tx.beneficiary_acc_name or "",
+                tx.beneficiary_acc_no or "",
+                tx.beneficiary_bank or ""
+            ]
+            writer.writerow(row)
+
+        # Get CSV content and encode with UTF-8 BOM
+        csv_content = output.getvalue()
+        # UTF-8 BOM prefix for Excel compatibility with Vietnamese characters
+        bom = b'\xef\xbb\xbf'
+        return bom + csv_content.encode('utf-8')

@@ -1,6 +1,6 @@
 """Pydantic schemas for bank statement parsing API."""
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel, Field, ConfigDict
 from datetime import date, datetime
 
@@ -158,6 +158,10 @@ class PowerAutomateParseRequest(BaseModel):
         default=True,
         description="If true, return Excel output as base64 in response"
     )
+    output_format: Literal["excel", "csv", "both"] = Field(
+        default="excel",
+        description="Output format: 'excel' for Excel only, 'csv' for NetSuite CSV only, 'both' for both formats"
+    )
 
 
 class PowerAutomateParseResponse(BaseModel):
@@ -188,5 +192,7 @@ class PowerAutomateParseResponse(BaseModel):
     summary: Dict[str, Any] = Field(default_factory=dict)
     statements: List[BankStatementResponse] = Field(default_factory=list)
     excel_base64: Optional[str] = Field(None, description="Base64 encoded Excel output file")
-    excel_filename: str = Field(default="bank_statements_output.xlsx")
+    excel_filename: Optional[str] = Field(default="bank_statements_output.xlsx")
+    csv_base64: Optional[str] = Field(None, description="Base64 encoded NetSuite CSV file")
+    csv_filename: Optional[str] = Field(None, description="NetSuite CSV filename")
     download_url: Optional[str] = Field(None, description="URL to download Excel output")

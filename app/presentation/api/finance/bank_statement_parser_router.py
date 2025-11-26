@@ -320,18 +320,44 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
             result["summary"]["failed"] += len(decode_errors)
             result["summary"]["failed_files"].extend(decode_errors)
 
-        # Generate Excel output
-        excel_bytes = use_case.export_to_excel(
-            result["all_transactions"],
-            result["all_balances"]
-        )
-
-        # Store for download
+        # Generate session ID
         session_id = str(uuid.uuid4())
-        _file_storage[session_id] = {
-            "content": excel_bytes,
-            "filename": f"bank_statements_{session_id}.xlsx"
-        }
+
+        # Initialize output variables
+        excel_base64 = None
+        excel_filename = None
+        csv_base64 = None
+        csv_filename = None
+        excel_bytes = None
+
+        # Get output_format (default: "excel")
+        output_format = request.output_format
+
+        # Generate Excel if requested
+        if output_format in ("excel", "both"):
+            excel_bytes = use_case.export_to_excel(
+                result["all_transactions"],
+                result["all_balances"]
+            )
+            excel_filename = f"bank_statements_{session_id}.xlsx"
+            if request.return_excel_base64:
+                excel_base64 = base64.b64encode(excel_bytes).decode('utf-8')
+
+        # Generate CSV if requested
+        if output_format in ("csv", "both"):
+            csv_bytes = use_case.export_to_netsuite_csv(
+                result["all_transactions"],
+                result["all_balances"]
+            )
+            csv_filename = f"netsuite_import_{session_id}.csv"
+            csv_base64 = base64.b64encode(csv_bytes).decode('utf-8')
+
+        # Store Excel for download (for backward compatibility)
+        if excel_bytes:
+            _file_storage[session_id] = {
+                "content": excel_bytes,
+                "filename": excel_filename
+            }
 
         # Convert to response schema
         statements_response = []
@@ -386,13 +412,12 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
             message=f"Processed {result['summary']['successful']} of {result['summary']['total_files']} files successfully",
             summary=result["summary"],
             statements=statements_response,
-            excel_filename=f"bank_statements_{session_id}.xlsx",
-            download_url=f"/api/finance/bank-statements/download/{session_id}"
+            excel_base64=excel_base64,
+            excel_filename=excel_filename,
+            csv_base64=csv_base64,
+            csv_filename=csv_filename,
+            download_url=f"/api/finance/bank-statements/download/{session_id}" if excel_bytes else None
         )
-
-        # Add base64 Excel if requested
-        if request.return_excel_base64:
-            response.excel_base64 = base64.b64encode(excel_bytes).decode('utf-8')
 
         return response
 
