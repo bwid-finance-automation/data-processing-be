@@ -103,3 +103,90 @@ class SupportedBanksResponse(BaseModel):
 
     banks: List[str] = Field(default_factory=list)
     count: int = 0
+
+
+# ========== Power Automate Schemas ==========
+
+class PowerAutomateFileInput(BaseModel):
+    """Single file input for Power Automate - supports both formats."""
+
+    model_config = ConfigDict(extra="allow")  # Allow extra fields from Power Automate
+
+    # Support both 'name' (from Power Automate) and 'file_name'
+    name: Optional[str] = Field(default=None, description="Name of the file (Power Automate format)")
+    file_name: Optional[str] = Field(default=None, description="Name of the file (alternative)")
+
+    # Support both 'contentBytes' and 'file_content_base64'
+    contentBytes: Optional[str] = Field(None, description="Base64 file content (Power Automate format)")
+    file_content_base64: Optional[str] = Field(None, description="Base64 file content (alternative)")
+
+    # Optional fields from Power Automate
+    url: Optional[str] = Field(None, description="OneDrive URL (not used for processing)")
+    source: Optional[str] = Field(None, description="Source type (ZIP/PDF)")
+
+    def get_file_name(self) -> str:
+        """Get file name from either field."""
+        return self.name or self.file_name or "unknown"
+
+    def get_content_base64(self) -> Optional[str]:
+        """Get base64 content from either field."""
+        return self.contentBytes or self.file_content_base64
+
+
+class PowerAutomateParseRequest(BaseModel):
+    """Request schema for Power Automate bank statement parsing."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "files": [
+                    {
+                        "name": "ACB_Jan2025.xlsx",
+                        "contentBytes": "UEsDBBQAAAAI..."
+                    }
+                ],
+                "return_excel_base64": True
+            }
+        }
+    )
+
+    files: List[PowerAutomateFileInput] = Field(
+        ...,
+        description="List of files to parse. Can be .xlsx, .xls, .pdf"
+    )
+    return_excel_base64: bool = Field(
+        default=True,
+        description="If true, return Excel output as base64 in response"
+    )
+
+
+class PowerAutomateParseResponse(BaseModel):
+    """Response schema for Power Automate bank statement parsing."""
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        json_schema_extra={
+            "example": {
+                "success": True,
+                "summary": {
+                    "total_files": 2,
+                    "successful": 2,
+                    "failed": 0,
+                    "total_transactions": 50,
+                    "total_balances": 2
+                },
+                "statements": [],
+                "excel_base64": "UEsDBBQAAAAI...",
+                "excel_filename": "bank_statements_output.xlsx",
+                "download_url": "/api/finance/bank-statements/download/abc123"
+            }
+        }
+    )
+
+    success: bool = Field(default=True)
+    message: str = Field(default="")
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    statements: List[BankStatementResponse] = Field(default_factory=list)
+    excel_base64: Optional[str] = Field(None, description="Base64 encoded Excel output file")
+    excel_filename: str = Field(default="bank_statements_output.xlsx")
+    download_url: Optional[str] = Field(None, description="URL to download Excel output")
