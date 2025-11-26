@@ -158,9 +158,9 @@ class PowerAutomateParseRequest(BaseModel):
         default=True,
         description="If true, return Excel output as base64 in response"
     )
-    output_format: Literal["excel", "csv", "both"] = Field(
+    output_format: Literal["excel", "netsuite_csv", "both"] = Field(
         default="excel",
-        description="Output format: 'excel' for Excel only, 'csv' for NetSuite CSV only, 'both' for both formats"
+        description="Output format: 'excel' for Excel only, 'netsuite_csv' for NetSuite CSV files (Balance + Details), 'both' for all formats"
     )
 
 
@@ -193,6 +193,8 @@ class PowerAutomateParseResponse(BaseModel):
     statements: List[BankStatementResponse] = Field(default_factory=list)
     excel_base64: Optional[str] = Field(None, description="Base64 encoded Excel output file")
     excel_filename: Optional[str] = Field(default="bank_statements_output.xlsx")
-    csv_base64: Optional[str] = Field(None, description="Base64 encoded NetSuite CSV file")
-    csv_filename: Optional[str] = Field(None, description="NetSuite CSV filename")
+    csv_balance_base64: Optional[str] = Field(None, description="Base64 encoded NetSuite Balance CSV file")
+    csv_balance_filename: Optional[str] = Field(None, description="NetSuite Balance CSV filename")
+    csv_details_base64: Optional[str] = Field(None, description="Base64 encoded NetSuite Details CSV file")
+    csv_details_filename: Optional[str] = Field(None, description="NetSuite Details CSV filename")
     download_url: Optional[str] = Field(None, description="URL to download Excel output")

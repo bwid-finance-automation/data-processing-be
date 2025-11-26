@@ -326,8 +326,10 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
         # Initialize output variables
         excel_base64 = None
         excel_filename = None
-        csv_base64 = None
-        csv_filename = None
+        csv_balance_base64 = None
+        csv_balance_filename = None
+        csv_details_base64 = None
+        csv_details_filename = None
         excel_bytes = None
 
         # Get output_format (default: "excel")
@@ -343,14 +345,23 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
             if request.return_excel_base64:
                 excel_base64 = base64.b64encode(excel_bytes).decode('utf-8')
 
-        # Generate CSV if requested
-        if output_format in ("csv", "both"):
-            csv_bytes = use_case.export_to_netsuite_csv(
+        # Generate NetSuite CSVs if requested
+        if output_format in ("netsuite_csv", "both"):
+            # Generate Balance CSV (returns bytes and external_ids mapping)
+            balance_bytes, balance_external_ids = use_case.export_to_netsuite_balance_csv(
                 result["all_transactions"],
                 result["all_balances"]
             )
-            csv_filename = f"netsuite_import_{session_id}.csv"
-            csv_base64 = base64.b64encode(csv_bytes).decode('utf-8')
+            csv_balance_filename = f"netsuite_balance_{session_id}.csv"
+            csv_balance_base64 = base64.b64encode(balance_bytes).decode('utf-8')
+
+            # Generate Details CSV (uses balance_external_ids for linking)
+            details_bytes = use_case.export_to_netsuite_details_csv(
+                result["all_transactions"],
+                balance_external_ids
+            )
+            csv_details_filename = f"netsuite_details_{session_id}.csv"
+            csv_details_base64 = base64.b64encode(details_bytes).decode('utf-8')
 
         # Store Excel for download (for backward compatibility)
         if excel_bytes:
@@ -414,8 +425,10 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
             statements=statements_response,
             excel_base64=excel_base64,
             excel_filename=excel_filename,
-            csv_base64=csv_base64,
-            csv_filename=csv_filename,
+            csv_balance_base64=csv_balance_base64,
+            csv_balance_filename=csv_balance_filename,
+            csv_details_base64=csv_details_base64,
+            csv_details_filename=csv_details_filename,
             download_url=f"/api/finance/bank-statements/download/{session_id}" if excel_bytes else None
         )
 

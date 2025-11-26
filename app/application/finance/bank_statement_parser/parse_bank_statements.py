@@ -1,9 +1,11 @@
 """Use case for parsing bank statements (batch processing)."""
 
 from typing import List, Tuple, Dict, Any
+from datetime import datetime
 import pandas as pd
 import csv
 from io import BytesIO, StringIO
+from collections import defaultdict
 
 from app.domain.finance.bank_statement_parser.models import BankStatement, BankTransaction, BankBalance
 from .bank_parsers.parser_factory import ParserFactory
@@ -257,22 +259,125 @@ class ParseBankStatementsUseCase:
         output.seek(0)
         return output.read()
 
-    def export_to_netsuite_csv(
+    def export_to_netsuite_balance_csv(
         self,
         all_transactions: List[BankTransaction],
-        _all_balances: List[BankBalance]
-    ) -> bytes:
+        all_balances: List[BankBalance]
+    ) -> Tuple[bytes, Dict[str, str]]:
         """
-        Export parsed data to NetSuite CSV format.
+        Export Balance CSV for NetSuite import.
 
-        Creates CSV with 15 columns for NetSuite import:
-        External ID, Date, Bank Name, Account Number, GL Account, Subsidiary,
-        Currency, Debit, Credit, Net Amount, Description, Transaction ID,
-        Beneficiary Name, Beneficiary Account, Beneficiary Bank
+        Creates CSV with 10 columns:
+        External ID, Name (*), Bank Account Number (*), Bank code (*),
+        Openning Balance (*), Closing Balance (*), Total Debit (*),
+        Total Credit (*), Currency (*), Date (*)
 
         Args:
             all_transactions: List of all transactions
-            all_balances: List of all balances (not used in CSV, kept for consistency)
+            all_balances: List of all balances
+
+        Returns:
+            Tuple of (CSV file as bytes, dict mapping bank_acc to external_id)
+        """
+        output = StringIO()
+        writer = csv.writer(output)
+
+        # Write header row (10 columns)
+        headers = [
+            "External ID",
+            "Name (*)",
+            "Bank Account Number (*)",
+            "Bank code (*)",
+            "Openning Balance (*)",
+            "Closing Balance (*)",
+            "Total Debit (*)",
+            "Total Credit (*)",
+            "Currency (*)",
+            "Date (*)"
+        ]
+        writer.writerow(headers)
+
+        # Get current date for External ID format
+        now = datetime.now()
+        date_suffix = now.strftime("%m%d%y")  # MMDDYY format
+
+        # Aggregate transactions by bank_name + acc_no
+        tx_aggregates = defaultdict(lambda: {"total_debit": 0, "total_credit": 0, "max_date": None})
+        for tx in all_transactions:
+            key = f"{tx.bank_name}_{tx.acc_no}"
+            tx_aggregates[key]["total_debit"] += int(tx.debit or 0)
+            tx_aggregates[key]["total_credit"] += int(tx.credit or 0)
+            if tx.date:
+                if tx_aggregates[key]["max_date"] is None or tx.date > tx_aggregates[key]["max_date"]:
+                    tx_aggregates[key]["max_date"] = tx.date
+
+        # Map to store balance external IDs for linking with details
+        balance_external_ids = {}
+
+        seq = 0
+        for bal in all_balances:
+            seq += 1
+            key = f"{bal.bank_name}_{bal.acc_no}"
+
+            # External ID format: External ID{MMDDYY}_{SEQ:04d}
+            external_id = f"External ID{date_suffix}_{seq:04d}"
+            balance_external_ids[key] = external_id
+
+            # Get aggregated totals
+            agg = tx_aggregates.get(key, {"total_debit": 0, "total_credit": 0, "max_date": None})
+
+            # Get date from transactions or use current date
+            if agg["max_date"]:
+                tx_date = agg["max_date"]
+                date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
+                # Format: M/D/YYYY (no leading zeros)
+                formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
+            else:
+                date_str_yyyymmdd = now.strftime("%Y%m%d")
+                formatted_date = f"{now.month}/{now.day}/{now.year}"
+
+            # Currency default
+            currency = bal.currency if bal.currency else "VND"
+
+            # Name format: BS/{BankCode}/{Currency}-{AccNo}/{YYYYMMDD}
+            name = f"BS/{bal.bank_name}/{currency}-{bal.acc_no}/{date_str_yyyymmdd}"
+
+            row = [
+                external_id,
+                name,
+                bal.acc_no,
+                bal.bank_name,
+                int(bal.opening_balance or 0),
+                int(bal.closing_balance or 0),
+                agg["total_debit"],
+                agg["total_credit"],
+                currency,
+                formatted_date
+            ]
+            writer.writerow(row)
+
+        # Get CSV content and encode with UTF-8 BOM
+        csv_content = output.getvalue()
+        bom = b'\xef\xbb\xbf'
+        return bom + csv_content.encode('utf-8'), balance_external_ids
+
+    def export_to_netsuite_details_csv(
+        self,
+        all_transactions: List[BankTransaction],
+        balance_external_ids: Dict[str, str]
+    ) -> bytes:
+        """
+        Export Details CSV for NetSuite import.
+
+        Creates CSV with 18 columns:
+        External ID, External ID BSM Daily, Bank Statement Daily, Name (*),
+        Bank Code (*), Bank Account Number (*), TRANS ID, Trans Date (*),
+        Description (*), Currency(*), DEBIT (*), CREDIT (*), Amount, Type,
+        Balance, PARTNER, PARTNER ACCOUNT, PARTNER BANK ID
+
+        Args:
+            all_transactions: List of all transactions
+            balance_external_ids: Dict mapping bank_acc key to Balance External ID
 
         Returns:
             CSV file as bytes (UTF-8 with BOM)
@@ -280,67 +385,91 @@ class ParseBankStatementsUseCase:
         output = StringIO()
         writer = csv.writer(output)
 
-        # Write header row (15 columns)
+        # Write header row (18 columns)
         headers = [
             "External ID",
-            "Date",
-            "Bank Name",
-            "Account Number",
-            "GL Account",
-            "Subsidiary",
-            "Currency",
-            "Debit",
-            "Credit",
-            "Net Amount",
-            "Description",
-            "Transaction ID",
-            "Beneficiary Name",
-            "Beneficiary Account",
-            "Beneficiary Bank"
+            "External ID BSM Daily",
+            "Bank Statement Daily",
+            "Name (*)",
+            "Bank Code (*)",
+            "Bank Account Number (*)",
+            "TRANS ID",
+            "Trans Date (*)",
+            "Description (*)",
+            "Currency(*)",
+            "DEBIT (*)",
+            "CREDIT (*)",
+            "Amount",
+            "Type",
+            "Balance",
+            "PARTNER",
+            "PARTNER ACCOUNT",
+            "PARTNER BANK ID"
         ]
         writer.writerow(headers)
 
-        # Write transaction rows
+        # Get current date for External ID format
+        now = datetime.now()
+        date_suffix = now.strftime("%m%d%y")  # MMDDYY format
+
         seq = 0
         for tx in all_transactions:
             seq += 1
 
-            # Generate External ID: BT-{YYYYMMDD}-{BANK}-{SEQ:06d}
-            if tx.date:
-                date_str = tx.date.strftime("%Y%m%d")
-                formatted_date = tx.date.strftime("%m/%d/%Y")
-            else:
-                date_str = "00000000"
-                formatted_date = ""
+            # External ID format: External Idline_{MMDDYY}_{SEQ:04d}
+            external_id = f"External Idline_{date_suffix}_{seq:04d}"
 
-            external_id = f"BT-{date_str}-{tx.bank_name}-{seq:06d}"
+            # Link to parent Balance
+            key = f"{tx.bank_name}_{tx.acc_no}"
+            external_id_bsm_daily = balance_external_ids.get(key, "")
 
-            # Handle Debit/Credit: empty if None or 0
-            debit_val = "" if (tx.debit is None or tx.debit == 0) else tx.debit
-            credit_val = "" if (tx.credit is None or tx.credit == 0) else tx.credit
-
-            # Calculate Net Amount: (debit or 0) - (credit or 0)
-            net_amount = (tx.debit or 0) - (tx.credit or 0)
-
-            # Truncate description to 500 characters
-            description = (tx.description or "")[:500]
-
-            # Currency: default to VND if empty
+            # Currency default
             currency = tx.currency if tx.currency else "VND"
+
+            # Date handling
+            if tx.date:
+                date_str_yyyymmdd = tx.date.strftime("%Y%m%d")
+                # Format: M/D/YYYY (no leading zeros)
+                formatted_date = f"{tx.date.month}/{tx.date.day}/{tx.date.year}"
+            else:
+                date_str_yyyymmdd = now.strftime("%Y%m%d")
+                formatted_date = f"{now.month}/{now.day}/{now.year}"
+
+            # Bank Statement Daily format: BS/{Bank}/{Currency}-{AccNo}{TxID}/{YYYYMMDD}
+            trans_id = tx.transaction_id or ""
+            bank_statement_daily = f"BS/{tx.bank_name}/{currency}-{tx.acc_no}{trans_id}/{date_str_yyyymmdd}"
+
+            # Name format: same as Bank Statement Daily with trailing /
+            name = f"{bank_statement_daily}/"
+
+            # Debit/Credit as integers, 0 if None
+            debit_val = int(tx.debit or 0)
+            credit_val = int(tx.credit or 0)
+
+            # Amount and Type
+            if debit_val > 0:
+                amount = debit_val
+                tx_type = "D"
+            else:
+                amount = credit_val
+                tx_type = "C"
 
             row = [
                 external_id,
-                formatted_date,
+                external_id_bsm_daily,
+                bank_statement_daily,
+                name,
                 tx.bank_name,
                 tx.acc_no,
-                "",  # GL Account - leave empty
-                "",  # Subsidiary - leave empty
+                trans_id,
+                formatted_date,
+                tx.description or "",
                 currency,
                 debit_val,
                 credit_val,
-                net_amount,
-                description,
-                tx.transaction_id or "",
+                amount,
+                tx_type,
+                "",  # Balance - leave empty
                 tx.beneficiary_acc_name or "",
                 tx.beneficiary_acc_no or "",
                 tx.beneficiary_bank or ""
@@ -349,6 +478,5 @@ class ParseBankStatementsUseCase:
 
         # Get CSV content and encode with UTF-8 BOM
         csv_content = output.getvalue()
-        # UTF-8 BOM prefix for Excel compatibility with Vietnamese characters
         bom = b'\xef\xbb\xbf'
         return bom + csv_content.encode('utf-8')
