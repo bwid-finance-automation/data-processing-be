@@ -57,6 +57,49 @@ class BaseBankParser(ABC):
         """
         pass
 
+    # ========== OCR Text Parsing Methods (Optional - Override in subclass) ==========
+
+    def can_parse_text(self, text: str) -> bool:
+        """
+        Detect if this parser can handle the given OCR text.
+
+        Args:
+            text: OCR extracted text from AI Builder
+
+        Returns:
+            True if this parser recognizes the text format.
+            Default implementation returns False - override in subclass.
+        """
+        return False
+
+    def parse_transactions_from_text(self, text: str, file_name: str) -> List[BankTransaction]:
+        """
+        Parse transactions from OCR text.
+
+        Args:
+            text: OCR extracted text
+            file_name: Original file name
+
+        Returns:
+            List of standardized transactions.
+            Default implementation returns empty list - override in subclass.
+        """
+        return []
+
+    def parse_balances_from_text(self, text: str, file_name: str) -> Optional[BankBalance]:
+        """
+        Parse balance information from OCR text.
+
+        Args:
+            text: OCR extracted text
+            file_name: Original file name
+
+        Returns:
+            Balance information or None if not found.
+            Default implementation returns None - override in subclass.
+        """
+        return None
+
     # Helper methods available to all parsers
 
     @staticmethod

@@ -72,3 +72,20 @@ class ParserFactory:
     def get_supported_banks(cls) -> List[str]:
         """Get list of supported bank names."""
         return [parser.bank_name for parser in cls._parsers]
+
+    @classmethod
+    def get_parser_for_text(cls, text: str) -> Optional[BaseBankParser]:
+        """
+        Auto-detect bank from OCR text content and return appropriate parser.
+
+        Args:
+            text: OCR extracted text from AI Builder
+
+        Returns:
+            Parser instance if bank detected and supports text parsing, None otherwise
+        """
+        for parser in cls._parsers:
+            if parser.can_parse_text(text):
+                return parser
+
+        return None

@@ -264,28 +264,40 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
                 summary={"total_files": 0, "successful": 0, "failed": 0}
             )
 
-        # Decode base64 files
-        file_data: List[Tuple[str, bytes]] = []
+        # Initialize lists for different input types
+        file_data: List[Tuple[str, bytes]] = []  # For Excel/PDF files
+        text_data: List[Tuple[str, str, str]] = []  # For OCR text (file_name, ocr_text, bank_code)
         decode_errors = []
 
         for file_input in request.files:
-            # Use helper methods to get file name and content
             file_name = file_input.get_file_name()
-            content_base64 = file_input.get_content_base64()
 
-            # Validate file extension
-            if not file_name.lower().endswith(('.xlsx', '.xls', '.pdf')):
-                decode_errors.append({
-                    "file_name": file_name,
-                    "error": "Unsupported file type. Only .xlsx, .xls, .pdf are supported."
-                })
+            # Check if OCR text is provided (prioritize over file content)
+            if file_input.has_ocr_text():
+                # Process as OCR text input
+                text_data.append((
+                    file_name,
+                    file_input.ocr_text,
+                    file_input.bank_code  # Can be None for auto-detection
+                ))
                 continue
+
+            # Otherwise, process as file content
+            content_base64 = file_input.get_content_base64()
 
             # Check if content is provided
             if not content_base64:
                 decode_errors.append({
                     "file_name": file_name,
-                    "error": "No file content provided. Please include 'contentBytes' or 'file_content_base64' with base64 encoded file."
+                    "error": "No content provided. Include 'ocr_text' or 'contentBytes'."
+                })
+                continue
+
+            # Validate file extension for binary files
+            if not file_name.lower().endswith(('.xlsx', '.xls', '.pdf')):
+                decode_errors.append({
+                    "file_name": file_name,
+                    "error": "Unsupported file type. Only .xlsx, .xls, .pdf are supported."
                 })
                 continue
 
@@ -299,7 +311,8 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
                     "error": f"Failed to decode base64: {str(e)}"
                 })
 
-        if not file_data:
+        # Check if we have any data to process
+        if not file_data and not text_data:
             return PowerAutomateParseResponse(
                 success=False,
                 message="No valid files to process",
@@ -313,7 +326,47 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
 
         # Parse using use case
         use_case = ParseBankStatementsUseCase()
-        result = use_case.execute(file_data)
+
+        # Initialize combined result
+        result = {
+            "statements": [],
+            "all_transactions": [],
+            "all_balances": [],
+            "summary": {
+                "total_files": 0,
+                "successful": 0,
+                "failed": 0,
+                "failed_files": [],
+                "total_transactions": 0,
+                "total_balances": 0
+            }
+        }
+
+        # Process OCR text inputs
+        if text_data:
+            text_result = use_case.execute_from_text(text_data)
+            result["statements"].extend(text_result["statements"])
+            result["all_transactions"].extend(text_result["all_transactions"])
+            result["all_balances"].extend(text_result["all_balances"])
+            result["summary"]["total_files"] += text_result["summary"]["total_files"]
+            result["summary"]["successful"] += text_result["summary"]["successful"]
+            result["summary"]["failed"] += text_result["summary"]["failed"]
+            result["summary"]["failed_files"].extend(text_result["summary"]["failed_files"])
+
+        # Process Excel/PDF file inputs (existing logic)
+        if file_data:
+            file_result = use_case.execute(file_data)
+            result["statements"].extend(file_result["statements"])
+            result["all_transactions"].extend(file_result["all_transactions"])
+            result["all_balances"].extend(file_result["all_balances"])
+            result["summary"]["total_files"] += file_result["summary"]["total_files"]
+            result["summary"]["successful"] += file_result["summary"]["successful"]
+            result["summary"]["failed"] += file_result["summary"]["failed"]
+            result["summary"]["failed_files"].extend(file_result["summary"]["failed_files"])
+
+        # Update totals
+        result["summary"]["total_transactions"] = len(result["all_transactions"])
+        result["summary"]["total_balances"] = len(result["all_balances"])
 
         # Add decode errors to failed files
         if decode_errors:

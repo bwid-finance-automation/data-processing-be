@@ -104,6 +104,108 @@ class ParseBankStatementsUseCase:
             }
         }
 
+    def execute_from_text(
+        self,
+        text_inputs: List[Tuple[str, str, str]]
+    ) -> Dict[str, Any]:
+        """
+        Parse multiple bank statements from OCR text.
+
+        Args:
+            text_inputs: List of (file_name, ocr_text, bank_code) tuples
+                        bank_code can be None for auto-detection
+
+        Returns:
+            Dictionary with same structure as execute():
+            - statements: List of parsed statements
+            - all_transactions: Combined list of transactions
+            - all_balances: Combined list of balances
+            - summary: Processing summary
+        """
+        statements: List[BankStatement] = []
+        all_transactions: List[BankTransaction] = []
+        all_balances: List[BankBalance] = []
+
+        successful = 0
+        failed = 0
+        failed_files = []
+
+        for file_name, ocr_text, bank_code in text_inputs:
+            try:
+                parser = None
+
+                # If bank_code provided, get parser by name
+                if bank_code:
+                    parser = self.parser_factory.get_parser_by_name(bank_code)
+                    if parser is None:
+                        failed += 1
+                        failed_files.append({
+                            "file_name": file_name,
+                            "error": f"Unknown bank code: {bank_code}"
+                        })
+                        continue
+
+                    # Validate parser supports text parsing
+                    if not parser.can_parse_text(ocr_text):
+                        failed += 1
+                        failed_files.append({
+                            "file_name": file_name,
+                            "error": f"Parser {parser.bank_name} does not support OCR text parsing"
+                        })
+                        continue
+                else:
+                    # Auto-detect bank from text
+                    parser = self.parser_factory.get_parser_for_text(ocr_text)
+                    if parser is None:
+                        failed += 1
+                        failed_files.append({
+                            "file_name": file_name,
+                            "error": "Bank not recognized from OCR text"
+                        })
+                        continue
+
+                # Parse transactions from text
+                transactions = parser.parse_transactions_from_text(ocr_text, file_name)
+
+                # Parse balances from text
+                balance = parser.parse_balances_from_text(ocr_text, file_name)
+
+                # Create statement
+                statement = BankStatement(
+                    bank_name=parser.bank_name,
+                    file_name=file_name,
+                    balance=balance,
+                    transactions=transactions
+                )
+
+                statements.append(statement)
+                all_transactions.extend(transactions)
+                if balance:
+                    all_balances.append(balance)
+
+                successful += 1
+
+            except Exception as e:
+                failed += 1
+                failed_files.append({
+                    "file_name": file_name,
+                    "error": str(e)
+                })
+
+        return {
+            "statements": statements,
+            "all_transactions": all_transactions,
+            "all_balances": all_balances,
+            "summary": {
+                "total_files": len(text_inputs),
+                "successful": successful,
+                "failed": failed,
+                "failed_files": failed_files,
+                "total_transactions": len(all_transactions),
+                "total_balances": len(all_balances)
+            }
+        }
+
     def export_to_excel(
         self,
         all_transactions: List[BankTransaction],

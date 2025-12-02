@@ -120,6 +120,10 @@ class PowerAutomateFileInput(BaseModel):
     contentBytes: Optional[str] = Field(None, description="Base64 file content (Power Automate format)")
     file_content_base64: Optional[str] = Field(None, description="Base64 file content (alternative)")
 
+    # OCR text input (from AI Builder)
+    ocr_text: Optional[str] = Field(None, description="OCR extracted text from AI Builder. If provided, contentBytes is ignored")
+    bank_code: Optional[str] = Field(None, description="Force specific bank parser (VIB, ACB, etc.). If null, auto-detect from text")
+
     # Optional fields from Power Automate
     url: Optional[str] = Field(None, description="OneDrive URL (not used for processing)")
     source: Optional[str] = Field(None, description="Source type (ZIP/PDF)")
@@ -131,6 +135,10 @@ class PowerAutomateFileInput(BaseModel):
     def get_content_base64(self) -> Optional[str]:
         """Get base64 content from either field."""
         return self.contentBytes or self.file_content_base64
+
+    def has_ocr_text(self) -> bool:
+        """Check if OCR text is provided and not empty."""
+        return self.ocr_text is not None and self.ocr_text.strip() != ""
 
 
 class PowerAutomateParseRequest(BaseModel):
