@@ -79,20 +79,41 @@ class AnalysisService:
     async def process_python_analysis(
         self,
         excel_files: List[UploadFile],
+        loan_interest_file: Optional[UploadFile] = None,
         mapping_file: Optional[UploadFile] = None,
         config_overrides: Optional[Dict[str, Any]] = None
     ) -> bytes:
-        """Process files using Python-based analysis with 21-rule variance pipeline."""
+        """Process files using Python-based analysis with 22-rule variance pipeline.
+
+        Args:
+            excel_files: List of BS/PL Breakdown Excel files
+            loan_interest_file: Optional ERP Loan Interest Rate file for enhanced A2 analysis
+            mapping_file: Deprecated, not used
+            config_overrides: Deprecated, not used
+
+        Returns:
+            bytes: Excel file with variance analysis results
+        """
         try:
-            # Read files into memory
+            # Read BS/PL files into memory
             files: List[Tuple[str, bytes]] = [
                 (f.filename or "input.xlsx", await f.read())
                 for f in excel_files
             ]
 
-            # Use the new 21-rule variance analysis pipeline
-            # Configuration and mapping files are no longer used
-            xlsx_bytes: bytes = process_variance_analysis(files)
+            # Read loan interest file if provided
+            loan_file_data: Optional[Tuple[str, bytes]] = None
+            if loan_interest_file:
+                loan_file_data = (
+                    loan_interest_file.filename or "loan_interest.xlsx",
+                    await loan_interest_file.read()
+                )
+
+            # Use the 22-rule variance analysis pipeline with optional loan data
+            xlsx_bytes: bytes = process_variance_analysis(
+                files,
+                loan_interest_file=loan_file_data
+            )
 
             return xlsx_bytes
 
