@@ -14,6 +14,17 @@ Architecture: N-Layer Monolith
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+
+# Import exception handlers
+from app.core.exceptions import (
+    AnalysisError,
+    FileProcessingError,
+    analysis_error_handler,
+    validation_error_handler,
+    http_error_handler,
+    general_error_handler
+)
 
 # Import routers from presentation layer (Department + Function Structure)
 from app.presentation.api import health_router
@@ -43,6 +54,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register exception handlers for user-friendly error messages
+app.add_exception_handler(AnalysisError, analysis_error_handler)
+app.add_exception_handler(FileProcessingError, analysis_error_handler)
+app.add_exception_handler(RequestValidationError, validation_error_handler)
 
 # Include Finance Department routers with /api/finance prefix
 app.include_router(health_router.router, prefix="/api/finance", tags=["Finance - Health"])

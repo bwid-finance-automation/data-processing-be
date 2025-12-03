@@ -277,7 +277,7 @@ class FileProcessingConfig(BaseSettings):
         description="Allowed file extensions for uploads"
     )
     max_files_per_request: int = Field(
-        default=10,
+        default=50,
         description="Maximum number of files per upload request",
         ge=1,
         le=100
