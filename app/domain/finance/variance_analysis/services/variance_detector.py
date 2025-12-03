@@ -2121,10 +2121,22 @@ def create_excel_output(all_file_data, combined_flags):
         separator_fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
         header_font = Font(bold=True, color='FFFFFF')
 
+        # Priority-based row colors (light versions for readability)
+        critical_fill = PatternFill(start_color='FFCDD2', end_color='FFCDD2', fill_type='solid')  # Light red
+        review_fill = PatternFill(start_color='FFF9C4', end_color='FFF9C4', fill_type='solid')    # Light yellow
+        info_fill = PatternFill(start_color='C8E6C9', end_color='C8E6C9', fill_type='solid')      # Light green
+
         for cell in worksheet[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+        # Find the Priority column index
+        priority_col_idx = None
+        for col_idx, col_name in enumerate(flags_df.columns):
+            if col_name == 'Priority':
+                priority_col_idx = col_idx
+                break
 
         current_file = None
         for idx, row in flags_df.iterrows():
@@ -2138,9 +2150,23 @@ def create_excel_output(all_file_data, combined_flags):
 
             current_file = row.get('File')
 
-            # Apply text wrapping to all data rows (no background color)
+            # Get priority value and apply appropriate color
+            priority_value = str(row.get('Priority', '')).lower()
+
+            # Determine fill color based on priority
+            row_fill = None
+            if 'critical' in priority_value:
+                row_fill = critical_fill
+            elif 'review' in priority_value:
+                row_fill = review_fill
+            elif 'info' in priority_value:
+                row_fill = info_fill
+
+            # Apply styling to all cells in the row
             for cell in worksheet[excel_row]:
                 cell.alignment = Alignment(vertical='top', wrap_text=True)
+                if row_fill:
+                    cell.fill = row_fill
 
         for column in worksheet.columns:
             max_length = 0
