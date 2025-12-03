@@ -72,13 +72,15 @@ async def process_python_analysis(
                 details="; ".join(error_details)
             )
 
-        # 2. Validate loan interest file if provided
+        # 2. Validate loan interest file if provided (basic validation only - no sheet check)
         if loan_interest_file:
-            loan_validation = await validate_file_list([loan_interest_file], max_files=1)
-            if loan_validation and not loan_validation[0].get('is_valid', False):
+            # For loan interest file, only check file extension and basic format
+            # (Sheet0 contains interest rate data, not BS/PL sheets)
+            loan_filename = loan_interest_file.filename or ""
+            if not loan_filename.lower().endswith(('.xlsx', '.xls')):
                 raise FileProcessingError(
-                    "Loan interest file validation failed",
-                    details="; ".join(loan_validation[0].get('errors', []))
+                    "Loan interest file must be an Excel file (.xlsx or .xls)",
+                    details=f"Received file: {loan_filename}"
                 )
 
         # 3. Process files using 22-rule pipeline with optional loan data

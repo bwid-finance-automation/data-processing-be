@@ -263,13 +263,8 @@ async def validate_file_list(files: List[UploadFile], max_files: int = 10) -> Li
     """Validate a list of uploaded files."""
     if len(files) > max_files:
         raise FileProcessingError(
-            f"Too many files uploaded. You selected {len(files)} files, but the maximum allowed is {max_files} files per upload. Please reduce the number of files and try again.",
-            user_message=f"Too many files selected ({len(files)}). Maximum allowed: {max_files} files",
-            suggestions=[
-                f"Remove {len(files) - max_files} file(s) from your selection",
-                "Split your files into multiple batches",
-                f"Upload up to {max_files} files at a time"
-            ]
+            f"Too many files uploaded ({len(files)}). Maximum allowed: {max_files} files per upload.",
+            details=f"Remove {len(files) - max_files} file(s) from your selection or split into multiple batches."
         )
 
     validator = FileValidator()
