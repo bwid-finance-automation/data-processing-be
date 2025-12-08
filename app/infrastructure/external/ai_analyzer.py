@@ -311,13 +311,16 @@ class LLMFinancialAnalyzer:
                 "max_completion_tokens": 32000
             }
 
+            # GPT-5 specific parameters - stored separately to handle API compatibility
+            gpt5_params = {}
+
             # Add service_tier for priority/flex processing
             # - "priority": 40% faster processing (Enterprise, premium pricing)
             # - "flex": 50% cheaper, higher latency (available for gpt-5, o3, o4-mini)
             # - "auto": automatically use best available tier
             # - "default": standard processing
             if self.service_tier and self.service_tier != "default":
-                api_params["service_tier"] = self.service_tier
+                gpt5_params["service_tier"] = self.service_tier
                 print(f"      • Service tier: {self.service_tier}")
 
             # Add GPT-5 specific parameters
@@ -325,21 +328,30 @@ class LLMFinancialAnalyzer:
                 # reasoning_effort: controls how much reasoning the model does
                 # Values: "minimal", "low", "medium", "high", or "none" (disables reasoning)
                 if self.reasoning_effort and self.reasoning_effort != "none":
-                    api_params["reasoning"] = {"effort": self.reasoning_effort}
+                    gpt5_params["reasoning"] = {"effort": self.reasoning_effort}
                     print(f"      • Reasoning effort: {self.reasoning_effort}")
 
                 # verbosity: controls output length (GPT-5 specific)
                 # Values: "low", "medium", "high"
                 if self.verbosity:
-                    api_params["text"] = {"verbosity": self.verbosity}
+                    gpt5_params["text"] = {"verbosity": self.verbosity}
                     print(f"      • Verbosity: {self.verbosity}")
 
                 # Enable extended prompt caching for GPT-5.1 (24 hour retention)
                 if self.openai_model.startswith("gpt-5.1"):
-                    api_params["prompt_cache_retention"] = "24h"
+                    gpt5_params["prompt_cache_retention"] = "24h"
                     print(f"      • Extended prompt caching: 24h")
 
-            response = self.openai_client.chat.completions.create(**api_params)
+            # Try with GPT-5 params first, fallback to basic params if API doesn't support them
+            try:
+                response = self.openai_client.chat.completions.create(**api_params, **gpt5_params)
+            except TypeError as e:
+                if "unexpected keyword argument" in str(e):
+                    # OpenAI library doesn't support GPT-5 params yet, use basic params only
+                    print(f"      ⚠️ GPT-5 params not supported by OpenAI library, using basic params")
+                    response = self.openai_client.chat.completions.create(**api_params)
+                else:
+                    raise
 
             print(f"   ✅ OpenAI API call completed successfully")
             print(f"      • max_completion_tokens requested: 32,000")
