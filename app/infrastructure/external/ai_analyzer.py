@@ -20,8 +20,23 @@ logger = get_logger(__name__)
 
 
 class LLMFinancialAnalyzer:
-    def __init__(self, model_name: str = "gpt-4o", progress_callback=None, initial_progress=0):
-        """Initialize LLM analyzer with OpenAI GPT model."""
+    # GPT-5 model configurations with pricing (per 1M tokens)
+    GPT5_MODELS = {
+        "gpt-5": {"input_price": 1.25, "output_price": 10.00, "max_tokens": 400000},
+        "gpt-5-mini": {"input_price": 0.25, "output_price": 2.00, "max_tokens": 400000},
+        "gpt-5-nano": {"input_price": 0.05, "output_price": 0.40, "max_tokens": 400000},
+        "gpt-5.1": {"input_price": 1.25, "output_price": 10.00, "max_tokens": 400000},
+    }
+
+    # Legacy model configurations
+    LEGACY_MODELS = {
+        "gpt-4o": {"input_price": 2.50, "output_price": 10.00, "max_tokens": 128000},
+        "gpt-4o-mini": {"input_price": 0.15, "output_price": 0.60, "max_tokens": 128000},
+        "gpt-4-turbo": {"input_price": 10.00, "output_price": 30.00, "max_tokens": 128000},
+    }
+
+    def __init__(self, model_name: str = "gpt-5", progress_callback=None, initial_progress=0):
+        """Initialize LLM analyzer with OpenAI GPT model (supports GPT-5 series)."""
         self.progress_callback = progress_callback
         self.current_progress = initial_progress  # Start from the current progress
         self.progress_increment = 1  # Default 1% increment per API call
@@ -30,12 +45,43 @@ class LLMFinancialAnalyzer:
         logger.info(f"🔧 Environment: {'RENDER' if os.getenv('RENDER') else 'LOCAL'}")
 
         # Get OpenAI configuration from environment
-        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-5")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
 
-        # Pricing configuration (USD per 1 million tokens)
-        self.input_price_per_million = float(os.getenv("OPENAI_INPUT_PRICE_PER_MILLION", "2.50"))
-        self.output_price_per_million = float(os.getenv("OPENAI_OUTPUT_PRICE_PER_MILLION", "10.00"))
+        # GPT-5 specific parameters
+        self.reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "medium")  # low, medium, high, minimal, none
+        self.verbosity = os.getenv("OPENAI_VERBOSITY", "medium")  # low, medium, high
+
+        # Service tier for priority processing (auto, default, priority, flex)
+        # - "priority": 40% faster, premium pricing (requires Enterprise)
+        # - "flex": 50% cheaper, higher latency
+        # - "auto": automatically use best available tier
+        # - "default": standard processing
+        self.service_tier = os.getenv("OPENAI_SERVICE_TIER", "auto")
+
+        # Determine if using GPT-5 series
+        self.is_gpt5 = self.openai_model.startswith("gpt-5")
+
+        # Auto-configure pricing based on model
+        if self.openai_model in self.GPT5_MODELS:
+            model_config = self.GPT5_MODELS[self.openai_model]
+            default_input_price = str(model_config["input_price"])
+            default_output_price = str(model_config["output_price"])
+            self.max_context_tokens = model_config["max_tokens"]
+        elif self.openai_model in self.LEGACY_MODELS:
+            model_config = self.LEGACY_MODELS[self.openai_model]
+            default_input_price = str(model_config["input_price"])
+            default_output_price = str(model_config["output_price"])
+            self.max_context_tokens = model_config["max_tokens"]
+        else:
+            # Fallback defaults
+            default_input_price = "2.50"
+            default_output_price = "10.00"
+            self.max_context_tokens = 128000
+
+        # Pricing configuration (USD per 1 million tokens) - can be overridden by env vars
+        self.input_price_per_million = float(os.getenv("OPENAI_INPUT_PRICE_PER_MILLION", default_input_price))
+        self.output_price_per_million = float(os.getenv("OPENAI_OUTPUT_PRICE_PER_MILLION", default_output_price))
 
         # Debug: Show if API key was loaded
         if self.openai_api_key:
@@ -95,6 +141,16 @@ class LLMFinancialAnalyzer:
             raise RuntimeError(f"Failed to initialize OpenAI client after {len(initialization_attempts)} attempts. Last error: {last_error}")
         logger.info(f"🤖 Using OpenAI model: {self.openai_model}")
         logger.info(f"🔑 API key configured: {self.openai_api_key[:8]}...{self.openai_api_key[-4:]}")
+
+        # Log GPT-5 specific configuration
+        if self.is_gpt5:
+            logger.info(f"🚀 GPT-5 mode enabled")
+            logger.info(f"   • Reasoning effort: {self.reasoning_effort}")
+            logger.info(f"   • Verbosity: {self.verbosity}")
+            logger.info(f"   • Service tier: {self.service_tier}")
+            logger.info(f"   • Max context tokens: {self.max_context_tokens:,}")
+            logger.info(f"   • Input price: ${self.input_price_per_million}/1M tokens")
+            logger.info(f"   • Output price: ${self.output_price_per_million}/1M tokens")
 
     def _init_openai_minimal(self):
         """Minimal OpenAI initialization for cloud environments that may have issues with advanced parameters."""
@@ -230,7 +286,7 @@ class LLMFinancialAnalyzer:
     # OpenAI API Methods
     # ===========================
     def _call_openai(self, system_prompt: str, user_prompt: str, retry_count: int = 0, max_retries: int = 3) -> dict:
-        """Call OpenAI API with retry logic for rate limits."""
+        """Call OpenAI API with retry logic for rate limits. Supports GPT-5 series with reasoning_effort and verbosity."""
         import time
 
         try:
@@ -239,19 +295,51 @@ class LLMFinancialAnalyzer:
 
             print(f"   🔄 Making OpenAI API call...")
             print(f"      • Model: {self.openai_model}")
+            print(f"      • GPT-5 mode: {self.is_gpt5}")
             print(f"      • System prompt: {len(system_prompt):,} chars")
             print(f"      • User prompt: {len(user_prompt):,} chars")
             print(f"      • Estimated tokens: ~{estimated_tokens:,}")
 
-            response = self.openai_client.chat.completions.create(
-                model=self.openai_model,
-                messages=[
+            # Build API call parameters
+            api_params = {
+                "model": self.openai_model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.1,
-                max_completion_tokens=32000  # Use max_completion_tokens (newer param) instead of max_tokens
-            )
+                "temperature": 0.1,
+                "max_completion_tokens": 32000
+            }
+
+            # Add service_tier for priority/flex processing
+            # - "priority": 40% faster processing (Enterprise, premium pricing)
+            # - "flex": 50% cheaper, higher latency (available for gpt-5, o3, o4-mini)
+            # - "auto": automatically use best available tier
+            # - "default": standard processing
+            if self.service_tier and self.service_tier != "default":
+                api_params["service_tier"] = self.service_tier
+                print(f"      • Service tier: {self.service_tier}")
+
+            # Add GPT-5 specific parameters
+            if self.is_gpt5:
+                # reasoning_effort: controls how much reasoning the model does
+                # Values: "minimal", "low", "medium", "high", or "none" (disables reasoning)
+                if self.reasoning_effort and self.reasoning_effort != "none":
+                    api_params["reasoning"] = {"effort": self.reasoning_effort}
+                    print(f"      • Reasoning effort: {self.reasoning_effort}")
+
+                # verbosity: controls output length (GPT-5 specific)
+                # Values: "low", "medium", "high"
+                if self.verbosity:
+                    api_params["text"] = {"verbosity": self.verbosity}
+                    print(f"      • Verbosity: {self.verbosity}")
+
+                # Enable extended prompt caching for GPT-5.1 (24 hour retention)
+                if self.openai_model.startswith("gpt-5.1"):
+                    api_params["prompt_cache_retention"] = "24h"
+                    print(f"      • Extended prompt caching: 24h")
+
+            response = self.openai_client.chat.completions.create(**api_params)
 
             print(f"   ✅ OpenAI API call completed successfully")
             print(f"      • max_completion_tokens requested: 32,000")
