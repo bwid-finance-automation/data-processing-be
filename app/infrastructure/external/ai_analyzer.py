@@ -307,9 +307,13 @@ class LLMFinancialAnalyzer:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                "temperature": 0.1,
                 "max_completion_tokens": 32000
             }
+
+            # GPT-5 doesn't support custom temperature - only default (1) is allowed
+            # Only add temperature for non-GPT-5 models
+            if not self.is_gpt5:
+                api_params["temperature"] = 0.1
 
             # GPT-5 specific parameters - stored separately to handle API compatibility
             gpt5_params = {}
