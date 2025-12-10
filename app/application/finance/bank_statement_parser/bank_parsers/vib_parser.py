@@ -475,8 +475,16 @@ class VIBParser(BaseBankParser):
                         if tx_match:
                             tx = self._parse_space_separated_transaction(tx_match, current_acc_no, current_currency)
                         else:
-                            # Log failed match for debugging
-                            logger.info(f"VIB: Regex failed for line: [{line[:100]}]")
+                            # Try multiline format: amounts may be on next line(s)
+                            # Format: "7047991960 29/11/2025 29/11/2025 CRIN" (no amounts on same line)
+                            tx_match_partial = re.match(r'^(\d{10})\s+(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}/\d{1,2}/\d{4})\s+([A-Z][A-Z0-9]{1,5})$', line)
+                            if tx_match_partial:
+                                # Look for amounts in subsequent lines
+                                tx = self._parse_multiline_transaction(tx_match_partial, lines, lines.index(line), current_acc_no, current_currency)
+                                if tx:
+                                    logger.info(f"VIB: Parsed multiline transaction: {tx.transaction_id}")
+                            else:
+                                logger.info(f"VIB: Regex failed for line: [{line[:100]}]")
 
                     if tx:
                         transactions.append(tx)
@@ -552,6 +560,95 @@ class VIBParser(BaseBankParser):
 
         except Exception as e:
             print(f"Error parsing VIB pipe-separated transaction: {e}")
+            return None
+
+    def _parse_multiline_transaction(self, match, lines: List[str], current_idx: int, acc_no: str, currency: str) -> Optional[BankTransaction]:
+        """
+        Parse transaction when amounts are on subsequent lines.
+
+        Gemini OCR may split transaction data across lines:
+        Line N: "7047991960 29/11/2025 29/11/2025 CRIN"
+        Line N+1: "0"  (withdrawal)
+        Line N+2: "1,217"  (deposit)
+        Line N+3: "3,065,877"  (balance)
+
+        Or amounts may be on a single line after the transaction header.
+        """
+        try:
+            tx_id = match.group(1)
+            date_str = match.group(2)
+            # group(3) = Effect Date (skip)
+            # group(4) = Tran code (skip)
+
+            # Collect numbers from subsequent lines (until next transaction or header)
+            amounts = []
+            for i in range(current_idx + 1, min(current_idx + 10, len(lines))):
+                next_line = lines[i].strip()
+
+                # Stop if we hit another transaction line (starts with 10 digits)
+                if re.match(r'^\d{10}', next_line):
+                    break
+
+                # Stop if we hit a header/label line
+                if any(skip in next_line.lower() for skip in [
+                    'seq. no', 'số ct', 'ngày gd', 'tran date', 'withdrawal', 'deposit',
+                    'phát sinh', 'nội dung', 'remarks', 'reference', 'số dư đầu', 'số dư cuối',
+                    'opening balance', 'ending balance', 'available balance', 'transaction summary'
+                ]):
+                    break
+
+                # Extract numbers from this line
+                line_numbers = re.findall(r'[\d,]+(?:\.\d+)?', next_line)
+                for num_str in line_numbers:
+                    val = self._parse_number_from_text(num_str)
+                    if val is not None:
+                        amounts.append(val)
+
+                # If we found 3+ numbers, we have enough for withdrawal/deposit/balance
+                if len(amounts) >= 3:
+                    break
+
+            logger.info(f"VIB multiline: tx_id={tx_id}, found amounts={amounts[:5]}")
+
+            if len(amounts) < 2:
+                # Need at least withdrawal and deposit
+                return None
+
+            # First amount = Withdrawal (Phát sinh nợ)
+            # Second amount = Deposit (Phát sinh có)
+            # Third amount = Balance (skip if present)
+            withdrawal = amounts[0] if len(amounts) > 0 else 0
+            deposit = amounts[1] if len(amounts) > 1 else 0
+
+            # Skip if both are zero
+            if withdrawal == 0 and deposit == 0:
+                return None
+
+            # CORRECT MAPPING:
+            # Debit = Withdrawal (Phát sinh nợ) = tiền RA
+            # Credit = Deposit (Phát sinh có) = tiền VÀO
+            debit_val = withdrawal
+            credit_val = deposit
+
+            # Parse date
+            tx_date = self._parse_date_from_text(date_str)
+
+            return BankTransaction(
+                bank_name="VIB",
+                acc_no=acc_no or "",
+                debit=debit_val if debit_val > 0 else None,
+                credit=credit_val if credit_val > 0 else None,
+                date=tx_date,
+                description="",
+                currency=currency,
+                transaction_id=tx_id,
+                beneficiary_bank="",
+                beneficiary_acc_no="",
+                beneficiary_acc_name=""
+            )
+
+        except Exception as e:
+            logger.error(f"Error parsing VIB multiline transaction: {e}")
             return None
 
     def _parse_space_separated_transaction(self, match, acc_no: str, currency: str) -> Optional[BankTransaction]:
