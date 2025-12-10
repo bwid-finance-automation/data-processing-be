@@ -419,6 +419,10 @@ class VIBParser(BaseBankParser):
             tx_lines = [l for l in lines if re.match(r'^\s*\d{10}', l.strip())]
             logger.info(f"VIB: Found {len(tx_lines)} potential transaction lines")
 
+            # Log actual transaction lines for debugging format mismatch
+            for i, tl in enumerate(tx_lines[:5]):  # Log first 5
+                logger.info(f"VIB TX line {i+1}: [{tl.strip()}]")
+
             # Extract account number and currency for each page/section
             # VIB PDFs can have multiple accounts (VND and USD)
             current_acc_no = None
@@ -462,6 +466,7 @@ class VIBParser(BaseBankParser):
                     tx = None
                     if '|' in line:
                         # Format with | separators
+                        logger.debug(f"VIB: Trying pipe-separated parse for: [{line}]")
                         tx = self._parse_pipe_separated_transaction(line, current_acc_no, current_currency)
                     else:
                         # Space-separated format
@@ -469,9 +474,14 @@ class VIBParser(BaseBankParser):
                         tx_match = re.match(r'^(\d{10})\s+(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}/\d{1,2}/\d{4})\s+([A-Z][A-Z0-9]{1,5})\s+(.+)$', line)
                         if tx_match:
                             tx = self._parse_space_separated_transaction(tx_match, current_acc_no, current_currency)
+                        else:
+                            # Log failed match for debugging
+                            logger.info(f"VIB: Regex failed for line: [{line[:100]}]")
 
                     if tx:
                         transactions.append(tx)
+                    else:
+                        logger.debug(f"VIB: No transaction parsed from: [{line[:80]}]")
 
             logger.info(f"VIB: Successfully parsed {len(transactions)} transactions from OCR text")
             return transactions
