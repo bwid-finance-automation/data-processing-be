@@ -209,14 +209,15 @@ class ParseBankStatementsUseCase:
 
     def execute_from_pdf(
         self,
-        pdf_inputs: List[Tuple[str, bytes, Optional[str]]]
+        pdf_inputs: List[Tuple[str, bytes, Optional[str], Optional[str]]]
     ) -> Dict[str, Any]:
         """
         Parse multiple bank statements from PDF files using Gemini OCR.
 
         Args:
-            pdf_inputs: List of (file_name, pdf_bytes, bank_code) tuples
+            pdf_inputs: List of (file_name, pdf_bytes, bank_code, password) tuples
                         bank_code can be None for auto-detection
+                        password can be None for non-encrypted PDFs
 
         Returns:
             Dictionary with same structure as execute():
@@ -228,8 +229,8 @@ class ParseBankStatementsUseCase:
         # Initialize Gemini OCR service
         gemini_service = GeminiOCRService()
 
-        # Step 1: Extract text from all PDFs using Gemini
-        pdf_files = [(file_name, pdf_bytes) for file_name, pdf_bytes, _ in pdf_inputs]
+        # Step 1: Extract text from all PDFs using Gemini (with password support)
+        pdf_files = [(file_name, pdf_bytes, password) for file_name, pdf_bytes, _, password in pdf_inputs]
         ocr_results = gemini_service.extract_text_from_pdf_batch(pdf_files)
 
         # Step 2: Build text_inputs for execute_from_text
@@ -237,7 +238,7 @@ class ParseBankStatementsUseCase:
         ocr_failed = []
 
         for i, (file_name, ocr_text, ocr_error) in enumerate(ocr_results):
-            bank_code = pdf_inputs[i][2]  # Get bank_code from original input
+            bank_code = pdf_inputs[i][2]  # Get bank_code from original input (index 2)
 
             if ocr_error:
                 ocr_failed.append({
@@ -664,3 +665,207 @@ class ParseBankStatementsUseCase:
         csv_content = output.getvalue()
         bom = b'\xef\xbb\xbf'
         return bom + csv_content.encode('utf-8')
+
+    def export_to_erp_template_excel(
+        self,
+        all_transactions: List[BankTransaction],
+        all_balances: List[BankBalance]
+    ) -> bytes:
+        """
+        Export to ERP Booking Template Excel format.
+
+        Creates Excel with sheets:
+        1. Template balance - Balance information per account/date
+        2. Template details - All transactions
+
+        Format follows 'ERP Booking template_NonAPI bank.xlsx'
+
+        Args:
+            all_transactions: List of all transactions
+            all_balances: List of all balances
+
+        Returns:
+            Excel file as bytes
+        """
+        output = BytesIO()
+
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Get current date for External ID
+            now = datetime.now()
+            date_suffix = now.strftime("%m%d%y")  # MMDDYY format
+
+            # ========== Aggregate transactions by bank_name + acc_no ==========
+            tx_aggregates = defaultdict(lambda: {
+                "total_debit": 0,
+                "total_credit": 0,
+                "max_date": None,
+                "transactions": []
+            })
+
+            for tx in all_transactions:
+                key = f"{tx.bank_name}_{tx.acc_no}"
+                tx_aggregates[key]["total_debit"] += int(tx.debit or 0)
+                tx_aggregates[key]["total_credit"] += int(tx.credit or 0)
+                tx_aggregates[key]["transactions"].append(tx)
+                if tx.date:
+                    if tx_aggregates[key]["max_date"] is None or tx.date > tx_aggregates[key]["max_date"]:
+                        tx_aggregates[key]["max_date"] = tx.date
+
+            # Map to store balance external IDs for linking with details
+            balance_external_ids = {}
+
+            # ========== Sheet 1: Template balance ==========
+            balance_data = []
+            seq = 0
+
+            for bal in all_balances:
+                seq += 1
+                key = f"{bal.bank_name}_{bal.acc_no}"
+
+                # External ID format: External ID{MMDDYY}_{SEQ:04d}
+                external_id = f"External ID{date_suffix}_{seq:04d}"
+                balance_external_ids[key] = external_id
+
+                # Get aggregated totals
+                agg = tx_aggregates.get(key, {"total_debit": 0, "total_credit": 0, "max_date": None})
+
+                # Get date from transactions or use current date
+                if agg["max_date"]:
+                    tx_date = agg["max_date"]
+                    date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
+                else:
+                    tx_date = now
+                    date_str_yyyymmdd = now.strftime("%Y%m%d")
+
+                # Currency default
+                currency = bal.currency if bal.currency else "VND"
+
+                # Name format: BS/{BankCode}/{Currency}-{AccNo}/{YYYYMMDD}
+                name = f"BS/{bal.bank_name}/{currency}-{bal.acc_no}/{date_str_yyyymmdd}"
+
+                balance_data.append({
+                    "External ID": external_id,
+                    "Name (*)": name,
+                    "Bank Account Number (*)": bal.acc_no,
+                    "Bank code (*)": bal.bank_name,
+                    "Openning Balance (*)": int(bal.opening_balance or 0),
+                    "Closing Balance (*)": int(bal.closing_balance or 0),
+                    "Total Debit (*)": agg["total_debit"],
+                    "Total Credit (*)": agg["total_credit"],
+                    "Currency (*)": currency,
+                    "Date (*)": tx_date
+                })
+
+            if balance_data:
+                df_balance = pd.DataFrame(balance_data, columns=[
+                    "External ID",
+                    "Name (*)",
+                    "Bank Account Number (*)",
+                    "Bank code (*)",
+                    "Openning Balance (*)",
+                    "Closing Balance (*)",
+                    "Total Debit (*)",
+                    "Total Credit (*)",
+                    "Currency (*)",
+                    "Date (*)"
+                ])
+                df_balance.to_excel(writer, sheet_name="Template balance", index=False)
+
+            # ========== Sheet 2: Template details ==========
+            details_data = []
+            seq = 0
+
+            for tx in all_transactions:
+                seq += 1
+
+                # External ID format: External Idline_{MMDDYY}_{SEQ:04d}
+                external_id = f"External Idline_{date_suffix}_{seq:04d}"
+
+                # Link to parent Balance
+                key = f"{tx.bank_name}_{tx.acc_no}"
+                external_id_bsm_daily = balance_external_ids.get(key, "")
+
+                # Currency default
+                currency = tx.currency if tx.currency else "VND"
+
+                # Date handling
+                if tx.date:
+                    tx_date = tx.date
+                    date_str_yyyymmdd = tx.date.strftime("%Y%m%d")
+                else:
+                    tx_date = now
+                    date_str_yyyymmdd = now.strftime("%Y%m%d")
+
+                # Bank Statement Daily format: BS/{Bank}/{Currency}-{AccNo}{TxID}/{YYYYMMDD}
+                trans_id = tx.transaction_id or ""
+                bank_statement_daily = f"BS/{tx.bank_name}/{currency}-{tx.acc_no}{trans_id}/{date_str_yyyymmdd}"
+
+                # Name format: same as Bank Statement Daily with trailing /
+                name = f"{bank_statement_daily}/"
+
+                # Debit/Credit as integers, 0 if None
+                debit_val = int(tx.debit or 0)
+                credit_val = int(tx.credit or 0)
+
+                # Amount and Type
+                if debit_val > 0:
+                    amount = debit_val
+                    tx_type = "D"
+                else:
+                    amount = credit_val
+                    tx_type = "C"
+
+                details_data.append({
+                    "External ID": external_id,
+                    "External ID BSM Daily": external_id_bsm_daily,
+                    "Bank Statement Daily": bank_statement_daily,
+                    "Name (*)": name,
+                    "Bank Code (*)": tx.bank_name,
+                    "Bank Account Number (*)": tx.acc_no,
+                    "TRANS ID": trans_id,
+                    "Trans Date (*)": tx_date,
+                    "Description (*)": tx.description or "",
+                    "Currency(*)": currency,
+                    "DEBIT (*)": debit_val,
+                    "CREDIT (*)": credit_val,
+                    "Amount": amount,
+                    "Type": tx_type,
+                    "Balance": "",
+                    "PARTNER": tx.beneficiary_acc_name or "",
+                    "PARTNER ACCOUNT": tx.beneficiary_acc_no or "",
+                    "PARTNER BANK ID": tx.beneficiary_bank or ""
+                })
+
+            if details_data:
+                df_details = pd.DataFrame(details_data, columns=[
+                    "External ID",
+                    "External ID BSM Daily",
+                    "Bank Statement Daily",
+                    "Name (*)",
+                    "Bank Code (*)",
+                    "Bank Account Number (*)",
+                    "TRANS ID",
+                    "Trans Date (*)",
+                    "Description (*)",
+                    "Currency(*)",
+                    "DEBIT (*)",
+                    "CREDIT (*)",
+                    "Amount",
+                    "Type",
+                    "Balance",
+                    "PARTNER",
+                    "PARTNER ACCOUNT",
+                    "PARTNER BANK ID"
+                ])
+                df_details.to_excel(writer, sheet_name="Template details", index=False)
+
+            # Handle empty case
+            if not balance_data and not details_data:
+                df_info = pd.DataFrame([{
+                    "Message": "No transactions or balances found",
+                    "Possible Reasons": "Bank not recognized or parser doesn't support this format"
+                }])
+                df_info.to_excel(writer, sheet_name="Info", index=False)
+
+        output.seek(0)
+        return output.read()

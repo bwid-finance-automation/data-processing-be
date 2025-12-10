@@ -6,7 +6,11 @@
       "Bash(findstr :8000)",
       "Bash(taskkill /F /PID 5412)",
       "Bash(taskkill //F //PID 5412)",
-      "Bash(python -c \"import sys, json; data=json.load(sys.stdin); paths=data.get(''''paths'''', {}); print(''''\\n''''.join(sorted(paths.keys())))\")"
+      "Bash(python -c \"import sys, json; data=json.load(sys.stdin); paths=data.get(''''paths'''', {}); print(''''\\n''''.join(sorted(paths.keys())))\")",
+      "Bash(find:*)",
+      "Bash(python:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []

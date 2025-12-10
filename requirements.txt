@@ -20,3 +20,4 @@ pillow>=10.0.0
 pymupdf>=1.23.0
 pytesseract>=0.3.10
 google-generativeai>=0.8.0
+pikepdf>=10.0.0

@@ -131,7 +131,12 @@ class BaseBankParser(ABC):
 
     @staticmethod
     def fix_date(value):
-        """Convert value to date."""
+        """
+        Convert value to date.
+
+        Vietnamese date format: DD/MM/YYYY
+        Uses dayfirst=True to handle DD/MM correctly.
+        """
         if value is None or pd.isna(value):
             return None
 
@@ -145,7 +150,8 @@ class BaseBankParser(ABC):
             txt = txt.split(' ')[0]  # Take date part only
 
         try:
-            parsed = pd.to_datetime(txt, errors='coerce')
+            # Use dayfirst=True for Vietnamese DD/MM/YYYY format
+            parsed = pd.to_datetime(txt, dayfirst=True, errors='coerce')
             if pd.notna(parsed):
                 return parsed.date()
         except:

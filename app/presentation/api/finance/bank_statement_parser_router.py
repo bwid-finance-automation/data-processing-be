@@ -35,7 +35,7 @@ def get_info():
         "description": "Automatically detect and parse bank statements from multiple banks",
         "features": [
             "Auto-detect bank from Excel files",
-            "PDF OCR with Gemini 2.5 Flash",
+            "PDF OCR with Gemini 2.0 Flash",
             "Parse transactions (Date, Amount, Description, etc.)",
             "Extract opening/closing balances",
             "Batch processing (multiple files)",
@@ -118,8 +118,8 @@ async def parse_bank_statements(
         use_case = ParseBankStatementsUseCase()
         result = use_case.execute(file_data)
 
-        # Generate Excel output
-        excel_bytes = use_case.export_to_excel(
+        # Generate Excel output (ERP Template format)
+        excel_bytes = use_case.export_to_erp_template_excel(
             result["all_transactions"],
             result["all_balances"]
         )
@@ -128,7 +128,7 @@ async def parse_bank_statements(
         session_id = str(uuid.uuid4())
         _file_storage[session_id] = {
             "content": excel_bytes,
-            "filename": f"bank_statements_{session_id}.xlsx"
+            "filename": f"bank_statements_erp_{session_id}.xlsx"
         }
 
         # Convert to response schema
@@ -194,13 +194,14 @@ async def parse_bank_statements(
 @router.post("/parse-pdf", response_model=ParseBankStatementsResponse, summary="Parse Bank Statements from PDF (Gemini OCR)")
 async def parse_bank_statements_pdf(
     files: List[UploadFile] = File(..., description="Bank statement PDF files (.pdf)"),
-    bank_codes: Optional[str] = Form(None, description="Comma-separated bank codes for each file (e.g., 'VIB,ACB,VCB'). Leave empty for auto-detection.")
+    bank_codes: Optional[str] = Form(None, description="Comma-separated bank codes for each file (e.g., 'VIB,ACB,VCB'). Leave empty for auto-detection."),
+    passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted PDF files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted PDFs.")
 ):
     """
     Parse multiple bank statement PDF files using Gemini Flash OCR.
 
     **Features:**
-    - Direct PDF OCR using Gemini 2.5 Flash
+    - Direct PDF OCR using Gemini 2.0 Flash
     - Auto-detect bank from OCR text
     - Parse transactions and balances
     - Generate standardized Excel output
@@ -215,6 +216,7 @@ async def parse_bank_statements_pdf(
     **Input:**
     - Multiple PDF files (.pdf)
     - Optional: bank_codes (comma-separated, same order as files)
+    - Optional: passwords (comma-separated, same order as files, empty for non-encrypted)
 
     **Output:**
     - Parsed statements with transactions and balances
@@ -233,6 +235,11 @@ async def parse_bank_statements_pdf(
         if bank_codes:
             bank_code_list = [code.strip() if code.strip() else None for code in bank_codes.split(",")]
 
+        # Parse passwords if provided
+        password_list = []
+        if passwords:
+            password_list = [pwd.strip() if pwd.strip() else None for pwd in passwords.split(",")]
+
         # Read files into memory
         pdf_inputs = []
         for i, file in enumerate(files):
@@ -245,14 +252,15 @@ async def parse_bank_statements_pdf(
 
             content = await file.read()
             bank_code = bank_code_list[i] if i < len(bank_code_list) else None
-            pdf_inputs.append((file.filename, content, bank_code))
+            password = password_list[i] if i < len(password_list) else None
+            pdf_inputs.append((file.filename, content, bank_code, password))
 
         # Parse using use case
         use_case = ParseBankStatementsUseCase()
         result = use_case.execute_from_pdf(pdf_inputs)
 
-        # Generate Excel output
-        excel_bytes = use_case.export_to_excel(
+        # Generate Excel output (ERP Template format)
+        excel_bytes = use_case.export_to_erp_template_excel(
             result["all_transactions"],
             result["all_balances"]
         )
@@ -261,7 +269,7 @@ async def parse_bank_statements_pdf(
         session_id = str(uuid.uuid4())
         _file_storage[session_id] = {
             "content": excel_bytes,
-            "filename": f"bank_statements_pdf_{session_id}.xlsx"
+            "filename": f"bank_statements_erp_pdf_{session_id}.xlsx"
         }
 
         # Convert to response schema
@@ -523,13 +531,13 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
         # Get output_format (default: "excel")
         output_format = request.output_format
 
-        # Generate Excel if requested
+        # Generate Excel if requested (ERP Template format)
         if output_format in ("excel", "both"):
-            excel_bytes = use_case.export_to_excel(
+            excel_bytes = use_case.export_to_erp_template_excel(
                 result["all_transactions"],
                 result["all_balances"]
             )
-            excel_filename = f"bank_statements_{session_id}.xlsx"
+            excel_filename = f"bank_statements_erp_{session_id}.xlsx"
             if request.return_excel_base64:
                 excel_base64 = base64.b64encode(excel_bytes).decode('utf-8')
 

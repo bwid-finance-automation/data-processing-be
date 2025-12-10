@@ -124,6 +124,9 @@ class PowerAutomateFileInput(BaseModel):
     ocr_text: Optional[str] = Field(None, description="OCR extracted text from AI Builder. If provided, contentBytes is ignored")
     bank_code: Optional[str] = Field(None, description="Force specific bank parser (VIB, ACB, etc.). If null, auto-detect from text")
 
+    # PDF password (for encrypted PDFs)
+    password: Optional[str] = Field(None, description="Password for encrypted PDF files. Only needed if PDF is password-protected")
+
     # Optional fields from Power Automate
     url: Optional[str] = Field(None, description="OneDrive URL (not used for processing)")
     source: Optional[str] = Field(None, description="Source type (ZIP/PDF)")
@@ -139,6 +142,10 @@ class PowerAutomateFileInput(BaseModel):
     def has_ocr_text(self) -> bool:
         """Check if OCR text is provided and not empty."""
         return self.ocr_text is not None and self.ocr_text.strip() != ""
+
+    def get_password(self) -> Optional[str]:
+        """Get password for encrypted PDF."""
+        return self.password
 
 
 class PowerAutomateParseRequest(BaseModel):

@@ -60,7 +60,7 @@ class OCBParser(BaseBankParser):
         Logic from fxParse_OCB_Transactions:
         - Find header row with flexible bilingual detection
         - Vietnamese column headers
-        - Map: Debit = "PS TĂNG (CÓ)", Credit = "PS GIẢM (NỢ)" (reversed like other VN banks)
+        - CORRECT Map: Debit = "PS GIẢM (NỢ)" (tiền RA), Credit = "PS TĂNG (CÓ)" (tiền VÀO)
         - Extract account number from "SỐ TÀI KHOẢN" line with sophisticated tokenization
         """
         try:
@@ -81,9 +81,12 @@ class OCBParser(BaseBankParser):
             data = data[1:].reset_index(drop=True)
 
             # ========== Find Columns (Bilingual) ==========
+            # CORRECT MAPPING:
+            # - "PS GIẢM (NỢ)" = Debit = tiền RA
+            # - "PS TĂNG (CÓ)" = Credit = tiền VÀO
             date_col = self._find_any_column(data, ["NGÀY THỰC HIỆN", "TRANSACTION DATE", "NGÀY", "DATE"])
-            credit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Credit
-            debit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Debit
+            debit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Debit
+            credit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Credit
             balance_col = self._find_any_column(data, ["SỐ DƯ", "BALANCE"])
             desc_col = self._find_any_column(data, ["NỘI DUNG", "DESCRIPTION", "DIỄN GIẢI", "CONTENT"])
             transaction_id_col = self._find_any_column(data, ["SỐ GD", "TRANSACTION NUMBER"])
@@ -188,9 +191,12 @@ class OCBParser(BaseBankParser):
             data = data[1:].reset_index(drop=True)
 
             # ========== Find Columns ==========
+            # CORRECT MAPPING:
+            # - "PS GIẢM (NỢ)" = Debit = tiền RA
+            # - "PS TĂNG (CÓ)" = Credit = tiền VÀO
             date_col = self._find_any_column(data, ["NGÀY", "DATE"])
-            credit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])
-            debit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])
+            debit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Debit
+            credit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Credit
             balance_col = self._find_any_column(data, ["SỐ DƯ", "BALANCE"])
 
             # Keep columns
@@ -284,48 +290,95 @@ class OCBParser(BaseBankParser):
 
     def _extract_account_number_ocb(self, top_df: pd.DataFrame) -> Optional[str]:
         """
-        Extract account number from "SỐ TÀI KHOẢN" line.
-        Sophisticated tokenization: split by spaces, punctuation, then find 8-20 digit tokens.
+        Extract account number from header area.
+
+        Flexible detection:
+        1. Look for rows with account keywords (SỐ TÀI KHOẢN, ACCOUNT NO, TK, STK, etc.)
+        2. Look for cells containing only 6-15 digit numbers (likely account numbers)
+        3. Vietnamese bank accounts typically have 6-15 digits.
         """
-        # Convert to rows
+        # Keywords to search for account number context
+        account_keywords = [
+            "SỐ TÀI KHOẢN", "ACCOUNT NO", "ACCOUNT NUMBER", "ACC NO", "A/C NO",
+            "TÀI KHOẢN", "TK:", "STK:", "SỐ TK", "SO TK", "ACCOUNT:",
+            "TK SỐ", "SỐ HIỆU TK", "MÃ TK"
+        ]
+
+        # First pass: Look for rows with account keywords
         for _, row in top_df.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "SỐ TÀI KHOẢN" in row_text or "ACCOUNT NO" in row_text:
+            if any(kw in row_text for kw in account_keywords):
                 # Split by punctuation and spaces
                 tokens = re.split(r'[ ,.;:|(){}\\[\\]<>\\-_/]+', row_text)
                 tokens = [t for t in tokens if t]
 
-                # Find first token with 8-20 digits
+                # Find first token with 6-15 digits (Vietnamese banks use 6-15 digits typically)
                 for token in tokens:
                     digits = ''.join(c for c in token if c.isdigit())
-                    if 8 <= len(digits) <= 20:
+                    if 6 <= len(digits) <= 15:
                         return digits
+
+        # Second pass: Look for standalone cells with 6-15 digit numbers
+        # These are likely account numbers in header area
+        for _, row in top_df.iterrows():
+            for cell in row:
+                cell_text = self.to_text(cell).strip()
+                # Check if cell is purely numeric (or with minor separators)
+                cleaned = cell_text.replace(" ", "").replace("-", "").replace(".", "")
+                if cleaned.isdigit() and 6 <= len(cleaned) <= 15:
+                    # Exclude dates (format like 20241105) and amounts (too long or with decimals)
+                    if not re.match(r'^\d{8}$', cleaned):  # Exclude YYYYMMDD dates
+                        return cleaned
 
         return None
 
     def _extract_currency_ocb(self, top_df: pd.DataFrame) -> Optional[str]:
-        """Extract currency from header area."""
-        # Convert to rows
+        """
+        Extract currency from header area.
+
+        Flexible detection:
+        1. Look for currency keywords (VND, USD, EUR, etc.)
+        2. Look for currency context words (LOẠI TIỀN, CURRENCY, etc.)
+        """
+        currency_keywords = {
+            "VND": ["VND", "VNĐ", "ĐỒNG", "DONG"],
+            "USD": ["USD", "US DOLLAR", "DOLLAR"],
+            "EUR": ["EUR", "EURO"],
+            "JPY": ["JPY", "YEN"],
+            "GBP": ["GBP", "POUND"]
+        }
+
+        # Convert to rows and search
         for _, row in top_df.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "VND" in row_text or "VNĐ" in row_text:
-                return "VND"
-            elif "USD" in row_text:
-                return "USD"
+            # Check for each currency
+            for currency, keywords in currency_keywords.items():
+                if any(kw in row_text for kw in keywords):
+                    return currency
 
-        return None
+        # Default to VND for Vietnamese banks
+        return "VND"
 
     def _extract_opening_balance_ocb(self, top_df: pd.DataFrame) -> Optional[float]:
         """
-        Extract opening balance from "SỐ DƯ ĐẦU:" line.
-        Looks for number after the label.
+        Extract opening balance from header area.
+
+        Flexible detection:
+        1. Look for opening balance keywords (SỐ DƯ ĐẦU, OPENING BALANCE, etc.)
+        2. Extract number from the same row or adjacent cell
         """
+        opening_keywords = [
+            "SỐ DƯ ĐẦU", "DƯ ĐẦU", "OPENING BALANCE", "OPENING BAL",
+            "SỐ DƯ ĐẦU KỲ", "SỐ DƯ MỞ", "BEGIN BALANCE", "BALANCE B/F",
+            "SỐ DƯ NGÀY", "BALANCE BROUGHT"
+        ]
+
         for _, row in top_df.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "SỐ DƯ ĐẦU" in row_text or "DƯ ĐẦU" in row_text:
+            if any(kw in row_text for kw in opening_keywords):
                 # Try to extract number from this row
                 for cell in row:
                     num_val = self._fix_number_ocb(cell)
