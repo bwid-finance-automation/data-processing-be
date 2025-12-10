@@ -1,6 +1,6 @@
 """Use case for parsing bank statements (batch processing)."""
 
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime
 import pandas as pd
 import csv
@@ -9,6 +9,7 @@ from collections import defaultdict
 
 from app.domain.finance.bank_statement_parser.models import BankStatement, BankTransaction, BankBalance
 from .bank_parsers.parser_factory import ParserFactory
+from .gemini_ocr_service import GeminiOCRService
 
 
 class ParseBankStatementsUseCase:
@@ -206,6 +207,76 @@ class ParseBankStatementsUseCase:
             }
         }
 
+    def execute_from_pdf(
+        self,
+        pdf_inputs: List[Tuple[str, bytes, Optional[str]]]
+    ) -> Dict[str, Any]:
+        """
+        Parse multiple bank statements from PDF files using Gemini OCR.
+
+        Args:
+            pdf_inputs: List of (file_name, pdf_bytes, bank_code) tuples
+                        bank_code can be None for auto-detection
+
+        Returns:
+            Dictionary with same structure as execute():
+            - statements: List of parsed statements
+            - all_transactions: Combined list of transactions
+            - all_balances: Combined list of balances
+            - summary: Processing summary (includes ocr_results for debugging)
+        """
+        # Initialize Gemini OCR service
+        gemini_service = GeminiOCRService()
+
+        # Step 1: Extract text from all PDFs using Gemini
+        pdf_files = [(file_name, pdf_bytes) for file_name, pdf_bytes, _ in pdf_inputs]
+        ocr_results = gemini_service.extract_text_from_pdf_batch(pdf_files)
+
+        # Step 2: Build text_inputs for execute_from_text
+        text_inputs: List[Tuple[str, str, str]] = []
+        ocr_failed = []
+
+        for i, (file_name, ocr_text, ocr_error) in enumerate(ocr_results):
+            bank_code = pdf_inputs[i][2]  # Get bank_code from original input
+
+            if ocr_error:
+                ocr_failed.append({
+                    "file_name": file_name,
+                    "error": f"OCR failed: {ocr_error}"
+                })
+            elif not ocr_text.strip():
+                ocr_failed.append({
+                    "file_name": file_name,
+                    "error": "OCR returned empty text"
+                })
+            else:
+                text_inputs.append((file_name, ocr_text, bank_code or ""))
+
+        # Step 3: Parse the extracted text using existing execute_from_text
+        if text_inputs:
+            result = self.execute_from_text(text_inputs)
+        else:
+            result = {
+                "statements": [],
+                "all_transactions": [],
+                "all_balances": [],
+                "summary": {
+                    "total_files": 0,
+                    "successful": 0,
+                    "failed": 0,
+                    "failed_files": [],
+                    "total_transactions": 0,
+                    "total_balances": 0
+                }
+            }
+
+        # Step 4: Merge OCR failures into the result
+        result["summary"]["total_files"] = len(pdf_inputs)
+        result["summary"]["failed"] += len(ocr_failed)
+        result["summary"]["failed_files"].extend(ocr_failed)
+
+        return result
+
     def export_to_excel(
         self,
         all_transactions: List[BankTransaction],
@@ -229,6 +300,17 @@ class ParseBankStatementsUseCase:
         output = BytesIO()
 
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # ========== Handle Empty Data ==========
+            if not all_transactions and not all_balances:
+                # Create an info sheet when there's no data
+                df_info = pd.DataFrame([{
+                    "Message": "No transactions or balances found",
+                    "Possible Reasons": "Bank not recognized from OCR text, or parser doesn't support this bank format"
+                }])
+                df_info.to_excel(writer, sheet_name="Info", index=False)
+                output.seek(0)
+                return output.read()
+
             # ========== Sheet 1: Transactions ==========
             if all_transactions:
                 tx_data = []

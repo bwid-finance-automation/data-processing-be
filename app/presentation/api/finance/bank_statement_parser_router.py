@@ -1,7 +1,7 @@
 """API router for bank statement parsing."""
 
-from typing import List, Tuple
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from typing import List, Tuple, Optional
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from fastapi.responses import Response
 import uuid
 import math
@@ -35,6 +35,7 @@ def get_info():
         "description": "Automatically detect and parse bank statements from multiple banks",
         "features": [
             "Auto-detect bank from Excel files",
+            "PDF OCR with Gemini 2.5 Flash",
             "Parse transactions (Date, Amount, Description, etc.)",
             "Extract opening/closing balances",
             "Batch processing (multiple files)",
@@ -43,7 +44,8 @@ def get_info():
         ],
         "supported_banks": ParserFactory.get_supported_banks(),
         "endpoints": {
-            "parse": "POST /bank-statements/parse - Parse bank statements (batch)",
+            "parse": "POST /bank-statements/parse - Parse bank statements from Excel (batch)",
+            "parse_pdf": "POST /bank-statements/parse-pdf - Parse bank statements from PDF using Gemini OCR",
             "download": "GET /bank-statements/download/{session_id} - Download Excel output",
             "supported_banks": "GET /bank-statements/supported-banks - Get list of supported banks"
         }
@@ -187,6 +189,139 @@ async def parse_bank_statements(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse bank statements: {str(e)}")
+
+
+@router.post("/parse-pdf", response_model=ParseBankStatementsResponse, summary="Parse Bank Statements from PDF (Gemini OCR)")
+async def parse_bank_statements_pdf(
+    files: List[UploadFile] = File(..., description="Bank statement PDF files (.pdf)"),
+    bank_codes: Optional[str] = Form(None, description="Comma-separated bank codes for each file (e.g., 'VIB,ACB,VCB'). Leave empty for auto-detection.")
+):
+    """
+    Parse multiple bank statement PDF files using Gemini Flash OCR.
+
+    **Features:**
+    - Direct PDF OCR using Gemini 2.5 Flash
+    - Auto-detect bank from OCR text
+    - Parse transactions and balances
+    - Generate standardized Excel output
+
+    **Supported Banks:**
+    - VIB (Vietnam International Bank)
+    - ACB (Asia Commercial Bank)
+    - VCB (Vietcombank)
+    - BIDV (Bank for Investment and Development)
+    - And more...
+
+    **Input:**
+    - Multiple PDF files (.pdf)
+    - Optional: bank_codes (comma-separated, same order as files)
+
+    **Output:**
+    - Parsed statements with transactions and balances
+    - Summary of processing results
+    - Download URL for Excel output
+
+    **Note:** Requires GEMINI_API_KEY to be configured in .env
+    """
+    try:
+        # Validate files
+        if not files:
+            raise HTTPException(status_code=400, detail="No files uploaded")
+
+        # Parse bank_codes if provided
+        bank_code_list = []
+        if bank_codes:
+            bank_code_list = [code.strip() if code.strip() else None for code in bank_codes.split(",")]
+
+        # Read files into memory
+        pdf_inputs = []
+        for i, file in enumerate(files):
+            # Validate file extension
+            if not file.filename.lower().endswith('.pdf'):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid file type: {file.filename}. Only .pdf files are supported for this endpoint."
+                )
+
+            content = await file.read()
+            bank_code = bank_code_list[i] if i < len(bank_code_list) else None
+            pdf_inputs.append((file.filename, content, bank_code))
+
+        # Parse using use case
+        use_case = ParseBankStatementsUseCase()
+        result = use_case.execute_from_pdf(pdf_inputs)
+
+        # Generate Excel output
+        excel_bytes = use_case.export_to_excel(
+            result["all_transactions"],
+            result["all_balances"]
+        )
+
+        # Store for download
+        session_id = str(uuid.uuid4())
+        _file_storage[session_id] = {
+            "content": excel_bytes,
+            "filename": f"bank_statements_pdf_{session_id}.xlsx"
+        }
+
+        # Convert to response schema
+        statements_response = []
+        for stmt in result["statements"]:
+            # Convert balance
+            balance_response = None
+            if stmt.balance:
+                # Handle NaN values in balance
+                opening_bal = stmt.balance.opening_balance
+                closing_bal = stmt.balance.closing_balance
+                if isinstance(opening_bal, float) and math.isnan(opening_bal):
+                    opening_bal = 0.0
+                if isinstance(closing_bal, float) and math.isnan(closing_bal):
+                    closing_bal = 0.0
+
+                balance_response = BankBalanceResponse(
+                    bank_name=stmt.balance.bank_name,
+                    acc_no=stmt.balance.acc_no,
+                    currency=stmt.balance.currency,
+                    opening_balance=opening_bal,
+                    closing_balance=closing_bal
+                )
+
+            # Convert transactions
+            transactions_response = [
+                BankTransactionResponse(
+                    bank_name=tx.bank_name,
+                    acc_no=tx.acc_no,
+                    debit=None if (tx.debit is None or (isinstance(tx.debit, float) and math.isnan(tx.debit))) else tx.debit,
+                    credit=None if (tx.credit is None or (isinstance(tx.credit, float) and math.isnan(tx.credit))) else tx.credit,
+                    date=tx.date.isoformat() if tx.date else None,
+                    description=tx.description,
+                    currency=tx.currency,
+                    transaction_id=tx.transaction_id,
+                    beneficiary_bank=tx.beneficiary_bank,
+                    beneficiary_acc_no=tx.beneficiary_acc_no,
+                    beneficiary_acc_name=tx.beneficiary_acc_name
+                )
+                for tx in stmt.transactions
+            ]
+
+            statements_response.append(BankStatementResponse(
+                bank_name=stmt.bank_name,
+                file_name=stmt.file_name,
+                balance=balance_response,
+                transactions=transactions_response,
+                transaction_count=len(stmt.transactions)
+            ))
+
+        return ParseBankStatementsResponse(
+            statements=statements_response,
+            summary=result["summary"],
+            download_url=f"/api/finance/bank-statements/download/{session_id}"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse PDF bank statements: {str(e)}")
 
 
 @router.get("/download/{session_id}", summary="Download Excel Output")
