@@ -16,6 +16,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 
+# Setup logging first (before any other imports that might use logging)
+from app.shared.utils.logging_config import setup_logging
+setup_logging(level="INFO")
+
 # Import exception handlers
 from app.core.exceptions import (
     AnalysisError,
@@ -70,12 +74,18 @@ app.include_router(bank_statement_parser_router.router, prefix="/api/finance")
 # Include FP&A Department router with /api prefix (already has /fpa prefix in router)
 app.include_router(excel_comparison_router.router, prefix="/api")
 
+# Get logger for main module
+import logging
+logger = logging.getLogger(__name__)
+
 # Startup event for cleanup
 @app.on_event("startup")
 async def startup_event():
     """Run cleanup on startup"""
+    logger.info("🚀 Application starting up...")
     fpa_use_case = CompareExcelFilesUseCase()
     fpa_use_case.cleanup_old_files()
+    logger.info("✅ Startup complete - Logging enabled")
 
 # Root health check
 @app.get("/", tags=["Root"])

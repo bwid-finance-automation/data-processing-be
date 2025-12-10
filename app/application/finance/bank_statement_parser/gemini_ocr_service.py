@@ -157,6 +157,10 @@ Output the extracted text:"""
                 extracted_text = response.text
                 logger.info(f"Successfully extracted {len(extracted_text)} characters from {file_name}")
 
+                # Log first 500 chars for debugging (helps identify OCR issues)
+                preview = extracted_text[:500].replace('\n', ' ')
+                logger.info(f"OCR preview for {file_name}: {preview}...")
+
                 return extracted_text
 
             finally:

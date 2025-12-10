@@ -7,6 +7,9 @@ import pandas as pd
 
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
 from .base_parser import BaseBankParser
+from app.shared.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class VIBParser(BaseBankParser):
@@ -410,6 +413,12 @@ class VIBParser(BaseBankParser):
             transactions = []
             lines = text.split('\n')
 
+            logger.info(f"VIB OCR text length: {len(text)} chars, {len(lines)} lines")
+
+            # Log lines that look like transactions (10-digit start)
+            tx_lines = [l for l in lines if re.match(r'^\s*\d{10}', l.strip())]
+            logger.info(f"VIB: Found {len(tx_lines)} potential transaction lines")
+
             # Extract account number and currency for each page/section
             # VIB PDFs can have multiple accounts (VND and USD)
             current_acc_no = None
@@ -464,10 +473,11 @@ class VIBParser(BaseBankParser):
                     if tx:
                         transactions.append(tx)
 
+            logger.info(f"VIB: Successfully parsed {len(transactions)} transactions from OCR text")
             return transactions
 
         except Exception as e:
-            print(f"Error parsing VIB transactions from text: {e}")
+            logger.error(f"Error parsing VIB transactions from text: {e}")
             return []
 
     def _parse_pipe_separated_transaction(self, line: str, acc_no: str, currency: str) -> Optional[BankTransaction]:
