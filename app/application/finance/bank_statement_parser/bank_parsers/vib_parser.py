@@ -740,11 +740,19 @@ class VIBParser(BaseBankParser):
                         currency = acc_match.group(2).upper()
                         break
 
-            # Extract opening balance
+            # Extract opening balance - try multiple methods
             opening = self._extract_balance_gemini(lines, ["số dư đầu", "opening balance"])
+            if opening is None or opening == 0:
+                # Fallback: search for balance pattern near "opening" in full text
+                opening = self._extract_balance_fallback(text, ["số dư đầu", "opening balance"])
+                logger.info(f"VIB balance fallback opening: {opening}")
 
             # Extract closing balance
             closing = self._extract_balance_gemini(lines, ["số dư cuối", "ending balance"])
+            if closing is None or closing == 0:
+                # Fallback: search for balance pattern near "ending" in full text
+                closing = self._extract_balance_fallback(text, ["số dư cuối", "ending balance"])
+                logger.info(f"VIB balance fallback closing: {closing}")
 
             return BankBalance(
                 bank_name="VIB",
@@ -820,6 +828,40 @@ class VIBParser(BaseBankParser):
                         val = float(check_line)
                         if val >= 0:
                             return val
+
+        return None
+
+    def _extract_balance_fallback(self, text: str, labels: List[str]) -> Optional[float]:
+        """
+        Fallback balance extraction - search for large numbers near balance labels.
+
+        OCR text can be messy with balance values far from labels.
+        This method finds the label position and searches nearby for large numbers.
+        """
+        text_lower = text.lower()
+
+        for label in labels:
+            label_lower = label.lower()
+            pos = text_lower.find(label_lower)
+
+            if pos == -1:
+                continue
+
+            # Extract a window of text after the label (up to 500 chars)
+            window_start = pos
+            window_end = min(pos + 500, len(text))
+            window = text[window_start:window_end]
+
+            # Find all large numbers (with comma separator, 5+ digits)
+            numbers = re.findall(r'[\d,]+', window)
+
+            for num_str in numbers:
+                # Must have comma (thousand separator) and be large enough
+                if ',' in num_str and len(num_str.replace(',', '')) >= 5:
+                    val = self._parse_number_from_text(num_str)
+                    if val is not None and val > 0:
+                        logger.info(f"VIB balance fallback found: {val} near '{label}'")
+                        return val
 
         return None
 
