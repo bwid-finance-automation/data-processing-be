@@ -15,14 +15,28 @@ Adapted for FastAPI backend integration.
 
 import re
 import io
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
+from datetime import datetime
 import pandas as pd
 import numpy as np
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 import warnings
 warnings.filterwarnings('ignore')
+
+# Import loan interest rate parser for enhanced A2
+from app.domain.finance.variance_analysis.services.loan_interest_parser import (
+    parse_loan_interest_file,
+    build_entity_rate_lookup,
+    get_applicable_rate,
+    get_rate_for_period,
+    calculate_expected_interest,
+    find_matching_entity,
+    generate_a2_explanation,
+    get_days_in_month,
+    MONTH_ABBR_TO_NUM
+)
 
 
 # ============================================================================
@@ -529,6 +543,72 @@ def extract_subsidiary_name(xl_file):
     return "Subsidiary"
 
 
+def extract_entity_from_file(xl_file) -> Optional[str]:
+    """
+    Extract entity name from Row 1 (index 1) of BS/PL Breakdown file.
+
+    Row 1 format: "Parent Company : BWID : VC1 : VC2 : ENTITY_NAME"
+    Entity is always the LAST part after ":"
+
+    Args:
+        xl_file: File-like object or path to Excel file
+
+    Returns:
+        Entity name, or None if not found
+    """
+    try:
+        wb = load_workbook(xl_file, read_only=True, data_only=True)
+
+        # Try common sheet name variations
+        bs_patterns = ["BS Breakdown", "BSbreakdown", "BS breakdown", "bs breakdown",
+                       "balance sheet breakdown", "BẢNG CÂN ĐỐI KẾ TOÁN", "Balance Sheet", "BS"]
+        pl_patterns = ["PL Breakdown", "PLBreakdown", "PL breakdown", "pl breakdown",
+                       "Profit Loss", "Income Statement", "BÁO CÁO KẾT QUẢ KINH DOANH", "P&L", "P/L", "PL"]
+
+        for patterns in [bs_patterns, pl_patterns]:
+            sheet_name = find_sheet_by_pattern(wb, patterns)
+            if sheet_name:
+                sheet = wb[sheet_name]
+
+                # Row 2 (index 1 in 0-based, cell A2) contains "Parent Company : ... : ENTITY"
+                cell_value = sheet["A2"].value
+                if isinstance(cell_value, str) and ":" in cell_value:
+                    # Split by ":" and get the LAST part (entity name)
+                    parts = cell_value.split(":")
+                    entity = parts[-1].strip()
+                    wb.close()
+                    return entity if entity else None
+
+        wb.close()
+    except Exception as e:
+        print(f"Error extracting entity from Row 1: {e}")
+
+    return None
+
+
+def parse_month_year_from_column(col_name: str) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Parse month name and year from column header.
+
+    Args:
+        col_name: Column name like 'Jan 2025' or 'As of Sep 2025'
+
+    Returns:
+        Tuple of (month_name, year) e.g., ('Sep', 2025)
+    """
+    col_str = str(col_name).replace('As of ', '').strip()
+
+    for month in MONTH_TOKENS:
+        if month in col_str:
+            # Extract year
+            year_match = re.search(r'(\d{4})', col_str)
+            if year_match:
+                return month, int(year_match.group(1))
+            return month, None
+
+    return None, None
+
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -678,6 +758,189 @@ def check_rule_A2(bs_df, pl_df):
                 'Reason': f'Loan increased by {loan_change:,.0f} VND but day-adjusted interest changed by {interest_change:,.0f} VND',
                 'Flag_Trigger': 'Loan↑ BUT Day-adjusted Interest ≤ previous'
             })
+    return flags
+
+
+def check_rule_A2_enhanced(
+    bs_df: pd.DataFrame,
+    pl_df: pd.DataFrame,
+    entity_name: Optional[str],
+    loan_rate_lookup: Optional[Dict[str, List[Tuple[datetime, float]]]]
+) -> List[Dict[str, Any]]:
+    """
+    A2 Enhanced - Loan Interest Analysis with ERP Rate Data
+
+    Performs deep-dive analysis of loan/interest relationships using
+    interest rate data from ERP system.
+
+    Logic:
+    - If loan increased but interest didn't → Missing interest accrual
+    - If loan unchanged but interest changed → Check if rate changed
+    - Calculate expected interest: Principal × Rate × (Days/365)
+    - Compare expected vs actual and generate explanation
+
+    Args:
+        bs_df: Balance Sheet DataFrame
+        pl_df: P&L DataFrame
+        entity_name: Entity name extracted from file (for rate lookup)
+        loan_rate_lookup: Dict mapping entity names to rate history
+
+    Returns:
+        List of enhanced A2 variance flags
+    """
+    flags = []
+
+    if bs_df is None or pl_df is None or bs_df.empty or pl_df.empty:
+        return flags
+
+    # Get loan and interest data
+    loan_accounts = get_account_pattern_data(bs_df, '341xxx')
+    interest_expense = get_account_pattern_data(pl_df, '635xxx')
+    cip_interest = get_account_pattern_data(bs_df, '241xxx')
+
+    if loan_accounts.empty:
+        return flags
+
+    month_cols = get_month_cols(bs_df)
+    if len(month_cols) < 2:
+        return flags
+
+    # Find matching entity in loan rate lookup
+    matched_entity = None
+    entity_rates = []
+
+    if entity_name and loan_rate_lookup:
+        available_entities = list(loan_rate_lookup.keys())
+        matched_entity = find_matching_entity(entity_name, available_entities)
+        if matched_entity:
+            entity_rates = loan_rate_lookup[matched_entity]
+
+    # Analyze each month transition
+    for i in range(1, len(month_cols)):
+        prev_month = month_cols[i-1]
+        curr_month = month_cols[i]
+
+        # Parse month/year for calculations
+        prev_month_name, prev_year = parse_month_year_from_column(prev_month)
+        curr_month_name, curr_year = parse_month_year_from_column(curr_month)
+
+        if not curr_month_name or not curr_year:
+            continue
+
+        # Calculate loan balances and changes
+        loan_prev = loan_accounts[prev_month].sum()
+        loan_curr = loan_accounts[curr_month].sum()
+        loan_change = loan_curr - loan_prev
+
+        # Calculate interest (raw values)
+        interest_prev_raw = interest_expense[prev_month].sum() if not interest_expense.empty else 0
+        interest_curr_raw = interest_expense[curr_month].sum() if not interest_expense.empty else 0
+        cip_prev_raw = cip_interest[prev_month].sum() if not cip_interest.empty else 0
+        cip_curr_raw = cip_interest[curr_month].sum() if not cip_interest.empty else 0
+
+        total_interest_prev = abs(interest_prev_raw) + abs(cip_prev_raw)
+        total_interest_curr = abs(interest_curr_raw) + abs(cip_curr_raw)
+        interest_change = total_interest_curr - total_interest_prev
+
+        # Get interest rates for the period
+        current_rate = None
+        previous_rate = None
+        rate_change_date = None
+        expected_interest = None
+
+        if entity_rates:
+            # Build datetime for period boundaries
+            prev_month_num = MONTH_ABBR_TO_NUM.get(prev_month_name, 1) if prev_month_name else 1
+            curr_month_num = MONTH_ABBR_TO_NUM.get(curr_month_name, 1)
+
+            period_start = datetime(prev_year or curr_year, prev_month_num, 1)
+            # End of current month
+            days_in_curr = get_days_in_month(curr_month_name, curr_year)
+            period_end = datetime(curr_year, curr_month_num, days_in_curr)
+
+            current_rate, previous_rate, rate_change_date = get_rate_for_period(
+                entity_rates, period_start, period_end
+            )
+
+            # Calculate expected interest for current month
+            if current_rate and loan_curr > 0:
+                expected_interest = calculate_expected_interest(
+                    loan_curr, current_rate, curr_month_name, curr_year
+                )
+
+        # Determine if we should flag and what explanation to provide
+        should_flag = False
+        flag_priority = '🔴 Critical'
+        flag_issue = 'Loan drawdown but interest not recorded'
+
+        # Scenario 1: Loan increased but interest didn't increase (basic A2)
+        if loan_change > 0 and interest_change <= 0:
+            should_flag = True
+            if previous_rate is not None and current_rate != previous_rate:
+                # Rate changed - might explain the discrepancy
+                flag_priority = '🟡 Review'
+                flag_issue = 'Loan increased but interest pattern changed - rate adjustment detected'
+            else:
+                flag_issue = 'Loan drawdown but interest not recorded'
+
+        # Scenario 2: Loan unchanged but interest changed significantly
+        elif abs(loan_change) < 1_000_000_000 and abs(interest_change) > 100_000_000:
+            # Loan stable but interest changed by > 100M
+            if previous_rate is not None and current_rate != previous_rate:
+                should_flag = True
+                flag_priority = '🟢 Info'
+                flag_issue = 'Interest change due to rate adjustment'
+
+        # Scenario 3: Expected vs Actual variance
+        elif expected_interest is not None and total_interest_curr > 0:
+            variance = abs(total_interest_curr - expected_interest)
+            variance_pct = variance / expected_interest if expected_interest > 0 else 0
+
+            if variance_pct > 0.10 and variance > 100_000_000:  # >10% and >100M variance
+                should_flag = True
+                flag_priority = '🟡 Review'
+                flag_issue = 'Interest variance from expected calculation'
+
+        if should_flag:
+            # Generate explanation
+            explanation = generate_a2_explanation(
+                loan_change=loan_change,
+                interest_change=interest_change,
+                current_rate=current_rate,
+                previous_rate=previous_rate,
+                rate_change_date=rate_change_date,
+                expected_interest=expected_interest,
+                actual_interest=total_interest_curr
+            )
+
+            # Format rate for display
+            def fmt_rate(r):
+                return f"{r*100:.2f}%" if r else "N/A"
+
+            flag = {
+                'Rule_ID': 'A2',
+                'Priority': flag_priority,
+                'Issue': flag_issue,
+                'Accounts': '341xxx ↔ 635xxx + 241xxx',
+                'Period': f"{prev_month} → {curr_month}",
+                'Loan_Change': f'{loan_change:,.0f}',
+                'Interest_Change': f'{interest_change:,.0f}',
+                'Current_Rate': fmt_rate(current_rate),
+                'Previous_Rate': fmt_rate(previous_rate) if previous_rate else 'N/A',
+                'Rate_Effective_Date': rate_change_date.strftime('%Y-%m-%d') if rate_change_date else 'N/A',
+                'Expected_Interest': f'{expected_interest:,.0f}' if expected_interest else 'N/A',
+                'Actual_Interest': f'{total_interest_curr:,.0f}',
+                'Variance': f'{(total_interest_curr - expected_interest):,.0f}' if expected_interest else 'N/A',
+                'Reason': explanation,
+                'Flag_Trigger': f'Enhanced A2 analysis with rate data'
+            }
+
+            # Add entity info if available
+            if matched_entity:
+                flag['Entity_Matched'] = matched_entity
+
+            flags.append(flag)
+
     return flags
 
 
@@ -1722,19 +1985,33 @@ def check_rule_F3(bs_df, pl_df):
 # MAIN RULE EXECUTION
 # ============================================================================
 
-def run_all_variance_rules(bs_df, pl_df, bs_df_full=None):
+def run_all_variance_rules(
+    bs_df,
+    pl_df,
+    bs_df_full=None,
+    entity_name: Optional[str] = None,
+    loan_rate_lookup: Optional[Dict[str, List[Tuple[datetime, float]]]] = None
+):
     """Run all 22 variance analysis rules
 
     Args:
         bs_df: Entity-specific BS data
         pl_df: Entity-specific PL data
         bs_df_full: Full BS data (not split by entity) for D1 balance check
+        entity_name: Entity name for enhanced A2 lookup (optional)
+        loan_rate_lookup: Dict mapping entity names to interest rate history (optional)
     """
     all_flags = []
 
     # Critical Rules (🔴)
     all_flags.extend(check_rule_A1(bs_df, pl_df))
-    all_flags.extend(check_rule_A2(bs_df, pl_df))
+
+    # Use enhanced A2 if loan rate data is available, otherwise use basic A2
+    if loan_rate_lookup:
+        all_flags.extend(check_rule_A2_enhanced(bs_df, pl_df, entity_name, loan_rate_lookup))
+    else:
+        all_flags.extend(check_rule_A2(bs_df, pl_df))
+
     all_flags.extend(check_rule_A3(bs_df, pl_df))
     all_flags.extend(check_rule_A4(bs_df, pl_df))
     all_flags.extend(check_rule_A5(bs_df, pl_df))
@@ -1795,7 +2072,25 @@ def create_excel_output(all_file_data, combined_flags):
             }])
         else:
             flags_df = pd.DataFrame(combined_flags)
-            column_order = ['File', 'Rule_ID', 'Priority', 'Issue', 'Accounts', 'Period', 'Reason', 'Flag_Trigger']
+
+            # Define column order - include enhanced A2 columns if present
+            base_columns = ['File', 'Rule_ID', 'Priority', 'Issue', 'Accounts', 'Period']
+            enhanced_a2_columns = [
+                'Loan_Change', 'Interest_Change', 'Current_Rate', 'Previous_Rate',
+                'Rate_Effective_Date', 'Expected_Interest', 'Actual_Interest', 'Variance',
+                'Entity_Matched'
+            ]
+            end_columns = ['Reason', 'Flag_Trigger']
+
+            # Build column order based on what columns exist in the data
+            column_order = base_columns.copy()
+            for col in enhanced_a2_columns:
+                if col in flags_df.columns:
+                    column_order.append(col)
+            column_order.extend(end_columns)
+
+            # Only include columns that exist in the dataframe
+            column_order = [col for col in column_order if col in flags_df.columns]
             flags_df = flags_df[column_order]
 
             priority_order = {'🔴 Critical': 0, '🟡 Review': 1, '🟢 Info': 2}
@@ -1826,10 +2121,22 @@ def create_excel_output(all_file_data, combined_flags):
         separator_fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
         header_font = Font(bold=True, color='FFFFFF')
 
+        # Priority-based row colors (light versions for readability)
+        critical_fill = PatternFill(start_color='FFCDD2', end_color='FFCDD2', fill_type='solid')  # Light red
+        review_fill = PatternFill(start_color='FFF9C4', end_color='FFF9C4', fill_type='solid')    # Light yellow
+        info_fill = PatternFill(start_color='C8E6C9', end_color='C8E6C9', fill_type='solid')      # Light green
+
         for cell in worksheet[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+        # Find the Priority column index
+        priority_col_idx = None
+        for col_idx, col_name in enumerate(flags_df.columns):
+            if col_name == 'Priority':
+                priority_col_idx = col_idx
+                break
 
         current_file = None
         for idx, row in flags_df.iterrows():
@@ -1843,9 +2150,23 @@ def create_excel_output(all_file_data, combined_flags):
 
             current_file = row.get('File')
 
-            # Apply text wrapping to all data rows (no background color)
+            # Get priority value and apply appropriate color
+            priority_value = str(row.get('Priority', '')).lower()
+
+            # Determine fill color based on priority
+            row_fill = None
+            if 'critical' in priority_value:
+                row_fill = critical_fill
+            elif 'review' in priority_value:
+                row_fill = review_fill
+            elif 'info' in priority_value:
+                row_fill = info_fill
+
+            # Apply styling to all cells in the row
             for cell in worksheet[excel_row]:
                 cell.alignment = Alignment(vertical='top', wrap_text=True)
+                if row_fill:
+                    cell.fill = row_fill
 
         for column in worksheet.columns:
             max_length = 0
@@ -1939,13 +2260,17 @@ def create_excel_output(all_file_data, combined_flags):
 # MAIN PROCESSING FUNCTION FOR BACKEND
 # ============================================================================
 
-def process_variance_analysis(files: List[Tuple[str, bytes]]) -> bytes:
+def process_variance_analysis(
+    files: List[Tuple[str, bytes]],
+    loan_interest_file: Optional[Tuple[str, bytes]] = None
+) -> bytes:
     """
     Main function to process variance analysis for backend integration.
     Supports multiple files with separators and raw data sheets.
 
     Args:
-        files: List of tuples (filename, file_bytes)
+        files: List of tuples (filename, file_bytes) for BS/PL Breakdown files
+        loan_interest_file: Optional tuple (filename, file_bytes) for ERP Loan Interest Rate file
 
     Returns:
         bytes: Excel file with variance flags and raw data
@@ -1955,6 +2280,20 @@ def process_variance_analysis(files: List[Tuple[str, bytes]]) -> bytes:
 
     all_file_data = []
     combined_flags = []
+
+    # Parse loan interest rate file if provided
+    loan_rate_lookup = None
+    if loan_interest_file:
+        try:
+            loan_filename, loan_bytes = loan_interest_file
+            print(f"📊 Parsing loan interest rate file: {loan_filename}")
+            loan_df = parse_loan_interest_file(loan_bytes)
+            loan_rate_lookup = build_entity_rate_lookup(loan_df)
+            print(f"✅ Loaded interest rates for {len(loan_rate_lookup)} entities")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not parse loan interest file: {e}")
+            print("   Continuing with basic A2 analysis...")
+            loan_rate_lookup = None
 
     # Process each file
     for filename, file_bytes in files:
@@ -2008,8 +2347,21 @@ def process_variance_analysis(files: List[Tuple[str, bytes]]) -> bytes:
                 file_obj.seek(0)
                 bs_df_full, _ = process_financial_tab(file_obj, bs_sheet_name, "BS", "ALL_ENTITIES")
 
+            # Extract entity name for enhanced A2 analysis (from Row 1)
+            entity_name = None
+            if loan_rate_lookup:
+                file_obj.seek(0)
+                entity_name = extract_entity_from_file(file_obj)
+                if entity_name:
+                    print(f"📌 Extracted entity: {entity_name}")
+
             # Run variance rules (pass both entity-specific and full BS dataframes)
-            flags = run_all_variance_rules(bs_df, pl_df, bs_df_full)
+            # If loan_rate_lookup is available, enhanced A2 will be used
+            flags = run_all_variance_rules(
+                bs_df, pl_df, bs_df_full,
+                entity_name=entity_name,
+                loan_rate_lookup=loan_rate_lookup
+            )
 
             # Add filename to each flag for identification
             for flag in flags:

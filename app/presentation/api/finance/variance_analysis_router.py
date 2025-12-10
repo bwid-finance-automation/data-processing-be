@@ -30,16 +30,31 @@ router = APIRouter(tags=["analysis"])
 @router.post("/process")
 async def process_python_analysis(
     request: Request,
-    excel_files: List[UploadFile] = File(...)
+    excel_files: List[UploadFile] = File(..., description="BS/PL Breakdown Excel files"),
+    loan_interest_file: Optional[UploadFile] = File(None, description="Optional: ERP Loan Interest Rate file for enhanced A2 analysis")
 ):
-    """Process Excel files using Python-based 21-rule variance analysis."""
+    """Process Excel files using Python-based 22-rule variance analysis.
+
+    Upload one or more BS/PL Breakdown Excel files for variance analysis.
+    Optionally upload an ERP Loan Interest Rate file (from Save Search) to enable
+    enhanced Rule A2 analysis with interest rate lookups.
+
+    Args:
+        excel_files: List of BS/PL Breakdown Excel files (required)
+        loan_interest_file: Optional ERP Loan Interest Rate file for enhanced A2
+
+    Returns:
+        Excel file with variance flags and raw data sheets
+    """
     logger.info(f"Processing {len(excel_files)} files for Python variance analysis")
+    if loan_interest_file:
+        logger.info(f"Loan interest file provided: {loan_interest_file.filename}")
 
     try:
         # Get unified config to access file_processing settings
         config = get_unified_config()
 
-        # 1. Validate uploaded files (use configured max files per request)
+        # 1. Validate uploaded BS/PL files (use configured max files per request)
         validation_results = await validate_file_list(
             excel_files,
             max_files=config.file_processing.max_files_per_request
@@ -57,9 +72,21 @@ async def process_python_analysis(
                 details="; ".join(error_details)
             )
 
-        # 2. Process files using new 21-rule pipeline (no configuration needed)
+        # 2. Validate loan interest file if provided (basic validation only - no sheet check)
+        if loan_interest_file:
+            # For loan interest file, only check file extension and basic format
+            # (Sheet0 contains interest rate data, not BS/PL sheets)
+            loan_filename = loan_interest_file.filename or ""
+            if not loan_filename.lower().endswith(('.xlsx', '.xls')):
+                raise FileProcessingError(
+                    "Loan interest file must be an Excel file (.xlsx or .xls)",
+                    details=f"Received file: {loan_filename}"
+                )
+
+        # 3. Process files using 22-rule pipeline with optional loan data
         xlsx_bytes = await analysis_service.process_python_analysis(
-            excel_files=excel_files
+            excel_files=excel_files,
+            loan_interest_file=loan_interest_file
         )
 
         logger.info("Python variance analysis completed successfully")
