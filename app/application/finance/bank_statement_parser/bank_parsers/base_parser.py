@@ -3,19 +3,18 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 import io
-import logging
 import zipfile
 import xml.etree.ElementTree as ET
 
 import pandas as pd
 from openpyxl import load_workbook
 
-from app.shared.utils import logging_config
+import pandas as pd
+from openpyxl import load_workbook
 
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
 
 
-get_logger = getattr(logging_config, "get_logger", logging.getLogger)
 logger = get_logger(__name__)
 
 
@@ -215,22 +214,9 @@ class BaseBankParser(ABC):
             try:
                 return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
             except Exception as e:
-                logger.warning(
-                    "openpyxl read failed for XLSX; attempting zip-level visibility fix. error=%s",
-                    e,
-                )
-                # If we still see the visibility error, apply the ZIP-level
-                # fix once more and retry so we don't bail out prematurely.
-                if "At least one sheet must be visible" in str(e):
-                    patched = cls._force_first_sheet_visible_zip(file_bytes)
-                    if patched:
-                        try:
-                            return pd.read_excel(io.BytesIO(patched), engine='openpyxl', **kwargs)
-                        except Exception as retry_err:
-                            logger.warning(
-                                "Retry after zip-level visibility fix failed. error=%s",
-                                retry_err,
-                            )
+                if 'at least one sheet must be visible' in str(e).lower():
+                    fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                    return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
                 raise ValueError(f"Failed to read XLSX file: {e}")
 
         else:
@@ -292,24 +278,10 @@ class BaseBankParser(ABC):
             fixed_bytes = cls._ensure_visible_sheet(file_bytes)
             try:
                 return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
-            except Exception as e:
-                logger.warning(
-                    "ExcelFile open failed for XLSX; attempting zip-level visibility fix. error=%s",
-                    e,
-                )
-                if "At least one sheet must be visible" in str(e):
-                    patched = cls._force_first_sheet_visible_zip(file_bytes)
-                    if patched:
-                        try:
-                            return pd.ExcelFile(io.BytesIO(patched), engine='openpyxl')
-                        except Exception as retry_err:
-                            logger.warning(
-                                "ExcelFile retry after zip-level visibility fix failed. error=%s",
-                                retry_err,
-                            )
-                # If the workbook is still invalid, let the default
-                # fallback below surface the error with context.
-                pass
+            except:
+                # Work around files where all sheets are hidden
+                fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
 
         # Fallback: try default
         try:
@@ -342,73 +314,11 @@ class BaseBankParser(ABC):
                 first_sheet.sheet_state = "visible"
                 buffer = io.BytesIO()
                 workbook.save(buffer)
-                logger.info(
-                    "Marked first sheet visible via openpyxl to satisfy visibility requirements. first_sheet=%s",
-                    first_sheet.title,
-                )
                 return buffer.getvalue()
-        except Exception as e:
-            logger.warning(
-                "openpyxl failed to ensure visible sheet; attempting zip-level patch. error=%s",
-                e,
-            )
-            fixed = cls._force_first_sheet_visible_zip(file_bytes)
-            return fixed if fixed is not None else file_bytes
+        except Exception:
+            return file_bytes
 
         return file_bytes
-
-    @staticmethod
-    def _force_first_sheet_visible_zip(file_bytes: bytes) -> Optional[bytes]:
-        """
-        Force the first sheet to be visible by manipulating workbook XML.
-
-        This provides a fallback when ``openpyxl.load_workbook`` itself raises
-        ``ValueError: At least one sheet must be visible`` while loading the
-        workbook, which prevents the in-memory mutation approach.
-        """
-        try:
-            with io.BytesIO(file_bytes) as buffer, zipfile.ZipFile(buffer, "r") as zin:
-                if "xl/workbook.xml" not in zin.namelist():
-                    return None
-
-                workbook_xml = zin.read("xl/workbook.xml")
-                root = ET.fromstring(workbook_xml)
-
-                # Namespaces are required to find sheet nodes correctly.
-                ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-                sheets = root.find("main:sheets", ns)
-                if sheets is None:
-                    return None
-
-                first_sheet = sheets.find("main:sheet", ns)
-                if first_sheet is None:
-                    return None
-
-                # Make every sheet visible to be extra safe
-                for sheet in list(sheets):
-                    if "state" in sheet.attrib:
-                        sheet.attrib.pop("state")
-                    sheet.set("state", "visible")
-
-                logger.info(
-                    "Forced all sheets visible via zip-level patch. sheet_count=%s", len(list(sheets))
-                )
-
-                updated_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
-                # Write a new zip with the updated workbook.xml
-                out_buffer = io.BytesIO()
-                with zipfile.ZipFile(out_buffer, "w") as zout:
-                    for item in zin.infolist():
-                        if item.filename == "xl/workbook.xml":
-                            zout.writestr(item, updated_xml)
-                        else:
-                            zout.writestr(item, zin.read(item.filename))
-
-                return out_buffer.getvalue()
-        except Exception as e:
-            logger.warning("Zip-level sheet visibility patch failed. error=%s", e)
-            return None
 
     @staticmethod
     def to_text(value) -> str:

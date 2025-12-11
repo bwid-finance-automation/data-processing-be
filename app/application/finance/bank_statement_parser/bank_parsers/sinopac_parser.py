@@ -3,6 +3,7 @@
 import io
 from typing import List, Optional
 import pandas as pd
+import math
 
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
 from .base_parser import BaseBankParser
@@ -56,12 +57,6 @@ class SINOPACParser(BaseBankParser):
     def parse_transactions(self, file_bytes: bytes, file_name: str) -> List[BankTransaction]:
         """
         Parse SINOPAC transactions.
-
-        Logic from fxParse_SINOPAC_Transactions:
-        - Find header row with: "NGÀY GIÁ TRỊ" + ("CÂN ĐỐI" OR "TIỀN GỬI" OR "RÚT TIỀN")
-        - Vietnamese column headers
-        - Map: Debit = "TIỀN GỬI" (deposit), Credit = "RÚT TIỀN" (withdrawal)
-        - Account number from "SỐ TÀI KHOẢN" (digits only)
         """
         try:
             xls = self.get_excel_file(file_bytes)
@@ -156,12 +151,6 @@ class SINOPACParser(BaseBankParser):
     def parse_balances(self, file_bytes: bytes, file_name: str) -> Optional[BankBalance]:
         """
         Parse SINOPAC balance information.
-
-        Logic from fxParse_SINOPAC_Balances:
-        - Groups by account number
-        - Opening = First row's balance - first row's deposit + first row's withdraw
-        - Closing = Last non-null balance
-        - Handles bracket negatives: (1,234.00) → -1234
         """
         try:
             xls = self.get_excel_file(file_bytes)
@@ -220,7 +209,6 @@ class SINOPACParser(BaseBankParser):
             data["Acc No"] = data["AccNoRaw"].apply(lambda x: ''.join(c for c in self.to_text(x) if c.isdigit()))
 
             # ========== Get First Account (simplified - no grouping) ==========
-            # In practice, SINOPAC statements usually have one account per file
             if len(data) == 0:
                 return None
 
@@ -245,11 +233,19 @@ class SINOPACParser(BaseBankParser):
             opening = 0.0
             if len(data_sorted) > 0:
                 first_row = data_sorted.iloc[0]
+                
+                # [FIX] Handle NaN properly to prevent 500 error
                 first_bal = first_row.get("Balance")
-                first_dep = first_row.get("Deposit", 0) or 0
-                first_wdr = first_row.get("Withdraw", 0) or 0
+                if pd.isna(first_bal): first_bal = 0.0
+                
+                first_dep = first_row.get("Deposit")
+                if pd.isna(first_dep): first_dep = 0.0
+                
+                first_wdr = first_row.get("Withdraw")
+                if pd.isna(first_wdr): first_wdr = 0.0
 
-                if pd.notna(first_bal):
+                # Only calculate if we have a valid balance to start with
+                if pd.notna(first_row.get("Balance")):
                     delta = first_dep - first_wdr
                     opening = first_bal - delta
 
@@ -303,7 +299,7 @@ class SINOPACParser(BaseBankParser):
         - VND prefix
         - Spaces and commas
         - Trailing ".00" (removes only if zeros)
-        - Bracket negatives: (1,234.00) → -1234
+        - Bracket negatives: (1,234.00) -> -1234.0
         """
         if value is None or pd.isna(value):
             return None
@@ -331,13 +327,15 @@ class SINOPACParser(BaseBankParser):
                 if not frac:  # All zeros
                     txt = parts[0]
 
-        # Extract digits only
-        digits = ''.join(c for c in txt if c.isdigit())
-        if not digits:
+        # [FIX] Keep digits AND decimal point
+        # Old code stripped '.', turning 10.50 into 1050
+        chars = ''.join(c for c in txt if c.isdigit() or c == '.')
+        
+        if not chars:
             return None
 
         try:
-            num = float(digits)
+            num = float(chars)
             return -num if is_negative else num
         except (ValueError, TypeError):
             return None
