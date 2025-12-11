@@ -400,10 +400,10 @@ class VIBParser(BaseBankParser):
         """
         Parse VIB transactions from Gemini OCR text.
 
-        Gemini OCR format - multiple variations:
-        1. Space-separated: 7047991960 29/11/2025 29/11/2025 CRIN 0 1,217 3,065,877
-        2. Pipe-separated: 7047991960 | 29/11/2025 | 29/11/2025 | CRIN | | 0 | 1,217 | 3,065,877 |
-        3. Multiline: transaction header on one line, amounts on subsequent lines
+        VIB PDF format for transactions (space-separated on one line):
+        7047991960 29/11/2025  29/11/2025  CRIN                    0        1,217   3,065,877
+
+        Columns: Seq.No | Tran Date | Effect Date | Tran | Withdrawal | Deposit | Balance | Remarks
 
         CORRECT MAPPING:
         - Debit = Withdrawal column (Phát sinh nợ) = tiền RA
@@ -435,16 +435,16 @@ class VIBParser(BaseBankParser):
 
                 # Update account info when we see account line
                 # Multiple patterns to catch different OCR formats
-                if any(marker in line.lower() for marker in ["số tk", "so tk", "a/c no", "account no"]):
-                    # Pattern 1: "053376900 651/VND"
-                    acc_match = re.search(r'(\d{9,12})\s+\d*/\s*(VND|USD)', line, re.IGNORECASE)
+                if any(marker in line.lower() for marker in ["số tk", "so tk", "a/c no", "account no", "loại tiền"]):
+                    # Pattern 1: "053376900 651/VND" or "004368306 651/VND"
+                    acc_match = re.search(r'(\d{6,12})\s+\d*/?\s*(VND|USD)', line, re.IGNORECASE)
                     if acc_match:
                         current_acc_no = acc_match.group(1)
                         current_currency = acc_match.group(2).upper()
                         logger.info(f"VIB: Found account {current_acc_no} ({current_currency})")
                     else:
                         # Pattern 2: Just account number
-                        acc_match2 = re.search(r'(\d{9,12})', line)
+                        acc_match2 = re.search(r'(\d{6,12})', line)
                         if acc_match2:
                             current_acc_no = acc_match2.group(1)
                             # Check for currency in same line
@@ -459,7 +459,7 @@ class VIBParser(BaseBankParser):
                 if any(skip in line.lower() for skip in [
                     'seq. no', 'số ct', 'ngày gd', 'tran date', 'withdrawal', 'deposit',
                     'phát sinh nợ', 'phát sinh có', 'nội dung', 'remarks', 'reference',
-                    'cheque no', 'loại gd'
+                    'cheque no', 'loại gd', 'effect date'
                 ]):
                     continue
 
@@ -486,40 +486,196 @@ class VIBParser(BaseBankParser):
                         # Format with | separators
                         tx = self._parse_pipe_separated_transaction(line, current_acc_no, current_currency)
                     else:
-                        # Try full line match first (all data on one line)
-                        # Pattern: TxID Date Date Code Amounts...
-                        tx_match = re.match(
-                            r'^(\d{10})\s+(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}/\d{1,2}/\d{4})\s+([A-Z][A-Z0-9]{0,5})\s+(.+)$',
-                            line
-                        )
-                        if tx_match:
-                            tx = self._parse_space_separated_transaction(tx_match, current_acc_no, current_currency)
-                        else:
-                            # Try multiline format (header only, amounts on next lines)
-                            tx_match_partial = re.match(
-                                r'^(\d{10})\s+(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}/\d{1,2}/\d{4})\s*([A-Z][A-Z0-9]{0,5})?$',
-                                line
-                            )
-                            if tx_match_partial:
-                                tx = self._parse_multiline_transaction(tx_match_partial, lines, line_idx, current_acc_no, current_currency)
-                            else:
-                                # Try even simpler format: just TxID and date
-                                tx_match_simple = re.match(r'^(\d{10})\s+(\d{1,2}/\d{1,2}/\d{4})', line)
-                                if tx_match_simple:
-                                    tx = self._parse_flexible_transaction(line, lines, line_idx, current_acc_no, current_currency)
+                        # VIB format: TxID Date Date Code Withdrawal Deposit Balance [Remarks]
+                        # Example: 7047991960 29/11/2025  29/11/2025  CRIN                    0        1,217   3,065,877
+                        tx = self._parse_vib_transaction_line(line, lines, line_idx, current_acc_no, current_currency)
 
                     if tx:
                         if tx.transaction_id not in processed_tx_ids:
                             transactions.append(tx)
                             processed_tx_ids.add(tx.transaction_id)
-                            logger.debug(f"VIB: Parsed tx {tx.transaction_id} for account {tx.acc_no}")
+                            logger.info(f"VIB: Parsed tx {tx.transaction_id} - debit={tx.debit}, credit={tx.credit}, acc={tx.acc_no}")
 
             logger.info(f"VIB: Successfully parsed {len(transactions)} transactions from OCR text")
             return transactions
 
         except Exception as e:
             logger.error(f"Error parsing VIB transactions from text: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return []
+
+    def _parse_vib_transaction_line(self, line: str, lines: List[str], line_idx: int, acc_no: str, currency: str) -> Optional[BankTransaction]:
+        """
+        Parse VIB transaction from a single line.
+
+        VIB format:
+        7047991960 29/11/2025  29/11/2025  CRIN                    0        1,217   3,065,877
+        7048182367 29/11/2025  29/11/2025  SC60                   50,000        0   3,015,877
+
+        Columns: TxID | TranDate | EffectDate | TranCode | Withdrawal | Deposit | Balance | [Remarks]
+
+        Numbers may have comma separators (VND) or decimal points (USD).
+        """
+        try:
+            # Extract transaction ID (first 10 digits)
+            tx_id_match = re.match(r'^(\d{10})', line)
+            if not tx_id_match:
+                return None
+            tx_id = tx_id_match.group(1)
+
+            # Extract dates (DD/MM/YYYY format)
+            dates = re.findall(r'(\d{1,2}/\d{1,2}/\d{4})', line)
+            date_str = dates[0] if dates else None
+
+            # Remove tx_id and dates from line to get remaining content
+            remaining = line
+            remaining = re.sub(r'^\d{10}\s*', '', remaining)  # Remove tx_id
+            remaining = re.sub(r'\d{1,2}/\d{1,2}/\d{4}\s*', '', remaining)  # Remove dates
+
+            # Extract transaction code (2-4 uppercase letters/digits like CRIN, SC60, VATX, FTCR, FTDR)
+            code_match = re.match(r'^([A-Z][A-Z0-9]{1,5})\s*', remaining)
+            if code_match:
+                remaining = remaining[len(code_match.group(0)):]
+
+            # Now remaining should contain: Withdrawal Deposit Balance [Remarks]
+            # Extract all numbers from remaining text
+            # For VND: numbers with comma separators like "50,000" or plain "0"
+            # For USD: numbers with decimal points like "2.00" or plain "0"
+
+            if currency == "USD":
+                # USD format: look for decimal numbers and integers
+                numbers = re.findall(r'(\d+(?:\.\d+)?)', remaining)
+            else:
+                # VND format: look for comma-separated numbers and plain integers
+                # Pattern matches: "50,000" or "1,217" or "3,065,877" or "0"
+                numbers = re.findall(r'(\d{1,3}(?:,\d{3})+|\d+)', remaining)
+
+            logger.debug(f"VIB tx {tx_id}: remaining='{remaining[:60]}', numbers={numbers[:5]}")
+
+            if len(numbers) < 2:
+                # Not enough numbers - try multiline parsing
+                return self._parse_multiline_transaction_v2(tx_id, date_str, lines, line_idx, acc_no, currency)
+
+            # Parse withdrawal and deposit
+            # First number = Withdrawal (Phát sinh nợ)
+            # Second number = Deposit (Phát sinh có)
+            # Third number = Balance (skip)
+
+            withdrawal = self._parse_number_from_text(numbers[0]) or 0
+            deposit = self._parse_number_from_text(numbers[1]) or 0
+
+            # Skip if both are zero
+            if withdrawal == 0 and deposit == 0:
+                return None
+
+            # Parse date
+            tx_date = self._parse_date_from_text(date_str)
+
+            # Extract description/remarks (text after the numbers)
+            description = ""
+            # Find where numbers end and look for text after
+            last_num_pos = 0
+            for num in numbers[:3]:  # Check first 3 numbers (withdrawal, deposit, balance)
+                pos = remaining.find(num)
+                if pos != -1:
+                    last_num_pos = max(last_num_pos, pos + len(num))
+            if last_num_pos < len(remaining):
+                description = remaining[last_num_pos:].strip()
+
+            return BankTransaction(
+                bank_name="VIB",
+                acc_no=acc_no or "",
+                debit=withdrawal if withdrawal > 0 else None,
+                credit=deposit if deposit > 0 else None,
+                date=tx_date,
+                description=description,
+                currency=currency,
+                transaction_id=tx_id,
+                beneficiary_bank="",
+                beneficiary_acc_no="",
+                beneficiary_acc_name=""
+            )
+
+        except Exception as e:
+            logger.error(f"Error parsing VIB transaction line '{line[:50]}': {e}")
+            return None
+
+    def _parse_multiline_transaction_v2(self, tx_id: str, date_str: str, lines: List[str], current_idx: int, acc_no: str, currency: str) -> Optional[BankTransaction]:
+        """
+        Parse transaction when amounts are on subsequent lines (multiline OCR output).
+        """
+        try:
+            amounts = []
+
+            # Look at subsequent lines for amounts
+            for i in range(current_idx + 1, min(current_idx + 8, len(lines))):
+                next_line = lines[i].strip()
+
+                # Stop if we hit another transaction line
+                if re.match(r'^\d{10}', next_line):
+                    break
+
+                # Stop if we hit header/summary lines
+                if any(skip in next_line.lower() for skip in [
+                    'seq.', 'số ct', 'withdrawal', 'deposit', 'số dư đầu', 'số dư cuối',
+                    'opening balance', 'ending balance', 'available balance',
+                    'transaction summary', 'doanh số'
+                ]):
+                    break
+
+                # Skip date/month lines
+                if any(month in next_line.lower() for month in [
+                    'january', 'february', 'march', 'april', 'may', 'june',
+                    'july', 'august', 'september', 'october', 'november', 'december'
+                ]):
+                    continue
+
+                # Extract numbers
+                if currency == "USD":
+                    line_numbers = re.findall(r'(\d+(?:\.\d+)?)', next_line)
+                else:
+                    line_numbers = re.findall(r'(\d{1,3}(?:,\d{3})+|\d+)', next_line)
+
+                for num_str in line_numbers:
+                    # Skip years
+                    if re.match(r'^20[2-3]\d$', num_str.replace(',', '')):
+                        continue
+                    val = self._parse_number_from_text(num_str)
+                    if val is not None:
+                        amounts.append(val)
+
+                if len(amounts) >= 3:
+                    break
+
+            if len(amounts) < 2:
+                return None
+
+            withdrawal = amounts[0]
+            deposit = amounts[1]
+
+            if withdrawal == 0 and deposit == 0:
+                return None
+
+            tx_date = self._parse_date_from_text(date_str)
+
+            return BankTransaction(
+                bank_name="VIB",
+                acc_no=acc_no or "",
+                debit=withdrawal if withdrawal > 0 else None,
+                credit=deposit if deposit > 0 else None,
+                date=tx_date,
+                description="",
+                currency=currency,
+                transaction_id=tx_id,
+                beneficiary_bank="",
+                beneficiary_acc_no="",
+                beneficiary_acc_name=""
+            )
+
+        except Exception as e:
+            logger.error(f"Error in multiline v2 parsing: {e}")
+            return None
 
     def _parse_pipe_separated_transaction(self, line: str, acc_no: str, currency: str) -> Optional[BankTransaction]:
         """
@@ -583,276 +739,6 @@ class VIBParser(BaseBankParser):
 
         except Exception as e:
             print(f"Error parsing VIB pipe-separated transaction: {e}")
-            return None
-
-    def _parse_multiline_transaction(self, match, lines: List[str], current_idx: int, acc_no: str, currency: str) -> Optional[BankTransaction]:
-        """
-        Parse transaction when amounts are on subsequent lines.
-
-        Gemini OCR may split transaction data across lines:
-        Line N: "7047991960 29/11/2025 29/11/2025 CRIN"
-        Line N+1: "0"  (withdrawal)
-        Line N+2: "1,217"  (deposit)
-        Line N+3: "3,065,877"  (balance)
-
-        Or amounts may be on a single line after the transaction header.
-        """
-        try:
-            tx_id = match.group(1)
-            date_str = match.group(2)
-            # group(3) = Effect Date (skip)
-            # group(4) = Tran code (skip)
-
-            # Collect numbers from subsequent lines (until next transaction or header)
-            amounts = []
-            for i in range(current_idx + 1, min(current_idx + 10, len(lines))):
-                next_line = lines[i].strip()
-
-                # Stop if we hit another transaction line (starts with 10 digits)
-                if re.match(r'^\d{10}', next_line):
-                    break
-
-                # Stop if we hit a header/label line
-                if any(skip in next_line.lower() for skip in [
-                    'seq. no', 'số ct', 'ngày gd', 'tran date', 'withdrawal', 'deposit',
-                    'phát sinh', 'nội dung', 'remarks', 'reference', 'số dư đầu', 'số dư cuối',
-                    'opening balance', 'ending balance', 'available balance', 'transaction summary'
-                ]):
-                    break
-
-                # Skip lines that look like date labels (e.g., "16 November 2025", "30 November 2025")
-                # These contain month names and would extract wrong numbers
-                if any(month in next_line.lower() for month in [
-                    'january', 'february', 'march', 'april', 'may', 'june',
-                    'july', 'august', 'september', 'october', 'november', 'december',
-                    'tháng', 'thang'
-                ]):
-                    logger.debug(f"VIB multiline: skipping date line: {next_line[:50]}")
-                    continue
-
-                # Extract numbers from this line
-                line_numbers = re.findall(r'[\d,]+(?:\.\d+)?', next_line)
-                for num_str in line_numbers:
-                    # Skip numbers that look like years (2020-2030) without commas
-                    if re.match(r'^20[2-3]\d$', num_str):
-                        logger.debug(f"VIB multiline: skipping year-like number: {num_str}")
-                        continue
-                    val = self._parse_number_from_text(num_str)
-                    if val is not None:
-                        amounts.append(val)
-
-                # If we found 3+ numbers, we have enough for withdrawal/deposit/balance
-                if len(amounts) >= 3:
-                    break
-
-            logger.info(f"VIB multiline: tx_id={tx_id}, found amounts={amounts[:5]}")
-
-            # Need at least 1 amount (some transactions only have withdrawal OR deposit)
-            if len(amounts) < 1:
-                return None
-
-            # First amount = Withdrawal (Phát sinh nợ)
-            # Second amount = Deposit (Phát sinh có)
-            # Third amount = Balance (skip if present)
-            withdrawal = amounts[0] if len(amounts) > 0 else 0
-            deposit = amounts[1] if len(amounts) > 1 else 0
-
-            # If only 1 amount found, it's likely the non-zero value
-            # Check if the single amount should be withdrawal or deposit based on context
-            if len(amounts) == 1 and amounts[0] > 0:
-                # Default: assume it's a deposit (credit) unless we can determine otherwise
-                withdrawal = 0
-                deposit = amounts[0]
-
-            # Skip if both are zero
-            if withdrawal == 0 and deposit == 0:
-                return None
-
-            # CORRECT MAPPING:
-            # Debit = Withdrawal (Phát sinh nợ) = tiền RA
-            # Credit = Deposit (Phát sinh có) = tiền VÀO
-            debit_val = withdrawal
-            credit_val = deposit
-
-            # Parse date
-            tx_date = self._parse_date_from_text(date_str)
-
-            return BankTransaction(
-                bank_name="VIB",
-                acc_no=acc_no or "",
-                debit=debit_val if debit_val > 0 else None,
-                credit=credit_val if credit_val > 0 else None,
-                date=tx_date,
-                description="",
-                currency=currency,
-                transaction_id=tx_id,
-                beneficiary_bank="",
-                beneficiary_acc_no="",
-                beneficiary_acc_name=""
-            )
-
-        except Exception as e:
-            logger.error(f"Error parsing VIB multiline transaction: {e}")
-            return None
-
-    def _parse_space_separated_transaction(self, match, acc_no: str, currency: str) -> Optional[BankTransaction]:
-        """
-        Parse a space-separated transaction line.
-
-        Format: 7047991960 29/11/2025 29/11/2025 CRIN 0 1,217 3,065,877
-        Groups: (1)TxID (2)TranDate (3)EffectDate (4)TranCode (5)remaining: Withdrawal Deposit Balance
-        """
-        try:
-            tx_id = match.group(1)
-            date_str = match.group(2)
-            # group(3) = Effect Date (skip)
-            # group(4) = Tran code (skip)
-            remaining = match.group(5).strip()
-
-            # Parse remaining part: "0 1,217 3,065,877" or "50,000 0 3,015,877"
-            # Find all numbers (with comma separators)
-            numbers = re.findall(r'[\d,]+', remaining)
-
-            if len(numbers) < 3:
-                return None
-
-            # First number = Withdrawal (Phát sinh nợ)
-            # Second number = Deposit (Phát sinh có)
-            # Third number = Balance (skip)
-            withdrawal = self._parse_number_from_text(numbers[0]) or 0
-            deposit = self._parse_number_from_text(numbers[1]) or 0
-
-            # Skip if both are zero
-            if withdrawal == 0 and deposit == 0:
-                return None
-
-            # CORRECT MAPPING:
-            # Debit = Withdrawal (Phát sinh nợ) = tiền RA
-            # Credit = Deposit (Phát sinh có) = tiền VÀO
-            debit_val = withdrawal
-            credit_val = deposit
-
-            # Parse date
-            tx_date = self._parse_date_from_text(date_str)
-
-            return BankTransaction(
-                bank_name="VIB",
-                acc_no=acc_no or "",
-                debit=debit_val if debit_val > 0 else None,
-                credit=credit_val if credit_val > 0 else None,
-                date=tx_date,
-                description="",
-                currency=currency,
-                transaction_id=tx_id,
-                beneficiary_bank="",
-                beneficiary_acc_no="",
-                beneficiary_acc_name=""
-            )
-
-        except Exception as e:
-            print(f"Error parsing VIB transaction line: {e}")
-            return None
-
-    def _parse_flexible_transaction(self, line: str, lines: List[str], current_idx: int, acc_no: str, currency: str) -> Optional[BankTransaction]:
-        """
-        Flexible transaction parser for non-standard formats.
-
-        Handles various OCR output formats where transaction data
-        may be split or formatted differently.
-        """
-        try:
-            # Extract transaction ID (first 10 digits)
-            tx_id_match = re.match(r'^(\d{10})', line)
-            if not tx_id_match:
-                return None
-            tx_id = tx_id_match.group(1)
-
-            # Try to find date in the line
-            date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', line)
-            date_str = date_match.group(1) if date_match else None
-
-            # Extract all numbers from this line and subsequent lines
-            amounts = []
-
-            # First, get numbers from current line (after tx_id and dates)
-            remaining = re.sub(r'^\d{10}', '', line)  # Remove tx_id
-            remaining = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', remaining)  # Remove dates
-            remaining = re.sub(r'[A-Z]{2,5}', '', remaining)  # Remove transaction codes
-
-            line_numbers = re.findall(r'[\d,]+(?:\.\d+)?', remaining)
-            for num_str in line_numbers:
-                if re.match(r'^20[2-3]\d$', num_str):  # Skip years
-                    continue
-                val = self._parse_number_from_text(num_str)
-                if val is not None:
-                    amounts.append(val)
-
-            # If not enough amounts, look at subsequent lines
-            if len(amounts) < 2:
-                for i in range(current_idx + 1, min(current_idx + 8, len(lines))):
-                    next_line = lines[i].strip()
-
-                    # Stop conditions
-                    if re.match(r'^\d{10}', next_line):  # Next transaction
-                        break
-                    if any(skip in next_line.lower() for skip in [
-                        'seq. no', 'số ct', 'ngày gd', 'tran date', 'số dư đầu', 'số dư cuối',
-                        'opening balance', 'ending balance', 'available balance'
-                    ]):
-                        break
-
-                    # Skip date lines
-                    if any(month in next_line.lower() for month in [
-                        'january', 'february', 'march', 'april', 'may', 'june',
-                        'july', 'august', 'september', 'october', 'november', 'december',
-                        'tháng', 'thang'
-                    ]):
-                        continue
-
-                    # Get numbers from this line
-                    line_nums = re.findall(r'[\d,]+(?:\.\d+)?', next_line)
-                    for num_str in line_nums:
-                        if re.match(r'^20[2-3]\d$', num_str):
-                            continue
-                        val = self._parse_number_from_text(num_str)
-                        if val is not None:
-                            amounts.append(val)
-
-                    if len(amounts) >= 3:
-                        break
-
-            if len(amounts) < 2:
-                logger.debug(f"VIB flexible: tx_id={tx_id}, not enough amounts: {amounts}")
-                return None
-
-            # First amount = Withdrawal, Second = Deposit
-            withdrawal = amounts[0] if len(amounts) > 0 else 0
-            deposit = amounts[1] if len(amounts) > 1 else 0
-
-            if withdrawal == 0 and deposit == 0:
-                return None
-
-            # Parse date
-            tx_date = self._parse_date_from_text(date_str) if date_str else None
-
-            logger.debug(f"VIB flexible: tx_id={tx_id}, withdrawal={withdrawal}, deposit={deposit}")
-
-            return BankTransaction(
-                bank_name="VIB",
-                acc_no=acc_no or "",
-                debit=withdrawal if withdrawal > 0 else None,
-                credit=deposit if deposit > 0 else None,
-                date=tx_date,
-                description="",
-                currency=currency,
-                transaction_id=tx_id,
-                beneficiary_bank="",
-                beneficiary_acc_no="",
-                beneficiary_acc_name=""
-            )
-
-        except Exception as e:
-            logger.error(f"Error in flexible transaction parser: {e}")
             return None
 
     def parse_balances_from_text(self, text: str, file_name: str) -> Optional[BankBalance]:
@@ -983,30 +869,47 @@ class VIBParser(BaseBankParser):
         Account sections are identified by:
         - "SỐ TK" or "Số TK" or "A/C No" patterns with account numbers
         - Or "Statement of Account For" patterns
+
+        VIB PDF format typically has:
+        - Account header: "Số TK/Loại TK/Loại tiền: 053376900 651/VND"
+        - Each page may repeat the header, so we need to detect unique accounts
         """
         sections = []
 
         # Pattern to match account header lines
         # Matches: "SỐ TK/Loại TK/Loại tiền: 053376900 651/VND" or similar
         account_pattern = re.compile(
-            r'(số\s*tk|so\s*tk|a/c\s*no|account\s*no|statement\s*of\s*account)',
+            r'(số\s*tk|so\s*tk|a/c\s*no|account\s*no|loại\s*tiền)',
             re.IGNORECASE
         )
 
         lines = text.split('\n')
-        current_section_start = 0
         section_starts = []
+        seen_accounts = set()  # Track unique (acc_no, currency) pairs
 
         for i, line in enumerate(lines):
             # Check if this line contains account number pattern
             if account_pattern.search(line):
-                # Verify it has an actual account number (9-12 digits)
-                if re.search(r'\d{9,12}', line):
-                    section_starts.append(i)
+                # Extract account number and currency from line
+                # Pattern: "053376900 651/VND" or "004368306 651/VND"
+                acc_match = re.search(r'(\d{6,12})\s+\d*/?\s*(VND|USD)', line, re.IGNORECASE)
+                if acc_match:
+                    acc_no = acc_match.group(1)
+                    currency = acc_match.group(2).upper()
+                    account_key = (acc_no, currency)
+
+                    # Only add if this is a new account (not duplicate from multi-page)
+                    if account_key not in seen_accounts:
+                        seen_accounts.add(account_key)
+                        section_starts.append(i)
+                        logger.info(f"VIB: Found new account section at line {i}: {acc_no}/{currency}")
 
         # If no account headers found, return entire text as one section
         if not section_starts:
+            logger.info("VIB: No account sections found, treating entire text as one section")
             return [text]
+
+        logger.info(f"VIB: Found {len(section_starts)} unique account sections")
 
         # Split text into sections
         for i, start_idx in enumerate(section_starts):
@@ -1053,81 +956,100 @@ class VIBParser(BaseBankParser):
         """
         Extract balance from a specific section.
 
-        This is more accurate than searching the entire text because
-        it only looks within the account's section.
+        VIB PDF format has balance at end of the line containing the label:
+        "Số dư đầu ngày :        16 November 2025                                3,064,660"
+
+        Or on the same line:
+        "Số dư cuối ngày :       30 November 2025                                3,010,877"
 
         IMPORTANT: Must avoid picking up:
         - Transaction IDs (10-digit numbers like 7048070432)
         - Credit/Debit amounts from transaction lines
-        - Date components
+        - Date components (day numbers like 16, 30)
         """
         section_lower = section.lower()
         lines = section.split('\n')
+        is_usd = 'usd' in section_lower
 
         for label in labels:
             label_lower = label.lower()
 
-            # Find line index containing the label
-            label_line_idx = -1
+            # Find lines containing the label
             for i, line in enumerate(lines):
-                if label_lower in line.lower():
-                    label_line_idx = i
-                    break
-
-            if label_line_idx == -1:
-                continue
-
-            # Search in lines after the label (not in transaction table area)
-            # Balance should be within 5 lines of the label
-            for i in range(label_line_idx, min(label_line_idx + 6, len(lines))):
-                line = lines[i].strip()
-
-                # Skip lines that look like transaction lines (start with 10-digit ID)
-                if re.match(r'^\d{10}', line):
+                if label_lower not in line.lower():
                     continue
 
-                # Skip header lines
-                if any(skip in line.lower() for skip in [
-                    'seq.', 'withdrawal', 'deposit', 'phát sinh', 'tran date', 'effect date'
-                ]):
-                    continue
+                # Found the label line - VIB format puts balance at end of this line
+                # Example: "Số dư đầu ngày :        16 November 2025                                3,064,660"
 
-                # For USD accounts - look for decimal numbers like "56.00", "100.00"
-                if 'usd' in section_lower:
-                    usd_match = re.search(r'(\d+\.\d{2})\b', line)
-                    if usd_match:
-                        val = float(usd_match.group(1))
-                        logger.info(f"VIB section balance (USD): found {val} for '{label}'")
+                # For USD accounts - look for decimal numbers like "56.00", "100.00", "0.00"
+                if is_usd:
+                    # Find all decimal numbers in the line (USD format)
+                    usd_matches = re.findall(r'(\d+\.\d{2})\b', line)
+                    if usd_matches:
+                        # Take the last decimal number (balance is at the end)
+                        val = float(usd_matches[-1])
+                        logger.info(f"VIB section balance (USD): found {val} for '{label}' on line: {line[:80]}")
                         return val
 
-                # For VND - look for comma-separated numbers
+                    # Also check next few lines for USD value
+                    for j in range(i + 1, min(i + 4, len(lines))):
+                        next_line = lines[j].strip()
+                        usd_match = re.search(r'^(\d+\.\d{2})$', next_line)
+                        if usd_match:
+                            val = float(usd_match.group(1))
+                            logger.info(f"VIB section balance (USD next line): found {val} for '{label}'")
+                            return val
+
+                # For VND - look for comma-separated numbers at end of line
                 # Pattern: number with at least one comma, representing >= 1,000
-                vnd_matches = re.findall(r'\b(\d{1,3}(?:,\d{3})+)\b', line)
-                for num_str in vnd_matches:
-                    # Skip if it looks like a transaction ID (10 digits no comma)
+                # Or plain numbers like "3064660"
+
+                # First try comma-separated (most common VIB format)
+                vnd_matches = re.findall(r'(\d{1,3}(?:,\d{3})+)', line)
+                if vnd_matches:
+                    # Take the last number (balance is at the end of line)
+                    num_str = vnd_matches[-1]
                     digits_only = num_str.replace(',', '')
-                    if len(digits_only) == 10:
+                    # Skip if it looks like a transaction ID (exactly 10 digits)
+                    if len(digits_only) != 10:
+                        val = self._parse_number_from_text(num_str)
+                        if val is not None and val >= 0:
+                            logger.info(f"VIB section balance (VND comma): found {val} for '{label}' on line: {line[:80]}")
+                            return val
+
+                # Try plain numbers without comma (smaller values or different format)
+                # Look for numbers at end of line that are not dates/years
+                plain_matches = re.findall(r'\b(\d{4,})\b', line)
+                for num_str in reversed(plain_matches):
+                    # Skip years (2020-2030) and dates
+                    if re.match(r'^20[2-3]\d$', num_str):
+                        continue
+                    # Skip transaction IDs (exactly 10 digits)
+                    if len(num_str) == 10:
+                        continue
+                    val = float(num_str)
+                    if val >= 0:
+                        logger.info(f"VIB section balance (VND plain): found {val} for '{label}' on line: {line[:80]}")
+                        return val
+
+                # Check next few lines for standalone balance value
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    next_line = lines[j].strip()
+
+                    # Skip header/label lines
+                    if any(skip in next_line.lower() for skip in [
+                        'opening', 'ending', 'balance', 'seq.', 'withdrawal', 'deposit',
+                        'november', 'december', 'january', 'february', 'march', 'april',
+                        'may', 'june', 'july', 'august', 'september', 'october'
+                    ]):
                         continue
 
-                    val = self._parse_number_from_text(num_str)
-                    if val is not None and val >= 1000:
-                        logger.info(f"VIB section balance (VND): found {val} for '{label}'")
-                        return val
-
-                # Check if line is just a number (balance on its own line)
-                clean_line = line.replace(',', '').replace('.', '').strip()
-                if clean_line.isdigit() and len(clean_line) >= 3:
-                    # Might be a balance value
-                    if '.' in line and re.match(r'^\d+\.\d{2}$', line.strip()):
-                        # USD format
-                        val = float(line.strip())
-                        logger.info(f"VIB section balance (USD line): found {val} for '{label}'")
-                        return val
-                    elif ',' in line:
-                        # VND format
-                        val = self._parse_number_from_text(line)
-                        if val and val >= 100:
-                            logger.info(f"VIB section balance (VND line): found {val} for '{label}'")
+                    # Check for comma-separated number
+                    if re.match(r'^[\d,]+$', next_line) and ',' in next_line:
+                        val = self._parse_number_from_text(next_line)
+                        if val is not None and val >= 0:
+                            logger.info(f"VIB section balance (VND next line): found {val} for '{label}'")
                             return val
 
         return None
