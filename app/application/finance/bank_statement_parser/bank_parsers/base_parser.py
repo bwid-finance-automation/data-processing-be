@@ -202,8 +202,9 @@ class BaseBankParser(ABC):
 
         elif file_format == 'xlsx':
             # Use openpyxl for modern Excel
+            fixed_bytes = cls._ensure_visible_sheet(file_bytes)
             try:
-                return pd.read_excel(io.BytesIO(file_bytes), engine='openpyxl', **kwargs)
+                return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
             except Exception as e:
                 if 'at least one sheet must be visible' in str(e).lower():
                     fixed_bytes = cls._ensure_visible_sheet(file_bytes)
@@ -218,7 +219,12 @@ class BaseBankParser(ABC):
             for engine in engines:
                 try:
                     if engine:
-                        return pd.read_excel(io.BytesIO(file_bytes), engine=engine, **kwargs)
+                        candidate_bytes = (
+                            cls._ensure_visible_sheet(file_bytes)
+                            if engine == 'openpyxl'
+                            else file_bytes
+                        )
+                        return pd.read_excel(io.BytesIO(candidate_bytes), engine=engine, **kwargs)
                     else:
                         return pd.read_excel(io.BytesIO(file_bytes), **kwargs)
                 except Exception as e:
@@ -261,8 +267,9 @@ class BaseBankParser(ABC):
                 pass
 
         if file_format == 'xlsx':
+            fixed_bytes = cls._ensure_visible_sheet(file_bytes)
             try:
-                return pd.ExcelFile(io.BytesIO(file_bytes), engine='openpyxl')
+                return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
             except:
                 # Work around files where all sheets are hidden
                 fixed_bytes = cls._ensure_visible_sheet(file_bytes)
@@ -270,7 +277,11 @@ class BaseBankParser(ABC):
 
         # Fallback: try default
         try:
-            return pd.ExcelFile(io.BytesIO(file_bytes))
+            fallback_bytes = file_bytes
+            if file_format == 'xlsx':
+                fallback_bytes = cls._ensure_visible_sheet(file_bytes)
+
+            return pd.ExcelFile(io.BytesIO(fallback_bytes))
         except Exception as e:
             raise ValueError(f"Could not open Excel file: {e}")
 
