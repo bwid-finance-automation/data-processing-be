@@ -2,10 +2,20 @@
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
-import pandas as pd
 import io
+import zipfile
+import xml.etree.ElementTree as ET
+
+import pandas as pd
+from openpyxl import load_workbook
+
+import pandas as pd
+from openpyxl import load_workbook
 
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
+
+
+logger = get_logger(__name__)
 
 
 class BaseBankParser(ABC):
@@ -200,9 +210,13 @@ class BaseBankParser(ABC):
 
         elif file_format == 'xlsx':
             # Use openpyxl for modern Excel
+            fixed_bytes = cls._ensure_visible_sheet(file_bytes)
             try:
-                return pd.read_excel(io.BytesIO(file_bytes), engine='openpyxl', **kwargs)
+                return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
             except Exception as e:
+                if 'at least one sheet must be visible' in str(e).lower():
+                    fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                    return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
                 raise ValueError(f"Failed to read XLSX file: {e}")
 
         else:
@@ -213,7 +227,12 @@ class BaseBankParser(ABC):
             for engine in engines:
                 try:
                     if engine:
-                        return pd.read_excel(io.BytesIO(file_bytes), engine=engine, **kwargs)
+                        candidate_bytes = (
+                            cls._ensure_visible_sheet(file_bytes)
+                            if engine == 'openpyxl'
+                            else file_bytes
+                        )
+                        return pd.read_excel(io.BytesIO(candidate_bytes), engine=engine, **kwargs)
                     else:
                         return pd.read_excel(io.BytesIO(file_bytes), **kwargs)
                 except Exception as e:
@@ -256,16 +275,50 @@ class BaseBankParser(ABC):
                 pass
 
         if file_format == 'xlsx':
+            fixed_bytes = cls._ensure_visible_sheet(file_bytes)
             try:
-                return pd.ExcelFile(io.BytesIO(file_bytes), engine='openpyxl')
+                return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
             except:
-                pass
+                # Work around files where all sheets are hidden
+                fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
 
         # Fallback: try default
         try:
-            return pd.ExcelFile(io.BytesIO(file_bytes))
+            fallback_bytes = file_bytes
+            if file_format == 'xlsx':
+                fallback_bytes = cls._ensure_visible_sheet(file_bytes)
+
+            return pd.ExcelFile(io.BytesIO(fallback_bytes))
         except Exception as e:
             raise ValueError(f"Could not open Excel file: {e}")
+
+    @classmethod
+    def _ensure_visible_sheet(cls, file_bytes: bytes) -> bytes:
+        """Ensure workbook has at least one visible sheet.
+
+        Some exported statements hide every sheet which causes ``openpyxl`` to
+        raise ``ValueError: At least one sheet must be visible``. To keep the
+        parser resilient, we mark the first sheet as visible and return the
+        updated workbook bytes. If anything goes wrong, the original bytes are
+        returned.
+        """
+        try:
+            workbook = load_workbook(io.BytesIO(file_bytes))
+            for sheet in workbook.worksheets:
+                if sheet.sheet_state == "visible":
+                    return file_bytes
+
+            if workbook.sheetnames:
+                first_sheet = workbook[workbook.sheetnames[0]]
+                first_sheet.sheet_state = "visible"
+                buffer = io.BytesIO()
+                workbook.save(buffer)
+                return buffer.getvalue()
+        except Exception:
+            return file_bytes
+
+        return file_bytes
 
     @staticmethod
     def to_text(value) -> str:
