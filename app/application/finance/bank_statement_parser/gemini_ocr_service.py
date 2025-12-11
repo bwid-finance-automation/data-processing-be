@@ -57,12 +57,20 @@ class GeminiOCRService:
             pdf = pikepdf.open(input_stream, password=password)
 
             # Save decrypted PDF to bytes
+            # Use preserve_pdfa=True and avoid recompression to keep original structure
+            # This helps ensure OCR produces consistent results
             output_stream = BytesIO()
-            pdf.save(output_stream)
+            pdf.save(
+                output_stream,
+                linearize=False,  # Don't linearize - keeps structure closer to original
+                object_stream_mode=pikepdf.ObjectStreamMode.preserve,  # Preserve object streams
+                compress_streams=False,  # Don't recompress - keeps text streams intact
+                stream_decode_level=pikepdf.StreamDecodeLevel.none,  # Don't decode streams
+            )
             pdf.close()
 
             decrypted_bytes = output_stream.getvalue()
-            logger.info(f"Successfully decrypted PDF ({len(decrypted_bytes)} bytes)")
+            logger.info(f"Successfully decrypted PDF ({len(decrypted_bytes)} bytes, original: {len(pdf_bytes)} bytes)")
             return decrypted_bytes
 
         except pikepdf.PasswordError:

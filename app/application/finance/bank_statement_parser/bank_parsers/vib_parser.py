@@ -597,9 +597,23 @@ class VIBParser(BaseBankParser):
                 ]):
                     break
 
+                # Skip lines that look like date labels (e.g., "16 November 2025", "30 November 2025")
+                # These contain month names and would extract wrong numbers
+                if any(month in next_line.lower() for month in [
+                    'january', 'february', 'march', 'april', 'may', 'june',
+                    'july', 'august', 'september', 'october', 'november', 'december',
+                    'tháng', 'thang'
+                ]):
+                    logger.debug(f"VIB multiline: skipping date line: {next_line[:50]}")
+                    continue
+
                 # Extract numbers from this line
                 line_numbers = re.findall(r'[\d,]+(?:\.\d+)?', next_line)
                 for num_str in line_numbers:
+                    # Skip numbers that look like years (2020-2030) without commas
+                    if re.match(r'^20[2-3]\d$', num_str):
+                        logger.debug(f"VIB multiline: skipping year-like number: {num_str}")
+                        continue
                     val = self._parse_number_from_text(num_str)
                     if val is not None:
                         amounts.append(val)

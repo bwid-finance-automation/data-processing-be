@@ -15,7 +15,8 @@
       "Bash(git commit -m \"$(cat <<''EOF''\nAdd detailed logging for VIB OCR transaction parsing debug\n\n- Log actual transaction line content (first 5 lines)\n- Log when regex match fails to identify format mismatch\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(git rm:*)"
     ],
     "deny": [],
     "ask": []
