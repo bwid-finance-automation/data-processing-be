@@ -15,4 +15,4 @@ __pycache__/
 *.py[cod]
 logs/
 outputs/
-VIB
+sample_for_test
