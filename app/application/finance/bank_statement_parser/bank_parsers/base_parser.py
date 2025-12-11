@@ -1,14 +1,20 @@
 """Base class for all bank statement parsers."""
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import pandas as pd
+import io
 
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
 
 
 class BaseBankParser(ABC):
     """Abstract base class for bank-specific parsers."""
+
+    # File format detection constants
+    XLS_SIGNATURE = b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'  # OLE2 compound document (real .xls)
+    XLSX_SIGNATURE = b'PK'  # ZIP archive (xlsx/xlsm/xlsb)
+    HTML_MARKERS = [b'<html', b'<!doctype', b'<table', b'<HTML', b'<!DOCTYPE']
 
     @property
     @abstractmethod
@@ -118,6 +124,148 @@ class BaseBankParser(ABC):
         return [single_balance] if single_balance else []
 
     # Helper methods available to all parsers
+
+    @classmethod
+    def detect_file_format(cls, file_bytes: bytes) -> str:
+        """
+        Detect the actual format of an Excel file.
+
+        Returns:
+            'xlsx' - Modern Excel format (ZIP-based)
+            'xls' - Legacy Excel 97-2003 format (OLE2)
+            'html' - HTML table saved as .xls (common from bank exports)
+            'unknown' - Could not determine format
+        """
+        if len(file_bytes) < 8:
+            return 'unknown'
+
+        # Check for XLSX (ZIP signature)
+        if file_bytes[:2] == cls.XLSX_SIGNATURE:
+            return 'xlsx'
+
+        # Check for real XLS (OLE2 signature)
+        if file_bytes[:8] == cls.XLS_SIGNATURE:
+            return 'xls'
+
+        # Check for HTML (check first 500 bytes for HTML markers)
+        header = file_bytes[:500].lower()
+        for marker in cls.HTML_MARKERS:
+            if marker.lower() in header:
+                return 'html'
+
+        return 'unknown'
+
+    @classmethod
+    def read_excel_auto(cls, file_bytes: bytes, **kwargs) -> pd.DataFrame:
+        """
+        Read Excel file with automatic format detection.
+
+        Handles:
+        - .xlsx files (modern Excel)
+        - .xls files (Excel 97-2003)
+        - HTML tables saved as .xls (common bank export format)
+
+        Args:
+            file_bytes: File content as bytes
+            **kwargs: Additional arguments passed to pd.read_excel/pd.read_html
+
+        Returns:
+            DataFrame with file content
+
+        Raises:
+            ValueError: If file format cannot be determined or read
+        """
+        file_format = cls.detect_file_format(file_bytes)
+
+        if file_format == 'html':
+            # Read HTML table
+            try:
+                dfs = pd.read_html(io.BytesIO(file_bytes), **{k: v for k, v in kwargs.items() if k in ['header', 'index_col', 'skiprows']})
+                if dfs:
+                    return dfs[0]
+                raise ValueError("No tables found in HTML file")
+            except Exception as e:
+                raise ValueError(f"Failed to read HTML table: {e}")
+
+        elif file_format == 'xls':
+            # Use xlrd for legacy Excel
+            try:
+                return pd.read_excel(io.BytesIO(file_bytes), engine='xlrd', **kwargs)
+            except Exception as e:
+                # Fallback to default engine
+                try:
+                    return pd.read_excel(io.BytesIO(file_bytes), **kwargs)
+                except:
+                    raise ValueError(f"Failed to read XLS file: {e}")
+
+        elif file_format == 'xlsx':
+            # Use openpyxl for modern Excel
+            try:
+                return pd.read_excel(io.BytesIO(file_bytes), engine='openpyxl', **kwargs)
+            except Exception as e:
+                raise ValueError(f"Failed to read XLSX file: {e}")
+
+        else:
+            # Try each engine in order
+            engines = ['openpyxl', 'xlrd', None]
+            last_error = None
+
+            for engine in engines:
+                try:
+                    if engine:
+                        return pd.read_excel(io.BytesIO(file_bytes), engine=engine, **kwargs)
+                    else:
+                        return pd.read_excel(io.BytesIO(file_bytes), **kwargs)
+                except Exception as e:
+                    last_error = e
+                    continue
+
+            # Try HTML as last resort
+            try:
+                dfs = pd.read_html(io.BytesIO(file_bytes))
+                if dfs:
+                    return dfs[0]
+            except:
+                pass
+
+            raise ValueError(f"Could not read file with any engine. Last error: {last_error}")
+
+    @classmethod
+    def get_excel_file(cls, file_bytes: bytes) -> pd.ExcelFile:
+        """
+        Get ExcelFile object with automatic engine detection.
+
+        Args:
+            file_bytes: File content as bytes
+
+        Returns:
+            pd.ExcelFile object
+
+        Raises:
+            ValueError: If file cannot be opened
+        """
+        file_format = cls.detect_file_format(file_bytes)
+
+        if file_format == 'html':
+            raise ValueError("HTML files cannot be opened as ExcelFile. Use read_excel_auto() instead.")
+
+        if file_format == 'xls':
+            try:
+                return pd.ExcelFile(io.BytesIO(file_bytes), engine='xlrd')
+            except:
+                pass
+
+        if file_format == 'xlsx':
+            try:
+                return pd.ExcelFile(io.BytesIO(file_bytes), engine='openpyxl')
+            except:
+                pass
+
+        # Fallback: try default
+        try:
+            return pd.ExcelFile(io.BytesIO(file_bytes))
+        except Exception as e:
+            raise ValueError(f"Could not open Excel file: {e}")
 
     @staticmethod
     def to_text(value) -> str:

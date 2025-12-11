@@ -29,8 +29,8 @@ class ACBParser(BaseBankParser):
           * "TIỀN GỬI VÀO" or "GỬI VÀO"
         """
         try:
-            # Read Excel workbook
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            # Read Excel workbook with auto format detection
+            xls = self.get_excel_file(file_bytes)
 
             # Try to read "Statement" sheet, otherwise first sheet
             try:
@@ -75,8 +75,8 @@ class ACBParser(BaseBankParser):
         5. Return 11-column schema
         """
         try:
-            # Read Excel
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            # Read Excel with auto format detection
+            xls = self.get_excel_file(file_bytes)
             try:
                 sheet = pd.read_excel(xls, sheet_name="Statement", header=None)
             except:
@@ -160,8 +160,8 @@ class ACBParser(BaseBankParser):
         - Return first non-null result
         """
         try:
-            # Read Excel
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            # Read Excel with auto format detection
+            xls = self.get_excel_file(file_bytes)
             try:
                 sheet = pd.read_excel(xls, sheet_name="Statement", header=None)
             except:

@@ -33,7 +33,7 @@ class VIBParser(BaseBankParser):
         - Exclude VCB and ACB markers
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
 
             # Check sheet name first (unique to VIB)
             sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
@@ -89,7 +89,7 @@ class VIBParser(BaseBankParser):
         - Drop rows where both Debit and Credit are zero
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
 
             # Try Statement sheet, otherwise first sheet
             try:
@@ -173,7 +173,7 @@ class VIBParser(BaseBankParser):
         - Extract account number and currency
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
 
             try:
                 sheet = pd.read_excel(xls, sheet_name="Statement", header=None)

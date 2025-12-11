@@ -29,7 +29,7 @@ class BIDVParser(BaseBankParser):
           * "BIDV"
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 80 rows
@@ -64,7 +64,7 @@ class BIDVParser(BaseBankParser):
         - DD/MM/YYYY date format support
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number from Header ==========
@@ -162,7 +162,7 @@ class BIDVParser(BaseBankParser):
         - Robust currency detection (VND, USD, EUR, etc.)
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========

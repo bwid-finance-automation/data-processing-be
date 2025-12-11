@@ -30,7 +30,7 @@ class MBBParser(BaseBankParser):
           * ("TÀI KHOẢN/ACCOUNT NO" AND "SỐ DƯ CUỐI KỲ")
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 80 rows
@@ -68,7 +68,7 @@ class MBBParser(BaseBankParser):
         - Extract account number from "ACCOUNT NO:" line
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========
@@ -171,7 +171,7 @@ class MBBParser(BaseBankParser):
         - Only count rows with non-null Date (to exclude totals row)
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========

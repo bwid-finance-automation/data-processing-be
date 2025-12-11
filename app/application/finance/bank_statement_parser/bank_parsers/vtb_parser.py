@@ -29,7 +29,7 @@ class VTBParser(BaseBankParser):
           * "LICH SỬ GIAO DỊCH - TRANSACTION HISTORY"
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 40 rows
@@ -65,7 +65,7 @@ class VTBParser(BaseBankParser):
         - Date fill-down support
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========
@@ -165,7 +165,7 @@ class VTBParser(BaseBankParser):
         - Fallback: Grid-based calculation
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========

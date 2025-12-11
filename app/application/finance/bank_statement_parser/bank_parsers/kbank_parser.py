@@ -29,7 +29,7 @@ class KBANKParser(BaseBankParser):
           * OR ("transaction date" + "debit amount" + "credit amount")
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 80 rows
@@ -72,7 +72,7 @@ class KBANKParser(BaseBankParser):
         - Currency detection (USD/VND)
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Find Header Row ==========
@@ -150,7 +150,7 @@ class KBANKParser(BaseBankParser):
         - Currency detection (USD/VND)
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Find Header Row ==========
