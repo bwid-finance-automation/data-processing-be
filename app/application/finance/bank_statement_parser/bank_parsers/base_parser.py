@@ -9,11 +9,9 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 from openpyxl import load_workbook
 
-import pandas as pd
-from openpyxl import load_workbook
-
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
-
+# [FIX] Import hàm get_logger từ module logging_config
+from app.shared.utils.logging_config import get_logger 
 
 logger = get_logger(__name__)
 
