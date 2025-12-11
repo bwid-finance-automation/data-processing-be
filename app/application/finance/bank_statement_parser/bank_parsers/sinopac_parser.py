@@ -26,7 +26,7 @@ class SINOPACParser(BaseBankParser):
           * OR ("SỐ TÀI KHOẢN" AND "NHẬN XÉT")
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 40 rows
@@ -64,7 +64,7 @@ class SINOPACParser(BaseBankParser):
         - Account number from "SỐ TÀI KHOẢN" (digits only)
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Find Header Row ==========
@@ -164,7 +164,7 @@ class SINOPACParser(BaseBankParser):
         - Handles bracket negatives: (1,234.00) → -1234
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Find Header Row ==========

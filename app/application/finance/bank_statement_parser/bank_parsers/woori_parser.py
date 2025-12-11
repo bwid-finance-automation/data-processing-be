@@ -27,7 +27,7 @@ class WooriParser(BaseBankParser):
         - OR "Amount withdrawn" + "Amount deposited" (unique column headers)
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 30 rows
@@ -84,7 +84,7 @@ class WooriParser(BaseBankParser):
         - Row 14+: Transaction data
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========
@@ -199,7 +199,7 @@ class WooriParser(BaseBankParser):
         - Row 10: "Closing balance : XX,XXX,XXX VND"
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========

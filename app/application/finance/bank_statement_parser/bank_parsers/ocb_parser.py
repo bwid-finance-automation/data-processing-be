@@ -26,7 +26,7 @@ class OCBParser(BaseBankParser):
         - Structure-based detector (no bank-name keyword needed)
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 30 rows
@@ -72,7 +72,7 @@ class OCBParser(BaseBankParser):
         - Extract account number from "SỐ TÀI KHOẢN" line with sophisticated tokenization
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========
@@ -179,7 +179,7 @@ class OCBParser(BaseBankParser):
         - Closing = last balance + net movement calculation
         """
         try:
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Extract Account Number and Currency from Header ==========

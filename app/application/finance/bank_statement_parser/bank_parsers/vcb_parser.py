@@ -33,7 +33,7 @@ class VCBParser(BaseBankParser):
                 return "SAO KÊ TÀI KHOẢN" in content and "VIETCOMBANK" in content.upper()
 
             # Excel file
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 20 rows
@@ -71,7 +71,7 @@ class VCBParser(BaseBankParser):
                 return self._parse_html_template(file_bytes)
 
             # Excel file
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Detect Template ==========
@@ -103,7 +103,7 @@ class VCBParser(BaseBankParser):
                 return self._parse_html_balances(file_bytes)
 
             # Excel file
-            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+            xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Find Account Sections ==========
