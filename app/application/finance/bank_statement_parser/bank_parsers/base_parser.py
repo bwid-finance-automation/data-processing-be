@@ -206,6 +206,9 @@ class BaseBankParser(ABC):
             try:
                 return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
             except Exception as e:
+                if 'at least one sheet must be visible' in str(e).lower():
+                    fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                    return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
                 raise ValueError(f"Failed to read XLSX file: {e}")
 
         else:
@@ -268,9 +271,9 @@ class BaseBankParser(ABC):
             try:
                 return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
             except:
-                # If the workbook is still invalid, let the default
-                # fallback below surface the error with context.
-                pass
+                # Work around files where all sheets are hidden
+                fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
 
         # Fallback: try default
         try:
