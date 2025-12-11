@@ -15,6 +15,9 @@ from openpyxl import load_workbook
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
 
 
+logger = get_logger(__name__)
+
+
 class BaseBankParser(ABC):
     """Abstract base class for bank-specific parsers."""
 
