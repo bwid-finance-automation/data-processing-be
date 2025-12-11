@@ -592,12 +592,6 @@ class VIBParser(BaseBankParser):
                 logger.debug(f"VIB complex: Skipping balance+desc line: {line[:50]}")
                 continue
 
-            # Skip small numbers without comma (likely invoice numbers, part of description)
-            # Valid amounts are either 0, or have commas (>= 1,000), or are decimal (USD)
-            if re.match(r'^[1-9]\d{0,3}$', line):  # Numbers 1-9999 without comma
-                logger.debug(f"VIB complex: Skipping small number (likely desc): {line}")
-                continue
-
             if currency == "USD":
                 # USD: look for decimal numbers
                 usd_match = re.match(r'^(\d+\.\d{2})$', line)  # Must be exact match
@@ -610,6 +604,12 @@ class VIBParser(BaseBankParser):
                     amounts.append(float(plain_match.group(1)))
                     continue
             else:
+                # Skip small numbers without comma (likely invoice numbers, part of description)
+                # Valid amounts are either 0, or have commas (>= 1,000)
+                if re.match(r'^[1-9]\d{0,3}$', line):  # Numbers 1-9999 without comma
+                    logger.debug(f"VIB complex: Skipping small number (likely desc): {line}")
+                    continue
+
                 # VND: comma-separated or plain 0 (no trailing text except whitespace)
                 vnd_match = re.match(r'^([\d,]+)$', line)
                 if vnd_match:
