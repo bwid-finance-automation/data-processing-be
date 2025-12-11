@@ -168,21 +168,20 @@ class ParseBankStatementsUseCase:
                 # Parse transactions from text
                 transactions = parser.parse_transactions_from_text(ocr_text, file_name)
 
-                # Parse balances from text
-                balance = parser.parse_balances_from_text(ocr_text, file_name)
+                # Parse ALL balances from text (supports multiple accounts per PDF)
+                balances = parser.parse_all_balances_from_text(ocr_text, file_name)
 
-                # Create statement
+                # Create statement (use first balance for backward compatibility)
                 statement = BankStatement(
                     bank_name=parser.bank_name,
                     file_name=file_name,
-                    balance=balance,
+                    balance=balances[0] if balances else None,
                     transactions=transactions
                 )
 
                 statements.append(statement)
                 all_transactions.extend(transactions)
-                if balance:
-                    all_balances.append(balance)
+                all_balances.extend(balances)
 
                 successful += 1
 

@@ -100,6 +100,23 @@ class BaseBankParser(ABC):
         """
         return None
 
+    def parse_all_balances_from_text(self, text: str, file_name: str) -> List[BankBalance]:
+        """
+        Parse ALL balance information from OCR text.
+
+        For PDFs with multiple accounts, this returns all balances.
+
+        Args:
+            text: OCR extracted text
+            file_name: Original file name
+
+        Returns:
+            List of balance information. Empty list if none found.
+            Default implementation calls parse_balances_from_text for backward compatibility.
+        """
+        single_balance = self.parse_balances_from_text(text, file_name)
+        return [single_balance] if single_balance else []
+
     # Helper methods available to all parsers
 
     @staticmethod
