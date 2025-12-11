@@ -6,6 +6,7 @@ from typing import List, Tuple, Optional
 from io import BytesIO
 
 import google.generativeai as genai
+from google.generativeai import types as genai_types
 import pikepdf
 from dotenv import load_dotenv
 
@@ -33,7 +34,16 @@ class GeminiOCRService:
 
         # Configure Gemini
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel(self.model_name)
+        # Use deterministic generation to avoid OCR variability between requests
+        self.model = genai.GenerativeModel(
+            self.model_name,
+            generation_config=genai_types.GenerationConfig(
+                temperature=0,
+                top_p=0,
+                top_k=1,
+                candidate_count=1,
+            ),
+        )
 
         logger.info(f"GeminiOCRService initialized with model: {self.model_name}")
 

@@ -25,6 +25,78 @@ class ParseBankStatementsUseCase:
     def __init__(self):
         self.parser_factory = ParserFactory
 
+    def _reconcile_balances_with_transactions(
+        self,
+        all_balances: List[BankBalance],
+        all_transactions: List[BankTransaction]
+    ) -> List[BankBalance]:
+        """
+        Backfill missing or zero balances using transaction totals.
+
+        This helps PDF/OCR runs where opening/closing balances are missing or
+        mis-placed by Gemini, but transaction lines are complete.
+        """
+        aggregates = defaultdict(lambda: {"debit": 0.0, "credit": 0.0})
+
+        for tx in all_transactions:
+            key = f"{tx.bank_name}_{tx.acc_no}"
+            aggregates[key]["debit"] += tx.debit or 0.0
+            aggregates[key]["credit"] += tx.credit or 0.0
+
+        reconciled: List[BankBalance] = []
+        for bal in all_balances:
+            key = f"{bal.bank_name}_{bal.acc_no}"
+            totals = aggregates.get(key, {"debit": 0.0, "credit": 0.0})
+
+            opening = bal.opening_balance or 0.0
+            closing = bal.closing_balance or 0.0
+            total_debit = totals["debit"]
+            total_credit = totals["credit"]
+            net_change = total_credit - total_debit
+
+            calculated_closing = opening + net_change
+            calculated_opening = closing - net_change
+
+            # If opening is missing/zero but we have closing + movement, backfill opening
+            if (opening == 0 or opening is None) and (closing != 0 or net_change != 0):
+                opening = calculated_opening
+
+            # If closing is missing/zero, or equals opening despite movement, recompute
+            if closing == 0 and (opening != 0 or net_change != 0):
+                closing = calculated_closing
+            elif (total_debit or total_credit) and abs(closing - opening) < 0.01:
+                closing = calculated_closing
+
+            # If no movement and closing is still zero, mirror opening
+            if closing == 0 and opening != 0 and not (total_debit or total_credit):
+                closing = opening
+
+            reconciled.append(BankBalance(
+                bank_name=bal.bank_name,
+                acc_no=bal.acc_no,
+                currency=bal.currency,
+                opening_balance=opening,
+                closing_balance=closing
+            ))
+
+        return reconciled
+
+    def _update_statement_balances(
+        self,
+        statements: List[BankStatement],
+        reconciled_balances: List[BankBalance]
+    ) -> None:
+        """Update statement.balance objects to reflect reconciled values."""
+        balance_map = {
+            (bal.bank_name, bal.acc_no): bal for bal in reconciled_balances
+        }
+
+        for statement in statements:
+            if statement.balance:
+                key = (statement.balance.bank_name, statement.balance.acc_no)
+                if key in balance_map:
+                    statement.balance = balance_map[key]
+
     def execute(
         self,
         files: List[Tuple[str, bytes]]
@@ -91,17 +163,20 @@ class ParseBankStatementsUseCase:
                     "error": str(e)
                 })
 
+        reconciled_balances = self._reconcile_balances_with_transactions(all_balances, all_transactions)
+        self._update_statement_balances(statements, reconciled_balances)
+
         return {
             "statements": statements,
             "all_transactions": all_transactions,
-            "all_balances": all_balances,
+            "all_balances": reconciled_balances,
             "summary": {
                 "total_files": len(files),
                 "successful": successful,
                 "failed": failed,
                 "failed_files": failed_files,
                 "total_transactions": len(all_transactions),
-                "total_balances": len(all_balances)
+                "total_balances": len(reconciled_balances)
             }
         }
 
@@ -192,17 +267,20 @@ class ParseBankStatementsUseCase:
                     "error": str(e)
                 })
 
+        reconciled_balances = self._reconcile_balances_with_transactions(all_balances, all_transactions)
+        self._update_statement_balances(statements, reconciled_balances)
+
         return {
             "statements": statements,
             "all_transactions": all_transactions,
-            "all_balances": all_balances,
+            "all_balances": reconciled_balances,
             "summary": {
                 "total_files": len(text_inputs),
                 "successful": successful,
                 "failed": failed,
                 "failed_files": failed_files,
                 "total_transactions": len(all_transactions),
-                "total_balances": len(all_balances)
+                "total_balances": len(reconciled_balances)
             }
         }
 
