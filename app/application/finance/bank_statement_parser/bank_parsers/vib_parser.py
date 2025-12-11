@@ -676,10 +676,7 @@ class VIBParser(BaseBankParser):
             else:
                 amount_idx += 2  # Only withdrawal, deposit
 
-            # Skip if both are zero
-            if withdrawal == 0 and deposit == 0:
-                continue
-
+            # Include ALL transactions, even with 0/0 amounts
             tx_date = self._parse_date_from_text(date_str)
 
             tx = BankTransaction(
@@ -792,23 +789,24 @@ class VIBParser(BaseBankParser):
                 withdrawal = amounts[0]
                 deposit = amounts[1]
 
-                if withdrawal != 0 or deposit != 0:
-                    tx_date = self._parse_date_from_text(date_str)
-                    tx = BankTransaction(
-                        bank_name="VIB",
-                        acc_no=acc_no or "",
-                        debit=withdrawal if withdrawal > 0 else None,
-                        credit=deposit if deposit > 0 else None,
-                        date=tx_date,
-                        description="",
-                        currency=currency,
-                        transaction_id=tx_id,
-                        beneficiary_bank="",
-                        beneficiary_acc_no="",
-                        beneficiary_acc_name=""
-                    )
-                    transactions.append(tx)
-                    logger.info(f"VIB simple: TX {tx_id} - withdrawal={withdrawal}, deposit={deposit}")
+                # Include ALL transactions, even with 0/0 amounts
+                # (some banks record fee waivers, adjustments with zero amounts)
+                tx_date = self._parse_date_from_text(date_str)
+                tx = BankTransaction(
+                    bank_name="VIB",
+                    acc_no=acc_no or "",
+                    debit=withdrawal if withdrawal > 0 else None,
+                    credit=deposit if deposit > 0 else None,
+                    date=tx_date,
+                    description="",
+                    currency=currency,
+                    transaction_id=tx_id,
+                    beneficiary_bank="",
+                    beneficiary_acc_no="",
+                    beneficiary_acc_name=""
+                )
+                transactions.append(tx)
+                logger.info(f"VIB simple: TX {tx_id} - withdrawal={withdrawal}, deposit={deposit}")
 
             i += 1
 
