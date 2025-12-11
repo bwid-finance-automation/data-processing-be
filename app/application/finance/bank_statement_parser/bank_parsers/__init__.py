@@ -11,6 +11,7 @@ from .ocb_parser import OCBParser
 from .bidv_parser import BIDVParser
 from .vtb_parser import VTBParser
 from .vcb_parser import VCBParser
+from .woori_parser import WooriParser
 from .parser_factory import ParserFactory
 
-__all__ = ["BaseBankParser", "ACBParser", "VIBParser", "CTBCParser", "KBANKParser", "SINOPACParser", "MBBParser", "OCBParser", "BIDVParser", "VTBParser", "VCBParser", "ParserFactory"]
+__all__ = ["BaseBankParser", "ACBParser", "VIBParser", "CTBCParser", "KBANKParser", "SINOPACParser", "MBBParser", "OCBParser", "BIDVParser", "VTBParser", "VCBParser", "WooriParser", "ParserFactory"]
