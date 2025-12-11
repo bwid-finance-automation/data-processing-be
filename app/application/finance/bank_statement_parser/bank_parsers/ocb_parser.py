@@ -20,33 +20,41 @@ class OCBParser(BaseBankParser):
         """
         Detect if file is OCB bank statement.
 
-        Logic from fxLooksLike_OCB:
+        Improved detection:
+        - Check for "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" (bilingual header)
+        - OR check for OCB-specific structure: PS GIẢM/PS TĂNG + Starting Balance/Ending Balance
         - Structure-based detector (no bank-name keyword needed)
-        - Must contain all: NGÀY, NỘI DUNG, PS GIẢM/NỢ, PS TĂNG/CÓ, SỐ DƯ, SỐ DƯ ĐẦU
         """
         try:
             xls = pd.ExcelFile(io.BytesIO(file_bytes))
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
-            # Get first 80 rows
-            top_80 = df.head(80)
+            # Get first 30 rows
+            top_30 = df.head(30)
 
             # Flatten all cells to uppercase text
             all_text = []
-            for col in top_80.columns:
-                all_text.extend([self.to_text(cell).upper() for cell in top_80[col]])
+            for col in top_30.columns:
+                all_text.extend([self.to_text(cell).upper() for cell in top_30[col]])
 
-            txt = "|".join(all_text)
+            txt = " ".join(all_text)
 
-            # Check for OCB structure markers
-            has_ngay = "NGÀY" in txt
-            has_desc = "NỘI DUNG" in txt
-            has_no = "PS GIẢM" in txt or "PS NỢ" in txt
-            has_co = "PS TĂNG" in txt or "PS CÓ" in txt
-            has_bal = "SỐ DƯ" in txt and "SỐ DƯ ĐẦU" not in txt.replace("SỐ DƯ ĐẦU", "")
-            has_open = "SỐ DƯ ĐẦU" in txt
+            # Method 1: Check for OCB bilingual header pattern
+            # "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" is unique to OCB
+            has_ocb_header = "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" in txt
 
-            is_ocb = has_ngay and has_desc and has_no and has_co and has_bal and has_open
+            # Method 2: Check for OCB-specific column markers
+            has_ps_giam = "PS GIẢM" in txt or "PS NỢ" in txt
+            has_ps_tang = "PS TĂNG" in txt or "PS CÓ" in txt
+            has_starting_balance = "STARTING BALANCE" in txt or "SỐ DƯ ĐẦU KỲ/ STARTING BALANCE" in txt
+            has_ending_balance = "ENDING BALANCE" in txt or "SỐ DƯ CUỐI KỲ/ ENDING BALANCE" in txt
+            has_ocb_structure = (has_ps_giam and has_ps_tang) or (has_starting_balance and has_ending_balance)
+
+            # Method 3: Check for specific OCB markers not in other banks
+            has_debit_total = "DEBIT TOTAL" in txt or "TỔNG PS NỢ" in txt
+            has_credit_total = "CREDIT TOTAL" in txt or "TỔNG PS CÓ" in txt
+
+            is_ocb = has_ocb_header or (has_ocb_structure and (has_debit_total or has_credit_total))
 
             return is_ocb
 

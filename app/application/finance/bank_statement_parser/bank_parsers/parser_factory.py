@@ -12,20 +12,25 @@ from .ocb_parser import OCBParser
 from .bidv_parser import BIDVParser
 from .vtb_parser import VTBParser
 from .vcb_parser import VCBParser
+from .woori_parser import WooriParser
 
 
 class ParserFactory:
     """Factory to detect bank and return appropriate parser."""
 
     # Register all available parsers here
+    # NOTE: Order matters! More specific parsers should come before generic ones
+    # - OCB and Woori must come before MBB (MBB has broad detection that can match others)
+    # - Banks with unique markers (ACB, VIB, CTBC, KBANK) can be in any order
     _parsers: List[BaseBankParser] = [
         ACBParser(),
         VIBParser(),
         CTBCParser(),
         KBANKParser(),
         SINOPACParser(),
-        MBBParser(),
-        OCBParser(),
+        OCBParser(),      # Must be before MBB (MBB's "ACCOUNT STATEMENT" can match OCB)
+        WooriParser(),    # Must be before MBB (MBB's "ACCOUNT STATEMENT" can match Woori)
+        MBBParser(),      # Has broader detection patterns
         BIDVParser(),
         VTBParser(),
         VCBParser(),
