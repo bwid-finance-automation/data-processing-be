@@ -37,12 +37,7 @@ class GeminiOCRService:
         # Use deterministic generation to avoid OCR variability between requests
         self.model = genai.GenerativeModel(
             self.model_name,
-            generation_config=genai_types.GenerationConfig(
-                temperature=0,
-                top_p=0,
-                top_k=1,
-                candidate_count=1,
-            ),
+            generation_config=genai_types.GenerationConfig(temperature=0),
         )
 
         logger.info(f"GeminiOCRService initialized with model: {self.model_name}")
