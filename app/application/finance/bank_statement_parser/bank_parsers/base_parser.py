@@ -2,8 +2,10 @@
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
-import pandas as pd
 import io
+
+import pandas as pd
+from openpyxl import load_workbook
 
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
 
@@ -203,6 +205,9 @@ class BaseBankParser(ABC):
             try:
                 return pd.read_excel(io.BytesIO(file_bytes), engine='openpyxl', **kwargs)
             except Exception as e:
+                if 'at least one sheet must be visible' in str(e).lower():
+                    fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                    return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
                 raise ValueError(f"Failed to read XLSX file: {e}")
 
         else:
@@ -259,13 +264,42 @@ class BaseBankParser(ABC):
             try:
                 return pd.ExcelFile(io.BytesIO(file_bytes), engine='openpyxl')
             except:
-                pass
+                # Work around files where all sheets are hidden
+                fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
 
         # Fallback: try default
         try:
             return pd.ExcelFile(io.BytesIO(file_bytes))
         except Exception as e:
             raise ValueError(f"Could not open Excel file: {e}")
+
+    @classmethod
+    def _ensure_visible_sheet(cls, file_bytes: bytes) -> bytes:
+        """Ensure workbook has at least one visible sheet.
+
+        Some exported statements hide every sheet which causes ``openpyxl`` to
+        raise ``ValueError: At least one sheet must be visible``. To keep the
+        parser resilient, we mark the first sheet as visible and return the
+        updated workbook bytes. If anything goes wrong, the original bytes are
+        returned.
+        """
+        try:
+            workbook = load_workbook(io.BytesIO(file_bytes))
+            for sheet in workbook.worksheets:
+                if sheet.sheet_state == "visible":
+                    return file_bytes
+
+            if workbook.sheetnames:
+                first_sheet = workbook[workbook.sheetnames[0]]
+                first_sheet.sheet_state = "visible"
+                buffer = io.BytesIO()
+                workbook.save(buffer)
+                return buffer.getvalue()
+        except Exception:
+            return file_bytes
+
+        return file_bytes
 
     @staticmethod
     def to_text(value) -> str:
