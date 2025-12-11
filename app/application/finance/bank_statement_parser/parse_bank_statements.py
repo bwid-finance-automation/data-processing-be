@@ -742,15 +742,27 @@ class ParseBankStatementsUseCase:
                 # Name format: BS/{BankCode}/{Currency}-{AccNo}/{YYYYMMDD}
                 name = f"BS/{bal.bank_name}/{currency}-{bal.acc_no}/{date_str_yyyymmdd}"
 
+                # For USD, keep decimals. For VND, use integers
+                if currency == "USD":
+                    opening_val = round(bal.opening_balance or 0, 2)
+                    closing_val = round(bal.closing_balance or 0, 2)
+                    debit_val = round(agg["total_debit"], 2)
+                    credit_val = round(agg["total_credit"], 2)
+                else:
+                    opening_val = int(bal.opening_balance or 0)
+                    closing_val = int(bal.closing_balance or 0)
+                    debit_val = int(agg["total_debit"])
+                    credit_val = int(agg["total_credit"])
+
                 balance_data.append({
                     "External ID": external_id,
                     "Name (*)": name,
                     "Bank Account Number (*)": bal.acc_no,
                     "Bank code (*)": bal.bank_name,
-                    "Openning Balance (*)": int(bal.opening_balance or 0),
-                    "Closing Balance (*)": int(bal.closing_balance or 0),
-                    "Total Debit (*)": agg["total_debit"],
-                    "Total Credit (*)": agg["total_credit"],
+                    "Openning Balance (*)": opening_val,
+                    "Closing Balance (*)": closing_val,
+                    "Total Debit (*)": debit_val,
+                    "Total Credit (*)": credit_val,
                     "Currency (*)": currency,
                     "Date (*)": tx_date
                 })
@@ -802,9 +814,13 @@ class ParseBankStatementsUseCase:
                 # Name format: same as Bank Statement Daily with trailing /
                 name = f"{bank_statement_daily}/"
 
-                # Debit/Credit as integers, 0 if None
-                debit_val = int(tx.debit or 0)
-                credit_val = int(tx.credit or 0)
+                # Debit/Credit - keep decimals for USD, integers for VND
+                if currency == "USD":
+                    debit_val = round(tx.debit or 0, 2)
+                    credit_val = round(tx.credit or 0, 2)
+                else:
+                    debit_val = int(tx.debit or 0)
+                    credit_val = int(tx.credit or 0)
 
                 # Amount and Type
                 if debit_val > 0:

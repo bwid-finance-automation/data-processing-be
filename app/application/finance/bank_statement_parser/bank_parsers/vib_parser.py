@@ -647,8 +647,8 @@ class VIBParser(BaseBankParser):
 
             logger.info(f"VIB multiline: tx_id={tx_id}, found amounts={amounts[:5]}")
 
-            if len(amounts) < 2:
-                # Need at least withdrawal and deposit
+            # Need at least 1 amount (some transactions only have withdrawal OR deposit)
+            if len(amounts) < 1:
                 return None
 
             # First amount = Withdrawal (Phát sinh nợ)
@@ -656,6 +656,13 @@ class VIBParser(BaseBankParser):
             # Third amount = Balance (skip if present)
             withdrawal = amounts[0] if len(amounts) > 0 else 0
             deposit = amounts[1] if len(amounts) > 1 else 0
+
+            # If only 1 amount found, it's likely the non-zero value
+            # Check if the single amount should be withdrawal or deposit based on context
+            if len(amounts) == 1 and amounts[0] > 0:
+                # Default: assume it's a deposit (credit) unless we can determine otherwise
+                withdrawal = 0
+                deposit = amounts[0]
 
             # Skip if both are zero
             if withdrawal == 0 and deposit == 0:
@@ -868,10 +875,11 @@ class VIBParser(BaseBankParser):
         - Opening balance: "Số dư đầu ngày" followed by amount
         - Closing balance: "Số dư cuối ngày" followed by amount
 
-        Returns list of BankBalance objects, one per account.
+        Returns list of BankBalance objects, one per account (no duplicates).
         """
         try:
             balances = []
+            processed_accounts = set()  # Track (acc_no, currency) to avoid duplicates
 
             # Split text into account sections
             # Each account section starts with account number pattern
@@ -886,11 +894,23 @@ class VIBParser(BaseBankParser):
                     logger.warning(f"VIB: Could not extract account number from section {section_idx}")
                     continue
 
+                # Skip duplicate accounts (same acc_no + currency)
+                account_key = (acc_no, currency)
+                if account_key in processed_accounts:
+                    logger.info(f"VIB: Skipping duplicate account {acc_no} ({currency})")
+                    continue
+
                 logger.info(f"VIB: Processing account {acc_no} ({currency})")
 
                 # Extract opening and closing balance for this specific section
                 opening = self._extract_section_balance(section, ["số dư đầu", "opening balance"])
                 closing = self._extract_section_balance(section, ["số dư cuối", "ending balance"])
+
+                # If balance extraction failed, try fallback with full section text
+                if opening is None or opening == 0:
+                    opening = self._extract_balance_fallback_section(section, ["số dư đầu", "opening balance"], currency)
+                if closing is None or closing == 0:
+                    closing = self._extract_balance_fallback_section(section, ["số dư cuối", "ending balance"], currency)
 
                 logger.info(f"VIB: Account {acc_no} - Opening: {opening}, Closing: {closing}")
 
@@ -901,6 +921,7 @@ class VIBParser(BaseBankParser):
                     opening_balance=opening or 0.0,
                     closing_balance=closing or 0.0
                 ))
+                processed_accounts.add(account_key)
 
             # If no sections found, try legacy single-account parsing
             if not balances:
@@ -915,6 +936,45 @@ class VIBParser(BaseBankParser):
         except Exception as e:
             logger.error(f"Error parsing VIB balances from text: {e}")
             return []
+
+    def _extract_balance_fallback_section(self, section: str, labels: List[str], currency: str) -> Optional[float]:
+        """
+        Fallback balance extraction for a section when primary method fails.
+        """
+        section_lower = section.lower()
+
+        for label in labels:
+            label_lower = label.lower()
+            pos = section_lower.find(label_lower)
+
+            if pos == -1:
+                continue
+
+            # Extract window after the label
+            window = section[pos:pos + 400]
+
+            # For USD - look for decimal numbers
+            if currency == "USD":
+                usd_matches = re.findall(r'(\d+\.\d{2})', window)
+                for num_str in usd_matches:
+                    val = float(num_str)
+                    if val >= 0:
+                        logger.info(f"VIB fallback (USD): found {val} for '{label}'")
+                        return val
+
+            # For VND - look for comma-separated numbers with proper format
+            vnd_matches = re.findall(r'\b(\d{1,3}(?:,\d{3})+)\b', window)
+            for num_str in vnd_matches:
+                # Skip transaction IDs (exactly 10 digits)
+                digits = num_str.replace(',', '')
+                if len(digits) == 10:
+                    continue
+                val = self._parse_number_from_text(num_str)
+                if val is not None and val >= 1000:
+                    logger.info(f"VIB fallback (VND): found {val} for '{label}'")
+                    return val
+
+        return None
 
     def _split_into_account_sections(self, text: str) -> List[str]:
         """
@@ -995,55 +1055,80 @@ class VIBParser(BaseBankParser):
 
         This is more accurate than searching the entire text because
         it only looks within the account's section.
+
+        IMPORTANT: Must avoid picking up:
+        - Transaction IDs (10-digit numbers like 7048070432)
+        - Credit/Debit amounts from transaction lines
+        - Date components
         """
-        lines = section.split('\n')
         section_lower = section.lower()
+        lines = section.split('\n')
 
         for label in labels:
             label_lower = label.lower()
 
-            # Find the position of the label in the section
-            pos = section_lower.find(label_lower)
-            if pos == -1:
+            # Find line index containing the label
+            label_line_idx = -1
+            for i, line in enumerate(lines):
+                if label_lower in line.lower():
+                    label_line_idx = i
+                    break
+
+            if label_line_idx == -1:
                 continue
 
-            # Extract text after the label (up to 300 chars or next major section)
-            window_start = pos
-            window_end = min(pos + 300, len(section))
-            window = section[window_start:window_end]
+            # Search in lines after the label (not in transaction table area)
+            # Balance should be within 5 lines of the label
+            for i in range(label_line_idx, min(label_line_idx + 6, len(lines))):
+                line = lines[i].strip()
 
-            # Find all numbers with comma separators (VND format) or decimal (USD)
-            # VND: "169,388,852" or "3,064,660"
-            # USD: "56.00" or "100.00"
-
-            # First try VND format (comma separated, large numbers)
-            vnd_numbers = re.findall(r'[\d,]+', window)
-            for num_str in vnd_numbers:
-                # Must have comma for VND format (except for 0)
-                if num_str == '0':
+                # Skip lines that look like transaction lines (start with 10-digit ID)
+                if re.match(r'^\d{10}', line):
                     continue
-                if ',' in num_str:
-                    val = self._parse_number_from_text(num_str)
-                    # Skip small numbers that are likely dates/counts
-                    if val is not None and val >= 100:
-                        logger.debug(f"VIB section balance: found {val} for '{label}'")
+
+                # Skip header lines
+                if any(skip in line.lower() for skip in [
+                    'seq.', 'withdrawal', 'deposit', 'phát sinh', 'tran date', 'effect date'
+                ]):
+                    continue
+
+                # For USD accounts - look for decimal numbers like "56.00", "100.00"
+                if 'usd' in section_lower:
+                    usd_match = re.search(r'(\d+\.\d{2})\b', line)
+                    if usd_match:
+                        val = float(usd_match.group(1))
+                        logger.info(f"VIB section balance (USD): found {val} for '{label}'")
                         return val
 
-            # Then try USD format (decimal)
-            usd_numbers = re.findall(r'\d+\.\d{2}', window)
-            for num_str in usd_numbers:
-                val = float(num_str)
-                if val >= 0:
-                    logger.debug(f"VIB section balance (USD): found {val} for '{label}'")
-                    return val
+                # For VND - look for comma-separated numbers
+                # Pattern: number with at least one comma, representing >= 1,000
+                vnd_matches = re.findall(r'\b(\d{1,3}(?:,\d{3})+)\b', line)
+                for num_str in vnd_matches:
+                    # Skip if it looks like a transaction ID (10 digits no comma)
+                    digits_only = num_str.replace(',', '')
+                    if len(digits_only) == 10:
+                        continue
 
-            # Finally try plain numbers (no separators)
-            plain_numbers = re.findall(r'\b\d{5,}\b', window)
-            for num_str in plain_numbers:
-                val = float(num_str)
-                if val >= 100:
-                    logger.debug(f"VIB section balance (plain): found {val} for '{label}'")
-                    return val
+                    val = self._parse_number_from_text(num_str)
+                    if val is not None and val >= 1000:
+                        logger.info(f"VIB section balance (VND): found {val} for '{label}'")
+                        return val
+
+                # Check if line is just a number (balance on its own line)
+                clean_line = line.replace(',', '').replace('.', '').strip()
+                if clean_line.isdigit() and len(clean_line) >= 3:
+                    # Might be a balance value
+                    if '.' in line and re.match(r'^\d+\.\d{2}$', line.strip()):
+                        # USD format
+                        val = float(line.strip())
+                        logger.info(f"VIB section balance (USD line): found {val} for '{label}'")
+                        return val
+                    elif ',' in line:
+                        # VND format
+                        val = self._parse_number_from_text(line)
+                        if val and val >= 100:
+                            logger.info(f"VIB section balance (VND line): found {val} for '{label}'")
+                            return val
 
         return None
 
