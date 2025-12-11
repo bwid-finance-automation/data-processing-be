@@ -2,8 +2,12 @@
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
-import pandas as pd
 import io
+import zipfile
+import xml.etree.ElementTree as ET
+
+import pandas as pd
+from openpyxl import load_workbook
 
 from app.domain.finance.bank_statement_parser.models import BankTransaction, BankBalance
 
@@ -200,8 +204,9 @@ class BaseBankParser(ABC):
 
         elif file_format == 'xlsx':
             # Use openpyxl for modern Excel
+            fixed_bytes = cls._ensure_visible_sheet(file_bytes)
             try:
-                return pd.read_excel(io.BytesIO(file_bytes), engine='openpyxl', **kwargs)
+                return pd.read_excel(io.BytesIO(fixed_bytes), engine='openpyxl', **kwargs)
             except Exception as e:
                 raise ValueError(f"Failed to read XLSX file: {e}")
 
@@ -213,7 +218,12 @@ class BaseBankParser(ABC):
             for engine in engines:
                 try:
                     if engine:
-                        return pd.read_excel(io.BytesIO(file_bytes), engine=engine, **kwargs)
+                        candidate_bytes = (
+                            cls._ensure_visible_sheet(file_bytes)
+                            if engine == 'openpyxl'
+                            else file_bytes
+                        )
+                        return pd.read_excel(io.BytesIO(candidate_bytes), engine=engine, **kwargs)
                     else:
                         return pd.read_excel(io.BytesIO(file_bytes), **kwargs)
                 except Exception as e:
@@ -256,16 +266,98 @@ class BaseBankParser(ABC):
                 pass
 
         if file_format == 'xlsx':
+            fixed_bytes = cls._ensure_visible_sheet(file_bytes)
             try:
-                return pd.ExcelFile(io.BytesIO(file_bytes), engine='openpyxl')
+                return pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
             except:
+                # If the workbook is still invalid, let the default
+                # fallback below surface the error with context.
                 pass
 
         # Fallback: try default
         try:
-            return pd.ExcelFile(io.BytesIO(file_bytes))
+            fallback_bytes = file_bytes
+            if file_format == 'xlsx':
+                fallback_bytes = cls._ensure_visible_sheet(file_bytes)
+
+            return pd.ExcelFile(io.BytesIO(fallback_bytes))
         except Exception as e:
             raise ValueError(f"Could not open Excel file: {e}")
+
+    @classmethod
+    def _ensure_visible_sheet(cls, file_bytes: bytes) -> bytes:
+        """Ensure workbook has at least one visible sheet.
+
+        Some exported statements hide every sheet which causes ``openpyxl`` to
+        raise ``ValueError: At least one sheet must be visible``. To keep the
+        parser resilient, we mark the first sheet as visible and return the
+        updated workbook bytes. If anything goes wrong, the original bytes are
+        returned.
+        """
+        try:
+            workbook = load_workbook(io.BytesIO(file_bytes))
+            for sheet in workbook.worksheets:
+                if sheet.sheet_state == "visible":
+                    return file_bytes
+
+            if workbook.sheetnames:
+                first_sheet = workbook[workbook.sheetnames[0]]
+                first_sheet.sheet_state = "visible"
+                buffer = io.BytesIO()
+                workbook.save(buffer)
+                return buffer.getvalue()
+        except Exception:
+            fixed = cls._force_first_sheet_visible_zip(file_bytes)
+            return fixed if fixed is not None else file_bytes
+
+        return file_bytes
+
+    @staticmethod
+    def _force_first_sheet_visible_zip(file_bytes: bytes) -> Optional[bytes]:
+        """
+        Force the first sheet to be visible by manipulating workbook XML.
+
+        This provides a fallback when ``openpyxl.load_workbook`` itself raises
+        ``ValueError: At least one sheet must be visible`` while loading the
+        workbook, which prevents the in-memory mutation approach.
+        """
+        try:
+            with io.BytesIO(file_bytes) as buffer, zipfile.ZipFile(buffer, "r") as zin:
+                if "xl/workbook.xml" not in zin.namelist():
+                    return None
+
+                workbook_xml = zin.read("xl/workbook.xml")
+                root = ET.fromstring(workbook_xml)
+
+                # Namespaces are required to find sheet nodes correctly.
+                ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                sheets = root.find("main:sheets", ns)
+                if sheets is None:
+                    return None
+
+                first_sheet = sheets.find("main:sheet", ns)
+                if first_sheet is None:
+                    return None
+
+                # Remove the state attribute or set to visible
+                if "state" in first_sheet.attrib:
+                    first_sheet.attrib.pop("state")
+                first_sheet.set("state", "visible")
+
+                updated_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+                # Write a new zip with the updated workbook.xml
+                out_buffer = io.BytesIO()
+                with zipfile.ZipFile(out_buffer, "w") as zout:
+                    for item in zin.infolist():
+                        if item.filename == "xl/workbook.xml":
+                            zout.writestr(item, updated_xml)
+                        else:
+                            zout.writestr(item, zin.read(item.filename))
+
+                return out_buffer.getvalue()
+        except Exception:
+            return None
 
     @staticmethod
     def to_text(value) -> str:
