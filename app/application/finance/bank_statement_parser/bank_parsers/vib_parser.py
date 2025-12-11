@@ -435,15 +435,16 @@ class VIBParser(BaseBankParser):
 
                 # Update account info when we see account line
                 # Multiple patterns to catch different OCR formats
-                if any(marker in line.lower() for marker in ["số tk", "so tk", "a/c no", "account no", "loại tiền"]):
-                    # Pattern 1: "053376900 651/VND" or "004368306 651/VND"
+                # Pattern for: "Số TK/Loại TK/Loại tiền: 053376900 651/VND" or "059817628 602/VND"
+                if any(marker in line.lower() for marker in ["số tk", "so tk", "a/c no", "account no", "loại tiền", "type/ccy"]):
+                    # Pattern 1: "053376900 651/VND" or "004368306 651/VND" or "059817628 602/VND"
                     acc_match = re.search(r'(\d{6,12})\s+\d*/?\s*(VND|USD)', line, re.IGNORECASE)
                     if acc_match:
                         current_acc_no = acc_match.group(1)
                         current_currency = acc_match.group(2).upper()
                         logger.info(f"VIB: Found account {current_acc_no} ({current_currency})")
                     else:
-                        # Pattern 2: Just account number
+                        # Pattern 2: Just account number with currency
                         acc_match2 = re.search(r'(\d{6,12})', line)
                         if acc_match2:
                             current_acc_no = acc_match2.group(1)
@@ -459,7 +460,7 @@ class VIBParser(BaseBankParser):
                 if any(skip in line.lower() for skip in [
                     'seq. no', 'số ct', 'ngày gd', 'tran date', 'withdrawal', 'deposit',
                     'phát sinh nợ', 'phát sinh có', 'nội dung', 'remarks', 'reference',
-                    'cheque no', 'loại gd', 'effect date'
+                    'cheque no', 'loại gd', 'effect date', 'trang số', 'page'
                 ]):
                     continue
 
@@ -512,6 +513,7 @@ class VIBParser(BaseBankParser):
         VIB format:
         7047991960 29/11/2025  29/11/2025  CRIN                    0        1,217   3,065,877
         7048182367 29/11/2025  29/11/2025  SC60                   50,000        0   3,015,877
+        7048180567 29/11/2025  29/11/2025  SC60                   2.00      0.00     54.00  (USD)
 
         Columns: TxID | TranDate | EffectDate | TranCode | Withdrawal | Deposit | Balance | [Remarks]
 
@@ -544,14 +546,15 @@ class VIBParser(BaseBankParser):
             # For USD: numbers with decimal points like "2.00" or plain "0"
 
             if currency == "USD":
-                # USD format: look for decimal numbers and integers
-                numbers = re.findall(r'(\d+(?:\.\d+)?)', remaining)
+                # USD format: look for decimal numbers like "2.00", "0.00", "54.00"
+                # Or plain integers like "0", "2"
+                numbers = re.findall(r'(\d+\.\d{2}|\d+)', remaining)
             else:
                 # VND format: look for comma-separated numbers and plain integers
                 # Pattern matches: "50,000" or "1,217" or "3,065,877" or "0"
                 numbers = re.findall(r'(\d{1,3}(?:,\d{3})+|\d+)', remaining)
 
-            logger.debug(f"VIB tx {tx_id}: remaining='{remaining[:60]}', numbers={numbers[:5]}")
+            logger.debug(f"VIB tx {tx_id}: currency={currency}, remaining='{remaining[:60]}', numbers={numbers[:5]}")
 
             if len(numbers) < 2:
                 # Not enough numbers - try multiline parsing
@@ -582,6 +585,8 @@ class VIBParser(BaseBankParser):
                     last_num_pos = max(last_num_pos, pos + len(num))
             if last_num_pos < len(remaining):
                 description = remaining[last_num_pos:].strip()
+
+            logger.info(f"VIB: Parsed tx {tx_id} - withdrawal={withdrawal}, deposit={deposit}, currency={currency}")
 
             return BankTransaction(
                 bank_name="VIB",
@@ -959,8 +964,7 @@ class VIBParser(BaseBankParser):
         VIB PDF format has balance at end of the line containing the label:
         "Số dư đầu ngày :        16 November 2025                                3,064,660"
 
-        Or on the same line:
-        "Số dư cuối ngày :       30 November 2025                                3,010,877"
+        Or balance may be on a separate line after the label line.
 
         IMPORTANT: Must avoid picking up:
         - Transaction IDs (10-digit numbers like 7048070432)
@@ -993,9 +997,12 @@ class VIBParser(BaseBankParser):
                         return val
 
                     # Also check next few lines for USD value
-                    for j in range(i + 1, min(i + 4, len(lines))):
+                    for j in range(i + 1, min(i + 6, len(lines))):
                         next_line = lines[j].strip()
-                        usd_match = re.search(r'^(\d+\.\d{2})$', next_line)
+                        # Skip empty lines and labels
+                        if not next_line or any(skip in next_line.lower() for skip in ['opening', 'balance', 'seq']):
+                            continue
+                        usd_match = re.search(r'(\d+\.\d{2})', next_line)
                         if usd_match:
                             val = float(usd_match.group(1))
                             logger.info(f"VIB section balance (USD next line): found {val} for '{label}'")
@@ -1034,15 +1041,34 @@ class VIBParser(BaseBankParser):
                         return val
 
                 # Check next few lines for standalone balance value
-                for j in range(i + 1, min(i + 4, len(lines))):
+                for j in range(i + 1, min(i + 6, len(lines))):
                     next_line = lines[j].strip()
 
-                    # Skip header/label lines
+                    # Skip empty lines
+                    if not next_line:
+                        continue
+
+                    # Skip header/label lines but still check for balance number
                     if any(skip in next_line.lower() for skip in [
-                        'opening', 'ending', 'balance', 'seq.', 'withdrawal', 'deposit',
+                        'opening', 'ending', 'seq.', 'withdrawal', 'deposit'
+                    ]):
+                        continue
+
+                    # Skip month names as standalone (they are part of date, not balance)
+                    if any(month in next_line.lower() for month in [
                         'november', 'december', 'january', 'february', 'march', 'april',
                         'may', 'june', 'july', 'august', 'september', 'october'
                     ]):
+                        # But check if there's also a number on this line (balance after date)
+                        vnd_in_line = re.findall(r'(\d{1,3}(?:,\d{3})+)', next_line)
+                        if vnd_in_line:
+                            num_str = vnd_in_line[-1]
+                            digits_only = num_str.replace(',', '')
+                            if len(digits_only) != 10:  # Not a transaction ID
+                                val = self._parse_number_from_text(num_str)
+                                if val is not None and val >= 0:
+                                    logger.info(f"VIB section balance (VND with month): found {val} for '{label}'")
+                                    return val
                         continue
 
                     # Check for comma-separated number
@@ -1050,6 +1076,14 @@ class VIBParser(BaseBankParser):
                         val = self._parse_number_from_text(next_line)
                         if val is not None and val >= 0:
                             logger.info(f"VIB section balance (VND next line): found {val} for '{label}'")
+                            return val
+
+                    # Check for plain number (e.g., small balance like 74472)
+                    if re.match(r'^\d+$', next_line):
+                        val = float(next_line)
+                        # Skip years and small day numbers
+                        if val > 100 and not re.match(r'^20[2-3]\d$', next_line):
+                            logger.info(f"VIB section balance (plain next line): found {val} for '{label}'")
                             return val
 
         return None
