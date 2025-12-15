@@ -454,7 +454,7 @@ class LLMFinancialAnalyzer:
                 time.sleep(wait_time)
 
                 # Recursive retry
-                return self._call_openai(system_prompt, user_prompt, retry_count + 1, max_retries)
+                return self._call_ai(system_prompt, user_prompt, retry_count + 1, max_retries)
 
             # Handle timeout errors with retry logic
             if isinstance(e, APITimeoutError) and retry_count < max_retries:
@@ -463,7 +463,7 @@ class LLMFinancialAnalyzer:
                 time.sleep(wait_time)
 
                 # Recursive retry
-                return self._call_openai(system_prompt, user_prompt, retry_count + 1, max_retries)
+                return self._call_ai(system_prompt, user_prompt, retry_count + 1, max_retries)
 
             # For non-retryable errors or exhausted retries, raise the error
             print(f"   ❌ OpenAI API call failed: {str(e)}")
@@ -472,6 +472,88 @@ class LLMFinancialAnalyzer:
             print(f"      • Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"OpenAI API call failed: {str(e)}")
 
+    def _call_anthropic(self, system_prompt: str, user_prompt: str, retry_count: int = 0, max_retries: int = 3) -> dict:
+        """Call Anthropic Claude API with retry logic."""
+        import time
+
+        try:
+            total_chars = len(system_prompt) + len(user_prompt)
+            estimated_tokens = total_chars // 4
+
+            print(f"   🔄 Making Anthropic API call...")
+            print(f"      • Model: {self.model}")
+            print(f"      • System prompt: {len(system_prompt):,} chars")
+            print(f"      • User prompt: {len(user_prompt):,} chars")
+            print(f"      • Estimated tokens: ~{estimated_tokens:,}")
+
+            response = self.anthropic_client.messages.create(
+                model=self.model,
+                max_tokens=32000,
+                system=system_prompt,
+                messages=[
+                    {"role": "user", "content": user_prompt}
+                ]
+            )
+
+            print(f"   ✅ Anthropic API call completed successfully")
+
+            # Update progress by increment after successful API call
+            if self.progress_callback:
+                self.current_progress = min(self.current_progress + self.progress_increment, 100)
+                self.progress_callback(self.current_progress, f"AI analysis in progress (~{estimated_tokens:,} tokens processed)")
+
+            # Extract content from response
+            content = response.content[0].text if response.content else ""
+
+            # Get token counts
+            prompt_tokens = response.usage.input_tokens if response.usage else 0
+            completion_tokens = response.usage.output_tokens if response.usage else 0
+            total_tokens = prompt_tokens + completion_tokens
+
+            print(f"      • Input tokens: {prompt_tokens:,}")
+            print(f"      • Output tokens: {completion_tokens:,}")
+            print(f"      • Stop reason: {response.stop_reason}")
+
+            # Return in consistent format
+            return {
+                "message": {
+                    "content": content
+                },
+                "prompt_eval_count": prompt_tokens,
+                "eval_count": completion_tokens,
+                "total_tokens": total_tokens
+            }
+
+        except Exception as e:
+            error_msg = str(e)
+
+            # Handle rate limit errors with retry logic
+            if "rate_limit" in error_msg.lower() and retry_count < max_retries:
+                wait_time = 15
+                print(f"   ⚠️  Rate limit hit. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
+                time.sleep(wait_time)
+                return self._call_anthropic(system_prompt, user_prompt, retry_count + 1, max_retries)
+
+            # Handle timeout errors
+            if "timeout" in error_msg.lower() and retry_count < max_retries:
+                wait_time = 5
+                print(f"   ⚠️  Request timed out. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
+                time.sleep(wait_time)
+                return self._call_anthropic(system_prompt, user_prompt, retry_count + 1, max_retries)
+
+            # For non-retryable errors or exhausted retries, raise the error
+            print(f"   ❌ Anthropic API call failed: {str(e)}")
+            print(f"      • Error type: {type(e)}")
+            import traceback
+            print(f"      • Traceback: {traceback.format_exc()}")
+            raise RuntimeError(f"Anthropic API call failed: {str(e)}")
+
+    def _call_ai(self, system_prompt: str, user_prompt: str, retry_count: int = 0, max_retries: int = 3) -> dict:
+        """Route AI call to appropriate provider (OpenAI or Anthropic)."""
+        if self.is_claude:
+            return self._call_anthropic(system_prompt, user_prompt, retry_count, max_retries)
+        else:
+            return self._call_ai(system_prompt, user_prompt, retry_count, max_retries)
 
     # ===========================
     # Main entrypoints
@@ -585,7 +667,7 @@ class LLMFinancialAnalyzer:
                 print(f"   🚀 Attempt {attempt}: OpenAI GPT-4o processing")
                 print(f"   🔄 Sending complete raw Excel data to AI...")
 
-                response = self._call_openai(
+                response = self._call_ai(
                     system_prompt=self._get_raw_excel_system_prompt(),
                     user_prompt=prompt
                 )
@@ -766,7 +848,7 @@ class LLMFinancialAnalyzer:
             print(f"   🚀 Attempt {attempt}: OpenAI GPT processing")
             print(f"   🔄 Sending request to OpenAI...")
 
-            response = self._call_openai(
+            response = self._call_ai(
                 system_prompt=self._get_system_prompt(),
                 user_prompt=prompt
             )
@@ -790,7 +872,7 @@ class LLMFinancialAnalyzer:
             try:
                 print(f"   🔄 Retrying with OpenAI API...")
 
-                response = self._call_openai(
+                response = self._call_ai(
                     system_prompt=self._get_raw_excel_system_prompt(),
                     user_prompt=prompt
                 )
@@ -814,7 +896,7 @@ class LLMFinancialAnalyzer:
                 try:
                     print(f"   🔄 Final retry with OpenAI API...")
 
-                    response = self._call_openai(
+                    response = self._call_ai(
                         system_prompt=self._get_raw_excel_system_prompt(),
                         user_prompt=prompt
                     )
@@ -957,7 +1039,7 @@ class LLMFinancialAnalyzer:
             print(f"   🔄 Processing BS chunk {i}/{len(bs_chunks)}...")
             chunk_prompt = self._create_chunk_extraction_prompt(bs_chunk, "", subsidiary, filename, f"BS Chunk {i}")
 
-            chunk_response = self._call_openai(
+            chunk_response = self._call_ai(
                 system_prompt=self._get_account_extraction_system_prompt(),
                 user_prompt=chunk_prompt
             )
@@ -973,7 +1055,7 @@ class LLMFinancialAnalyzer:
             print(f"   🔄 Processing PL chunk {i}/{len(pl_chunks)}...")
             chunk_prompt = self._create_chunk_extraction_prompt("", pl_chunk, subsidiary, filename, f"PL Chunk {i}")
 
-            chunk_response = self._call_openai(
+            chunk_response = self._call_ai(
                 system_prompt=self._get_account_extraction_system_prompt(),
                 user_prompt=chunk_prompt
             )
@@ -1005,7 +1087,7 @@ class LLMFinancialAnalyzer:
         consolidation_prompt = self._create_consolidation_prompt(all_extracted_accounts, subsidiary, filename)
 
         try:
-            step2_response = self._call_openai(
+            step2_response = self._call_ai(
                 system_prompt=self._get_consolidation_system_prompt(),
                 user_prompt=consolidation_prompt
             )
@@ -1074,7 +1156,7 @@ class LLMFinancialAnalyzer:
         step3_prompt = self._create_rule_application_prompt(grouped_accounts, subsidiary, filename, config)
 
         try:
-            step3_response = self._call_openai(
+            step3_response = self._call_ai(
                 system_prompt=self._get_raw_excel_system_prompt(),  # Use the 22-rule prompt
                 user_prompt=step3_prompt
             )
@@ -1434,7 +1516,7 @@ The "analysis_type" field should match the rule ID and name from the 22 rules ab
             try:
                 print(f"   🚀 Sending comprehensive revenue analysis request to AI...")
 
-                response = self._call_openai(
+                response = self._call_ai(
                     system_prompt=self._get_revenue_analysis_system_prompt(),
                     user_prompt=prompt
                 )
