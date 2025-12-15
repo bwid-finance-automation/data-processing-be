@@ -354,11 +354,11 @@ class KBANKParser(BaseBankParser):
         """
         Parse KBANK transactions from OCR text.
 
-        KBANK PDF format:
-        - Header with report run date (IGNORE)
-        - "Beginning Balance" line with opening balance
-        - Transaction lines: DD/MM/YYYY HH:MM AM/PM Description    Debit    Credit    Balance
-        - "Cộng phát sinh Total" line with totals
+        KBANK PDF OCR format (multi-line):
+        - Transaction starts with: DD/MM/YYYY HH:MM AM/PM Description
+        - May have additional description lines
+        - Followed by 3 amount lines: Debit, Credit, Balance
+        - "Cộng phát sinh Total" marks end of transactions
         """
         transactions = []
 
@@ -369,29 +369,40 @@ class KBANKParser(BaseBankParser):
         lines = text.split('\n')
         lines = [line.strip() for line in lines if line.strip()]
 
-        # Find transaction section - after header line with "Ngày" or "Date"
-        in_transaction_section = False
+        # Skip patterns for metadata lines
+        skip_patterns = [
+            'user:', 'run:', 'system:', 'report:', 'program:', 'file(s):',
+            'order by:', 'input:', 'where', 'dep.cid', 'hist.', 'mã báo cáo',
+            'ngày hệ thống', 'ngày chạy', 'người in', 'trang:', 'chi nhánh',
+            'branch:', 'kính gửi', 'dear customer', 'địa chỉ', 'address',
+            'ngân hàng', 'loại tiền tệ', 'currency', 'giao dịch viên',
+            'teller', 'kiểm soát', 'supervisor', 'customer sub-type',
+            '====', '----', 'đơn vị', 'kasikornbank', 'sao kê chi tiết',
+            'transaction statement', 'từ ngày', 'from date', 'đến ngày', 'to date',
+            'ngày date', 'giờ time', 'nội dung giao dịch', 'transaction comment',
+            'doanh số phát sinh', 'turnover', 'số dư sau giao dịch', 'balance'
+        ]
 
-        for i, line in enumerate(lines):
-            # Skip header/metadata lines
-            if any(skip in line.lower() for skip in [
-                'user:', 'run:', 'system:', 'report:', 'program:', 'file(s):',
-                'order by:', 'input:', 'where', 'dep.cid', 'hist.', 'mã báo cáo',
-                'ngày hệ thống', 'ngày chạy', 'người in', 'trang:', 'chi nhánh',
-                'branch:', 'kính gửi', 'dear customer', 'địa chỉ', 'address',
-                'ngân hàng', 'loại tiền tệ', 'currency', 'giao dịch viên',
-                'teller', 'kiểm soát', 'supervisor', 'customer sub-type',
-                '====', '----', 'cộng phát sinh', 'total'
-            ]):
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            line_lower = line.lower()
+
+            # Stop at totals line
+            if 'cộng phát sinh' in line_lower or 'total' in line_lower:
+                break
+
+            # Skip metadata/header lines
+            if any(skip in line_lower for skip in skip_patterns):
+                i += 1
                 continue
 
-            # Skip "Beginning Balance" line (it's not a transaction)
-            if 'beginning balance' in line.lower():
-                in_transaction_section = True
+            # Skip "Beginning Balance" line (not a transaction, just opening balance)
+            if 'beginning balance' in line_lower:
+                i += 1
                 continue
 
-            # Look for transaction pattern: DD/MM/YYYY HH:MM AM/PM Description amounts
-            # Pattern: date at start, followed by time, then description and amounts
+            # Look for transaction start: DD/MM/YYYY HH:MM AM/PM Description
             tx_match = re.match(
                 r'^(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}:\d{2}\s*(?:AM|PM)?)\s+(.+)',
                 line,
@@ -401,42 +412,73 @@ class KBANKParser(BaseBankParser):
             if tx_match:
                 date_str = tx_match.group(1)
                 time_str = tx_match.group(2)
-                rest = tx_match.group(3)
+                description_parts = [tx_match.group(3)]
 
-                # Extract amounts from the rest of the line
-                # Format: Description    Debit    Credit    Balance
-                # Amounts are numbers with commas and decimals: 1,234,567.00
-                amounts = re.findall(r'[\d,]+\.\d{2}', rest)
-                amounts = [self._parse_ocr_number(a) for a in amounts]
-                amounts = [a for a in amounts if a is not None]
+                # Collect amounts - look at following lines
+                amounts = []
+                j = i + 1
 
-                # Get description (everything before the first amount)
-                description = rest
-                if amounts:
-                    # Find position of first amount and take text before it
-                    first_amount_match = re.search(r'[\d,]+\.\d{2}', rest)
-                    if first_amount_match:
-                        description = rest[:first_amount_match.start()].strip()
+                while j < len(lines) and len(amounts) < 3:
+                    next_line = lines[j].strip()
 
-                # KBANK format: Debit (Nợ), Credit (Có), Balance
-                # If 3 amounts: [debit, credit, balance]
-                # If 2 amounts and first is 0: [debit=0, credit, balance] or [debit, credit=0, balance]
+                    # Check if this line is just an amount (e.g., "33,000.00" or "0.00")
+                    amount_match = re.match(r'^[\d,]+\.\d{2}$', next_line)
+                    if amount_match:
+                        parsed = self._parse_ocr_number(next_line)
+                        if parsed is not None:
+                            amounts.append(parsed)
+                        j += 1
+                    # Check if next line is a new transaction (date pattern)
+                    elif re.match(r'^\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}', next_line):
+                        break
+                    # Check if it's a stop pattern
+                    elif any(skip in next_line.lower() for skip in ['cộng phát sinh', 'total', 'beginning balance']):
+                        break
+                    # Otherwise it might be additional description
+                    elif next_line and not any(skip in next_line.lower() for skip in skip_patterns):
+                        # Check if line contains amounts mixed with text
+                        line_amounts = re.findall(r'[\d,]+\.\d{2}', next_line)
+                        if line_amounts:
+                            # Extract amounts from this line
+                            for amt_str in line_amounts:
+                                parsed = self._parse_ocr_number(amt_str)
+                                if parsed is not None:
+                                    amounts.append(parsed)
+                            # Get text before first amount as description
+                            first_amt_pos = next_line.find(line_amounts[0])
+                            if first_amt_pos > 0:
+                                desc_text = next_line[:first_amt_pos].strip()
+                                if desc_text:
+                                    description_parts.append(desc_text)
+                        else:
+                            # Pure description line
+                            description_parts.append(next_line)
+                        j += 1
+                    else:
+                        j += 1
+
+                # Build final description
+                description = ' '.join(description_parts).strip()
+
+                # Parse amounts: [Debit, Credit, Balance]
                 debit_val = None
                 credit_val = None
 
                 if len(amounts) >= 3:
-                    # [debit, credit, balance]
+                    # Standard format: [debit, credit, balance]
                     if amounts[0] > 0:
                         debit_val = amounts[0]
                     if amounts[1] > 0:
                         credit_val = amounts[1]
                 elif len(amounts) == 2:
-                    # Could be [debit/credit, balance] - need context
-                    # Check description for hints
-                    if amounts[0] > 0:
-                        credit_val = amounts[0]  # Default to credit for positive amounts
+                    # Could be [amount, balance] - check description for hints
+                    desc_lower = description.lower()
+                    if 'withdrawal' in desc_lower or 'debit' in desc_lower:
+                        debit_val = amounts[0] if amounts[0] > 0 else None
+                    else:
+                        credit_val = amounts[0] if amounts[0] > 0 else None
 
-                # Only create transaction if we have at least one non-zero amount
+                # Create transaction if we have valid amounts
                 if debit_val or credit_val:
                     tx = BankTransaction(
                         bank_name="KBANK",
@@ -453,16 +495,20 @@ class KBANKParser(BaseBankParser):
                     )
                     transactions.append(tx)
 
+                # Move to next unprocessed line
+                i = j
+            else:
+                i += 1
+
         return transactions
 
     def parse_balances_from_text(self, text: str, file_name: str) -> Optional[BankBalance]:
         """
         Parse KBANK balance from OCR text.
 
-        KBANK PDF format:
-        - "Beginning Balance" line has opening balance at the end
-        - Last transaction line has closing balance (last amount)
-        - Or "Cộng phát sinh Total" line may have final balance
+        KBANK PDF OCR format (multi-line):
+        - "Beginning Balance" followed by opening balance on next line
+        - "Cộng phát sinh Total" followed by 3 amounts: debit total, credit total, closing balance
         """
         acc_no = self._extract_account_from_ocr(text)
         currency = self._extract_currency_from_ocr(text)
@@ -472,46 +518,60 @@ class KBANKParser(BaseBankParser):
 
         opening = 0.0
         closing = 0.0
-        last_balance = 0.0
 
         for i, line in enumerate(lines):
             line_lower = line.lower()
 
             # Opening balance - "Beginning Balance" line
+            # OCR format: amount may be on same line or next line
             if "beginning balance" in line_lower:
-                # Extract the last number on this line (the balance amount)
+                # First try same line
                 amounts = re.findall(r'[\d,]+\.\d{2}', line)
                 if amounts:
                     val = self._parse_ocr_number(amounts[-1])
                     if val:
                         opening = val
+                # If no amount on same line, check next line
+                elif i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    if re.match(r'^[\d,]+\.\d{2}$', next_line):
+                        val = self._parse_ocr_number(next_line)
+                        if val:
+                            opening = val
 
-            # Track transaction lines - the last balance column value becomes closing
-            tx_match = re.match(
-                r'^(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}:\d{2}\s*(?:AM|PM)?)\s+(.+)',
-                line,
-                re.IGNORECASE
-            )
-            if tx_match:
-                rest = tx_match.group(3)
-                amounts = re.findall(r'[\d,]+\.\d{2}', rest)
-                if amounts:
-                    # Last amount is the balance
-                    val = self._parse_ocr_number(amounts[-1])
-                    if val:
-                        last_balance = val
-
-            # Also check "Cộng phát sinh Total" line for final balance
-            if 'cộng phát sinh' in line_lower or 'total' in line_lower:
+            # Closing balance from "Cộng phát sinh Total" section
+            # OCR format: 3 amounts on following lines (debit total, credit total, closing balance)
+            if 'cộng phát sinh' in line_lower or ('total' in line_lower and i > 10):
+                # First try same line
                 amounts = re.findall(r'[\d,]+\.\d{2}', line)
                 if amounts and len(amounts) >= 3:
-                    # Format: Debit Total, Credit Total, Final Balance
                     val = self._parse_ocr_number(amounts[-1])
                     if val:
-                        last_balance = val
+                        closing = val
+                else:
+                    # Look for amounts on following lines
+                    total_amounts = []
+                    j = i + 1
+                    while j < len(lines) and len(total_amounts) < 3:
+                        next_line = lines[j].strip()
+                        if re.match(r'^[\d,]+\.\d{2}$', next_line):
+                            val = self._parse_ocr_number(next_line)
+                            if val is not None:
+                                total_amounts.append(val)
+                        elif re.match(r'^\d{1,2}/\d{1,2}/\d{4}', next_line):
+                            # Hit a new transaction, stop
+                            break
+                        j += 1
 
-        # Closing balance is the last seen balance
-        closing = last_balance if last_balance > 0 else opening
+                    # Last amount is closing balance
+                    if len(total_amounts) >= 3:
+                        closing = total_amounts[-1]
+                    elif total_amounts:
+                        closing = total_amounts[-1]
+
+        # If no closing found, use opening as fallback
+        if closing == 0 and opening > 0:
+            closing = opening
 
         if opening == 0 and closing == 0:
             return None
@@ -565,7 +625,7 @@ class KBANKParser(BaseBankParser):
 
         try:
             num = float(cleaned)
-            return num if num > 0 else None
+            return num  # Return 0 too, important for amount arrays
         except (ValueError, TypeError):
             return None
 

@@ -11,7 +11,7 @@ from .base_parser import BaseBankParser
 
 
 class VCBParser(BaseBankParser):
-    """Parser for VCB (Vietcombank) statements - handles both Template 1 and Template 2."""
+    """Parser for VCB (Vietcombank) statements - handles multiple templates."""
 
     @property
     def bank_name(self) -> str:
@@ -21,10 +21,11 @@ class VCBParser(BaseBankParser):
         """
         Detect if file is VCB bank statement.
 
-        Logic from fxLooksLike_VCB:
-        - Template 1: Has "VCB CASHUP" or "STATEMENT OF ACCOUNT"
+        Supported templates:
+        - Template 1 (CashUp): Has "VCB CASHUP" or "SAO KÊ TÀI KHOẢN STATEMENT OF ACCOUNT"
+        - Template 2 (Simple): Has "NGÀY GIAO DỊCH" + "SỐ THAM CHIẾU" + "SỐ TIỀN"
         - Template 3 (HTML): Has "SAO KÊ TÀI KHOẢN" and HTML tags
-        - Read first 20 rows for detection
+        - Template 4 (Multi): Has "STATEMENT OF ACCOUNT" with account sections
         """
         try:
             # Check if HTML file
@@ -34,6 +35,12 @@ class VCBParser(BaseBankParser):
 
             # Excel file
             xls = self.get_excel_file(file_bytes)
+
+            # Check sheet name for VCB CashUp format
+            sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
+            if "VCBACCOUNTDETAIL" in sheet_name.upper():
+                return True
+
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Get first 20 rows
@@ -46,8 +53,13 @@ class VCBParser(BaseBankParser):
 
             txt = " ".join(all_text)
 
-            # Check for VCB markers (Template 1)
-            is_vcb = "VCB CASHUP" in txt or "STATEMENT OF ACCOUNT" in txt
+            # Check for VCB markers
+            # Template 1: VCB CashUp format with bilingual header
+            has_cashup = "VCB CASHUP" in txt
+            has_sao_ke_statement = "SAO KÊ TÀI KHOẢN STATEMENT OF ACCOUNT" in txt
+            has_statement_of_account = "STATEMENT OF ACCOUNT" in txt
+
+            is_vcb = has_cashup or has_sao_ke_statement or has_statement_of_account
 
             return is_vcb
 
@@ -56,14 +68,17 @@ class VCBParser(BaseBankParser):
 
     def parse_transactions(self, file_bytes: bytes, file_name: str) -> List[BankTransaction]:
         """
-        Parse VCB transactions - handles BOTH templates and HTML.
+        Parse VCB transactions - handles multiple templates and HTML.
 
-        Logic from fxParse_VCB_Transactions:
-        - Template detection: Simple format has "Ngày giao dịch" as column 0, Multi has "STT" as column 0
-        - Map: Debit = "Credit/Remittance" (CÓ), Credit = "Debit" (NỢ) - SWAPPED!
-        - Template 1 (Multi-account): Multiple account sections
-        - Template 2 (Simple): Single account
-        - Template 3 (HTML): HTML table format
+        Templates:
+        - CashUp: Sheet name contains "VCBACCOUNTDETAIL", has merged date/doc column
+        - Simple: Has "Ngày giao dịch|Số tham chiếu|Số tiền" pattern
+        - Multi: Multiple account sections with "SỐ TÀI KHOẢN/ACCOUNT NUMBER"
+        - HTML: HTML table format
+
+        Column mapping (SWAPPED):
+        - VCB "Số tiền ghi nợ/Debit" = money OUT = our Credit
+        - VCB "Số tiền ghi có/Credit" = money IN = our Debit
         """
         try:
             # Check if HTML file
@@ -72,6 +87,12 @@ class VCBParser(BaseBankParser):
 
             # Excel file
             xls = self.get_excel_file(file_bytes)
+
+            # Check for CashUp template (VCBACCOUNTDETAIL sheet name)
+            sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
+            if "VCBACCOUNTDETAIL" in sheet_name.upper():
+                return self._parse_cashup_template(xls)
+
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Detect Template ==========
@@ -104,6 +125,12 @@ class VCBParser(BaseBankParser):
 
             # Excel file
             xls = self.get_excel_file(file_bytes)
+
+            # Check for CashUp template (VCBACCOUNTDETAIL sheet name)
+            sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
+            if "VCBACCOUNTDETAIL" in sheet_name.upper():
+                return self._parse_cashup_balances(xls)
+
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # ========== Find Account Sections ==========
@@ -145,6 +172,126 @@ class VCBParser(BaseBankParser):
             print(f"Error parsing VCB balances: {e}")
             return None
 
+    def parse_all_balances_from_bytes(self, file_bytes: bytes, file_name: str) -> List[BankBalance]:
+        """
+        Parse ALL account balances from VCB file (multi-account support).
+
+        Returns list of BankBalance objects, one per account found.
+        """
+        try:
+            # Check if HTML file
+            if self._is_html_file(file_bytes):
+                bal = self._parse_html_balances(file_bytes)
+                return [bal] if bal else []
+
+            # Excel file
+            xls = self.get_excel_file(file_bytes)
+
+            # Check for CashUp template (VCBACCOUNTDETAIL sheet name)
+            sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
+            if "VCBACCOUNTDETAIL" in sheet_name.upper():
+                return self._parse_all_cashup_balances(xls)
+
+            # Default: single balance
+            bal = self.parse_balances(file_bytes, file_name)
+            return [bal] if bal else []
+
+        except Exception as e:
+            print(f"Error parsing VCB all balances: {e}")
+            return []
+
+    def _parse_cashup_balances(self, xls: pd.ExcelFile) -> Optional[BankBalance]:
+        """Parse balance from first account in CashUp template."""
+        balances = self._parse_all_cashup_balances(xls)
+        return balances[0] if balances else None
+
+    def _parse_all_cashup_balances(self, xls: pd.ExcelFile) -> List[BankBalance]:
+        """
+        Parse ALL account balances from CashUp template.
+
+        Balance format:
+        - Row with "Số dư đầu kỳ/ Opening balance" has value in column 2 (e.g., "3,359,662,231 VND")
+        - Row with "Số dư cuối kỳ/ Closing balance" has value in column 2
+        """
+        sheet = pd.read_excel(xls, sheet_name=0, header=None)
+        all_balances = []
+
+        # Find all account sections
+        # Note: The text may have newline between Vietnamese and English parts
+        section_starts = []
+        for idx, row in sheet.iterrows():
+            row_text = " ".join([self.to_text(cell).replace('\n', ' ') for cell in row])
+            if "SAO KÊ TÀI KHOẢN" in row_text and "STATEMENT OF ACCOUNT" in row_text:
+                section_starts.append(int(idx))
+
+        if not section_starts:
+            section_starts = [0]
+
+        # Create section ranges
+        sections = []
+        for i, start_idx in enumerate(section_starts):
+            end_idx = section_starts[i + 1] - 1 if i < len(section_starts) - 1 else len(sheet) - 1
+            sections.append({'start': start_idx, 'end': end_idx})
+
+        # Parse each account section
+        for section in sections:
+            section_rows = sheet.iloc[section['start']:section['end'] + 1]
+
+            # Extract account number
+            acc_no = None
+            for _, row in section_rows.head(15).iterrows():
+                row_text = " ".join([self.to_text(cell) for cell in row])
+                if "Số tài khoản" in row_text or "Account number" in row_text:
+                    if len(row) > 2:
+                        acc_text = self.to_text(row.iloc[2])
+                        digits = ''.join(c for c in acc_text if c.isdigit())
+                        if 8 <= len(digits) <= 15:
+                            acc_no = digits
+                            break
+
+            # Extract currency
+            currency = "VND"
+            for _, row in section_rows.head(15).iterrows():
+                row_text = " ".join([self.to_text(cell).upper() for cell in row])
+                if "LOẠI TIỀN" in row_text or "CURRENCY" in row_text:
+                    if len(row) > 2:
+                        curr_val = self.to_text(row.iloc[2]).upper().strip()
+                        if curr_val in ["VND", "USD", "EUR", "JPY", "CNY"]:
+                            currency = curr_val
+                            break
+
+            # Extract opening balance (row with "Số dư đầu kỳ/ Opening balance")
+            opening = None
+            for _, row in section_rows.head(20).iterrows():
+                row_text = " ".join([self.to_text(cell) for cell in row])
+                if "Số dư đầu kỳ" in row_text or "Opening balance" in row_text:
+                    if len(row) > 2:
+                        # Value is in column 2, may have currency suffix
+                        val_text = self.to_text(row.iloc[2])
+                        opening = self.fix_number(val_text)
+                        break
+
+            # Extract closing balance (row with "Số dư cuối kỳ/ Closing balance")
+            closing = None
+            for _, row in section_rows.iterrows():
+                row_text = " ".join([self.to_text(cell) for cell in row])
+                if "Số dư cuối kỳ" in row_text or "Closing balance" in row_text:
+                    if len(row) > 2:
+                        val_text = self.to_text(row.iloc[2])
+                        closing = self.fix_number(val_text)
+                        break
+
+            if acc_no:
+                all_balances.append(BankBalance(
+                    bank_name="VCB",
+                    acc_no=acc_no,
+                    currency=currency,
+                    opening_balance=opening or 0.0,
+                    closing_balance=closing or 0.0
+                ))
+
+        return all_balances
+
     # ========== VCB-Specific Helper Methods ==========
 
     def _is_simple_template(self, sheet: pd.DataFrame) -> bool:
@@ -158,6 +305,152 @@ class VCBParser(BaseBankParser):
             if "NGÀY GIAO DỊCH" in row_text and "SỐ THAM CHIẾU" in row_text and "SỐ TIỀN" in row_text:
                 return True
         return False
+
+    def _parse_cashup_template(self, xls: pd.ExcelFile) -> List[BankTransaction]:
+        """
+        Parse VCB CashUp Template (VCBACCOUNTDETAILBASEXLS format).
+
+        This template has:
+        - Multiple account sections, each starting with "SAO KÊ TÀI KHOẢN STATEMENT OF ACCOUNT"
+        - Merged date/doc column: "DD/MM/YYYY                       DOCNO"
+        - 6 columns: STT, Date+Doc, Debit, Credit, Balance, Description
+        - Bilingual labels throughout
+        """
+        sheet = pd.read_excel(xls, sheet_name=0, header=None)
+        all_transactions = []
+
+        # Find all account sections by looking for "SAO KÊ TÀI KHOẢN" and "STATEMENT OF ACCOUNT"
+        # Note: The text may have newline between Vietnamese and English parts
+        section_starts = []
+        for idx, row in sheet.iterrows():
+            row_text = " ".join([self.to_text(cell).replace('\n', ' ') for cell in row])
+            if "SAO KÊ TÀI KHOẢN" in row_text and "STATEMENT OF ACCOUNT" in row_text:
+                section_starts.append(int(idx))
+
+        if not section_starts:
+            # Fallback: treat entire sheet as one section
+            section_starts = [0]
+
+        # Create section ranges
+        sections = []
+        for i, start_idx in enumerate(section_starts):
+            end_idx = section_starts[i + 1] - 1 if i < len(section_starts) - 1 else len(sheet) - 1
+            sections.append({'start': start_idx, 'end': end_idx})
+
+        # Parse each account section
+        for section in sections:
+            section_rows = sheet.iloc[section['start']:section['end'] + 1]
+
+            # ========== Extract Account Number ==========
+            acc_no = None
+            for _, row in section_rows.head(15).iterrows():
+                row_text = " ".join([self.to_text(cell) for cell in row])
+                if "Số tài khoản" in row_text or "Account number" in row_text:
+                    # Account number is in column 2
+                    if len(row) > 2:
+                        acc_text = self.to_text(row.iloc[2])
+                        digits = ''.join(c for c in acc_text if c.isdigit())
+                        if 8 <= len(digits) <= 15:
+                            acc_no = digits
+                            break
+
+            # ========== Extract Currency ==========
+            currency = "VND"
+            for _, row in section_rows.head(15).iterrows():
+                row_text = " ".join([self.to_text(cell).upper() for cell in row])
+                if "LOẠI TIỀN" in row_text or "CURRENCY" in row_text:
+                    if len(row) > 2:
+                        curr_val = self.to_text(row.iloc[2]).upper().strip()
+                        if curr_val in ["VND", "USD", "EUR", "JPY", "CNY"]:
+                            currency = curr_val
+                            break
+
+            # ========== Find Transaction Header Row ==========
+            header_idx = None
+            for idx, row in section_rows.iterrows():
+                row_text = "|".join([self.to_text(cell).upper() for cell in row])
+                # Look for header with STT and Debit/Credit columns
+                if ("STT" in row_text or "NO" in row_text) and \
+                   ("GHI NỢ" in row_text or "DEBIT" in row_text) and \
+                   ("GHI CÓ" in row_text or "CREDIT" in row_text):
+                    header_idx = int(idx)
+                    break
+
+            if header_idx is None:
+                continue
+
+            # ========== Parse Transactions ==========
+            # Start from row after header
+            for idx in range(header_idx + 1, section['end'] + 1):
+                if idx >= len(sheet):
+                    break
+
+                row = sheet.iloc[idx]
+                row_text = " ".join([self.to_text(cell) for cell in row])
+
+                # Skip empty rows
+                if not row_text.strip():
+                    continue
+
+                # Stop at totals row
+                if "Tổng số" in row_text or "Total" in row_text:
+                    break
+
+                # Skip non-data rows (must have STT number in col 0)
+                stt_val = self.to_text(row.iloc[0]).strip() if len(row) > 0 else ""
+                if not stt_val or not stt_val.isdigit():
+                    continue
+
+                # Column structure:
+                # Col 0: STT (sequence number)
+                # Col 1: "DD/MM/YYYY                       DOCNO" (merged date + doc)
+                # Col 2: Số tiền ghi nợ/Debit (money OUT = our Credit)
+                # Col 3: Số tiền ghi có/Credit (money IN = our Debit)
+                # Col 4: Số dư/Balance
+                # Col 5: Nội dung/Description
+
+                # Parse date from merged column
+                date_doc_val = self.to_text(row.iloc[1]) if len(row) > 1 else ""
+                date_val = None
+                tx_id = ""
+                if date_doc_val:
+                    # Extract date (first 10 chars: DD/MM/YYYY)
+                    date_match = re.match(r'^(\d{2}/\d{2}/\d{4})', date_doc_val.strip())
+                    if date_match:
+                        date_val = self._fix_date_vcb(date_match.group(1))
+                    # Extract doc number (after spaces)
+                    doc_match = re.search(r'\s{2,}(\S+)$', date_doc_val)
+                    if doc_match:
+                        tx_id = doc_match.group(1)
+
+                # Get amounts (SWAPPED)
+                debit_val = self.fix_number(row.iloc[2]) if len(row) > 2 else None  # Money out = our Credit
+                credit_val = self.fix_number(row.iloc[3]) if len(row) > 3 else None  # Money in = our Debit
+
+                # Skip if both are zero/None
+                if (debit_val is None or debit_val == 0) and (credit_val is None or credit_val == 0):
+                    continue
+
+                # Get description
+                desc = self.to_text(row.iloc[5]) if len(row) > 5 else ""
+
+                tx = BankTransaction(
+                    bank_name="VCB",
+                    acc_no=acc_no or "",
+                    debit=credit_val if credit_val else None,  # SWAPPED: Ghi có = money in = our Debit
+                    credit=debit_val if debit_val else None,   # SWAPPED: Ghi nợ = money out = our Credit
+                    date=date_val,
+                    description=desc,
+                    currency=currency,
+                    transaction_id=tx_id,
+                    beneficiary_bank="",
+                    beneficiary_acc_no="",
+                    beneficiary_acc_name=""
+                )
+
+                all_transactions.append(tx)
+
+        return all_transactions
 
     def _parse_simple_template(self, sheet: pd.DataFrame) -> List[BankTransaction]:
         """Parse VCB Simple Template (Vietcombank_Account_Statement format)."""
@@ -443,13 +736,7 @@ class VCBParser(BaseBankParser):
         if value is None or pd.isna(value):
             return None
 
-        # Try as Excel date number first
-        try:
-            return pd.to_datetime(value).date()
-        except:
-            pass
-
-        # Try parsing text
+        # Try parsing text first
         txt = str(value).strip()
         if not txt:
             return None
@@ -458,15 +745,21 @@ class VCBParser(BaseBankParser):
         if " " in txt:
             txt = txt.split(" ")[0]
 
+        # Try DD/MM/YYYY format (most common VCB format)
+        try:
+            return datetime.strptime(txt, "%d/%m/%Y").date()
+        except:
+            pass
+
         # Try YYYY-MM-DD format (HTML format)
         try:
             return datetime.strptime(txt, "%Y-%m-%d").date()
         except:
             pass
 
-        # Try DD/MM/YYYY format
+        # Try as Excel date number (fallback)
         try:
-            return datetime.strptime(txt, "%d/%m/%Y").date()
+            return pd.to_datetime(value, dayfirst=True).date()
         except:
             pass
 

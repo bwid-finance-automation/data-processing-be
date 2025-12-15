@@ -7,9 +7,15 @@ import csv
 from io import BytesIO, StringIO
 from collections import defaultdict
 
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+
 from app.domain.finance.bank_statement_parser.models import BankStatement, BankTransaction, BankBalance
 from .bank_parsers.parser_factory import ParserFactory
 from .gemini_ocr_service import GeminiOCRService
+from app.shared.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class ParseBankStatementsUseCase:
@@ -960,5 +966,62 @@ class ParseBankStatementsUseCase:
                 }])
                 df_info.to_excel(writer, sheet_name="Info", index=False)
 
+            # ========== Apply Styling ==========
+            self._apply_excel_styling(writer)
+
         output.seek(0)
         return output.read()
+
+    def _apply_excel_styling(self, writer: pd.ExcelWriter) -> None:
+        """
+        Apply lightweight styling to Excel sheets.
+        - Header row: blue background, white bold text
+        - Alternating row colors (zebra stripes)
+        - Auto column width
+        """
+        # Define styles
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        # Alternating row colors (light blue for even rows - matches header)
+        alt_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+
+        workbook = writer.book
+
+        for sheet_name in workbook.sheetnames:
+            ws = workbook[sheet_name]
+
+            # Style header row (row 1)
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = header_alignment
+
+            # Apply alternating row colors (skip header row)
+            for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+                if row_idx % 2 == 0:  # Even rows get light gray
+                    for cell in row:
+                        cell.fill = alt_fill
+
+            # Auto-fit column widths (with max limit to keep file light)
+            for col_idx, column in enumerate(ws.columns, 1):
+                max_length = 0
+                column_letter = get_column_letter(col_idx)
+
+                for cell in column:
+                    try:
+                        cell_value = str(cell.value) if cell.value else ""
+                        # Handle multiline cells
+                        cell_length = max(len(line) for line in cell_value.split('\n')) if cell_value else 0
+                        if cell_length > max_length:
+                            max_length = cell_length
+                    except:
+                        pass
+
+                # Set width with min/max limits
+                adjusted_width = min(max(max_length + 2, 8), 50)
+                ws.column_dimensions[column_letter].width = adjusted_width
+
+            # Freeze header row
+            ws.freeze_panes = "A2"

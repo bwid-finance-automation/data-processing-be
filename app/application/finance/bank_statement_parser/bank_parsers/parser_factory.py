@@ -13,6 +13,7 @@ from .bidv_parser import BIDVParser
 from .vtb_parser import VTBParser
 from .vcb_parser import VCBParser
 from .woori_parser import WooriParser
+from .scb_parser import SCBParser
 
 
 class ParserFactory:
@@ -20,11 +21,13 @@ class ParserFactory:
 
     # Register all available parsers here
     # NOTE: Order matters! More specific parsers should come before generic ones
+    # - VCB must come early (VCBACCOUNTDETAIL sheet name is unique, but has bilingual "Opening balance :" that matches Woori)
     # - OCB and Woori must come before MBB (MBB has broad detection that can match others)
     # - Banks with unique markers (ACB, VIB, CTBC, KBANK) can be in any order
     _parsers: List[BaseBankParser] = [
         ACBParser(),
         VIBParser(),
+        VCBParser(),      # Must be early (has "Opening balance :" that can match Woori)
         CTBCParser(),
         KBANKParser(),
         SINOPACParser(),
@@ -33,7 +36,7 @@ class ParserFactory:
         MBBParser(),      # Has broader detection patterns
         BIDVParser(),
         VTBParser(),
-        VCBParser(),
+        SCBParser(),      # Supports PDF via OCR
         # Add more parsers here as they are implemented
     ]
 
