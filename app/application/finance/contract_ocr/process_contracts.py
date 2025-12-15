@@ -10,7 +10,7 @@ from PIL import Image
 import fitz  # PyMuPDF
 import pytesseract
 
-from app.presentation.schemas.contract_schemas import ContractInfo, ContractExtractionResult, RatePeriod, TokenUsage, CostEstimate
+from app.presentation.schemas.contract_schemas import ContractInfo, ContractExtractionResult, RatePeriod, TokenUsage
 from app.shared.utils.logging_config import get_logger
 from .contract_validator import ContractValidator
 from .contract_extraction_prompts import get_contract_extraction_prompt
@@ -32,10 +32,6 @@ class ContractOCRService:
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
         self.pdf_max_pages = 10  # Maximum pages to process from PDF
 
-        # Pricing configuration (USD per 1 million tokens)
-        self.input_price_per_million = float(os.getenv("OPENAI_INPUT_PRICE_PER_MILLION", "2.50"))
-        self.output_price_per_million = float(os.getenv("OPENAI_OUTPUT_PRICE_PER_MILLION", "10.00"))
-
         # Configure Tesseract path if needed (for Windows or custom installations)
         tesseract_cmd = os.getenv("TESSERACT_CMD")
         if tesseract_cmd:
@@ -54,31 +50,7 @@ class ContractOCRService:
         logger.info(model_info)
         print("\n" + "="*80)
         print(f"🤖 AI MODEL: {self.model}")
-        print(f"💰 PRICING: ${self.input_price_per_million}/1M input tokens, ${self.output_price_per_million}/1M output tokens")
         print("="*80 + "\n")
-
-    def _calculate_cost(self, prompt_tokens: int, completion_tokens: int) -> CostEstimate:
-        """
-        Calculate the cost estimate based on token usage and pricing configuration.
-
-        Args:
-            prompt_tokens: Number of input/prompt tokens
-            completion_tokens: Number of output/completion tokens
-
-        Returns:
-            CostEstimate object with detailed cost breakdown
-        """
-        input_cost = (prompt_tokens / 1_000_000) * self.input_price_per_million
-        output_cost = (completion_tokens / 1_000_000) * self.output_price_per_million
-        total_cost = input_cost + output_cost
-
-        return CostEstimate(
-            input_cost=round(input_cost, 6),
-            output_cost=round(output_cost, 6),
-            total_cost=round(total_cost, 6),
-            model=self.model,
-            currency="USD"
-        )
 
     def _chunk_text(self, text: str) -> List[str]:
         """
@@ -571,20 +543,11 @@ class ContractOCRService:
                    f"Completion: {total_usage['completion_tokens']}, "
                    f"Total: {total_usage['total_tokens']}")
 
-        # Calculate costs
-        input_cost = (total_usage['prompt_tokens'] / 1_000_000) * self.input_price_per_million
-        output_cost = (total_usage['completion_tokens'] / 1_000_000) * self.output_price_per_million
-        total_cost = input_cost + output_cost
-
         print("\n" + "="*80)
-        print(f"💰 TOKEN USAGE & COST:")
+        print(f"📊 TOKEN USAGE:")
         print(f"   • Input tokens:  {total_usage['prompt_tokens']:,}")
         print(f"   • Output tokens: {total_usage['completion_tokens']:,}")
         print(f"   • TOTAL TOKENS:  {total_usage['total_tokens']:,}")
-        print("")
-        print(f"   • Input cost:    ${input_cost:.6f}")
-        print(f"   • Output cost:   ${output_cost:.6f}")
-        print(f"   • TOTAL COST:    ${total_cost:.6f} USD")
         print(f"   • Model:         {self.model}")
         print("="*80 + "\n")
 
@@ -762,22 +725,12 @@ class ContractOCRService:
             # Create TokenUsage object
             token_usage_obj = TokenUsage(**token_usage)
 
-            # Calculate cost estimate
-            cost_estimate = self._calculate_cost(
-                token_usage['prompt_tokens'],
-                token_usage['completion_tokens']
-            )
-
-            logger.info(f"💰 Estimated cost: ${cost_estimate.total_cost:.6f} "
-                       f"(input: ${cost_estimate.input_cost:.6f}, output: ${cost_estimate.output_cost:.6f})")
-
             return ContractExtractionResult(
                 success=True,
                 data=contract_info,
                 processing_time=processing_time,
                 source_file=str(file_path.name),
-                token_usage=token_usage_obj,
-                cost_estimate=cost_estimate
+                token_usage=token_usage_obj
             )
 
         except json.JSONDecodeError as e:

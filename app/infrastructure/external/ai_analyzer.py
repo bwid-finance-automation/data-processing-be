@@ -14,29 +14,47 @@ env_path = project_root / ".env"
 load_dotenv(dotenv_path=env_path)  # Load from project root
 load_dotenv()  # Fallback to default behavior
 
+# Try to import Anthropic for Claude support
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
 from app.shared.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 class LLMFinancialAnalyzer:
-    # GPT-5 model configurations with pricing (per 1M tokens)
-    GPT5_MODELS = {
-        "gpt-5": {"input_price": 1.25, "output_price": 10.00, "max_tokens": 400000},
-        "gpt-5-mini": {"input_price": 0.25, "output_price": 2.00, "max_tokens": 400000},
-        "gpt-5-nano": {"input_price": 0.05, "output_price": 0.40, "max_tokens": 400000},
-        "gpt-5.1": {"input_price": 1.25, "output_price": 10.00, "max_tokens": 400000},
+    # Supported models with max token limits
+    # To switch providers: set AI_PROVIDER=anthropic or AI_PROVIDER=openai in .env
+    # To change model: set ANTHROPIC_MODEL or OPENAI_MODEL in .env
+    CLAUDE_MODELS = {
+        "claude-opus-4-5-20251101": {"max_tokens": 200000},
+        "claude-opus-4-20250514": {"max_tokens": 200000},
+        "claude-sonnet-4-20250514": {"max_tokens": 200000},
+        "claude-3-5-sonnet-20241022": {"max_tokens": 200000},
+        "claude-3-5-haiku-20241022": {"max_tokens": 200000},
     }
 
-    # Legacy model configurations
+    # GPT-5 model configurations
+    GPT5_MODELS = {
+        "gpt-5": {"max_tokens": 400000},
+        "gpt-5-mini": {"max_tokens": 400000},
+        "gpt-5-nano": {"max_tokens": 400000},
+        "gpt-5.1": {"max_tokens": 400000},
+    }
+
+    # Legacy OpenAI model configurations
     LEGACY_MODELS = {
-        "gpt-4o": {"input_price": 2.50, "output_price": 10.00, "max_tokens": 128000},
-        "gpt-4o-mini": {"input_price": 0.15, "output_price": 0.60, "max_tokens": 128000},
-        "gpt-4-turbo": {"input_price": 10.00, "output_price": 30.00, "max_tokens": 128000},
+        "gpt-4o": {"max_tokens": 128000},
+        "gpt-4o-mini": {"max_tokens": 128000},
+        "gpt-4-turbo": {"max_tokens": 128000},
     }
 
     def __init__(self, model_name: str = "gpt-5", progress_callback=None, initial_progress=0):
-        """Initialize LLM analyzer with OpenAI GPT model (supports GPT-5 series)."""
+        """Initialize LLM analyzer with OpenAI GPT or Claude model."""
         self.progress_callback = progress_callback
         self.current_progress = initial_progress  # Start from the current progress
         self.progress_increment = 1  # Default 1% increment per API call
@@ -44,113 +62,128 @@ class LLMFinancialAnalyzer:
         logger.info(f"🔧 Python version: {sys.version}")
         logger.info(f"🔧 Environment: {'RENDER' if os.getenv('RENDER') else 'LOCAL'}")
 
-        # Get OpenAI configuration from environment
-        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-5")
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        # Determine AI provider from environment (openai or anthropic)
+        self.ai_provider = os.getenv("AI_PROVIDER", "openai").lower()
+
+        # Get model configuration from environment
+        if self.ai_provider == "anthropic":
+            self.model = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-20250514")
+            self.api_key = os.getenv("ANTHROPIC_API_KEY")
+        else:
+            self.model = os.getenv("OPENAI_MODEL", "gpt-5")
+            self.api_key = os.getenv("OPENAI_API_KEY")
+
+        # Keep backward compatibility
+        self.openai_model = self.model
+        self.openai_api_key = self.api_key
 
         # GPT-5 specific parameters
         self.reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "medium")  # low, medium, high, minimal, none
         self.verbosity = os.getenv("OPENAI_VERBOSITY", "medium")  # low, medium, high
 
         # Service tier for priority processing (auto, default, priority, flex)
-        # - "priority": 40% faster, premium pricing (requires Enterprise)
-        # - "flex": 50% cheaper, higher latency
-        # - "auto": automatically use best available tier
-        # - "default": standard processing
         self.service_tier = os.getenv("OPENAI_SERVICE_TIER", "auto")
 
-        # Determine if using GPT-5 series
-        self.is_gpt5 = self.openai_model.startswith("gpt-5")
+        # Determine model types
+        self.is_claude = self.model.startswith("claude")
+        self.is_gpt5 = self.model.startswith("gpt-5")
 
-        # Auto-configure pricing based on model
-        if self.openai_model in self.GPT5_MODELS:
-            model_config = self.GPT5_MODELS[self.openai_model]
-            default_input_price = str(model_config["input_price"])
-            default_output_price = str(model_config["output_price"])
-            self.max_context_tokens = model_config["max_tokens"]
-        elif self.openai_model in self.LEGACY_MODELS:
-            model_config = self.LEGACY_MODELS[self.openai_model]
-            default_input_price = str(model_config["input_price"])
-            default_output_price = str(model_config["output_price"])
-            self.max_context_tokens = model_config["max_tokens"]
+        # Get max context tokens based on model
+        if self.model in self.CLAUDE_MODELS:
+            self.max_context_tokens = self.CLAUDE_MODELS[self.model]["max_tokens"]
+        elif self.model in self.GPT5_MODELS:
+            self.max_context_tokens = self.GPT5_MODELS[self.model]["max_tokens"]
+        elif self.model in self.LEGACY_MODELS:
+            self.max_context_tokens = self.LEGACY_MODELS[self.model]["max_tokens"]
         else:
-            # Fallback defaults
-            default_input_price = "2.50"
-            default_output_price = "10.00"
+            # Fallback default
             self.max_context_tokens = 128000
 
-        # Pricing configuration (USD per 1 million tokens) - can be overridden by env vars
-        self.input_price_per_million = float(os.getenv("OPENAI_INPUT_PRICE_PER_MILLION", default_input_price))
-        self.output_price_per_million = float(os.getenv("OPENAI_OUTPUT_PRICE_PER_MILLION", default_output_price))
-
         # Debug: Show if API key was loaded
-        if self.openai_api_key:
-            logger.info(f"✅ OpenAI API key loaded: {self.openai_api_key[:10]}...{self.openai_api_key[-4:]}")
+        provider_name = "Anthropic" if self.is_claude else "OpenAI"
+        if self.api_key:
+            logger.info(f"✅ {provider_name} API key loaded: {self.api_key[:10]}...{self.api_key[-4:]}")
         else:
-            logger.error("❌ OpenAI API key not found in environment variables")
+            logger.error(f"❌ {provider_name} API key not found in environment variables")
             logger.info(f"🔍 .env file path: {env_path}")
             logger.info(f"🔍 .env file exists: {env_path.exists()}")
 
-        if not self.openai_api_key or self.openai_api_key == "your_openai_api_key_here":
+        key_env_var = "ANTHROPIC_API_KEY" if self.is_claude else "OPENAI_API_KEY"
+        if not self.api_key or self.api_key.startswith("your_"):
             raise ValueError(
-                "OpenAI API key not found! Please set OPENAI_API_KEY in your .env file.\n"
-                "Get your API key from: https://platform.openai.com/api-keys"
+                f"{provider_name} API key not found! Please set {key_env_var} in your .env file.\n"
+                f"Get your API key from: {'https://console.anthropic.com/settings/keys' if self.is_claude else 'https://platform.openai.com/api-keys'}"
             )
 
-        # Initialize OpenAI client with comprehensive error handling for deployment environments
-        # Increase timeout to 120 seconds for large requests
-        client_kwargs = {"api_key": self.openai_api_key, "timeout": 120.0}
-
-        # Try multiple initialization approaches for different environments
-        initialization_attempts = [
-            lambda: OpenAI(**client_kwargs),
-            lambda: OpenAI(api_key=self.openai_api_key, timeout=120.0),  # Explicit API key with timeout
-            lambda: self._init_openai_minimal(),  # Minimal initialization for cloud environments
-            lambda: self._init_openai_aggressive(),  # Most aggressive approach for stubborn cases
-        ]
-
+        # Initialize AI client based on provider
         self.openai_client = None
-        last_error = None
+        self.anthropic_client = None
 
-        for attempt_num, init_func in enumerate(initialization_attempts, 1):
+        if self.is_claude:
+            # Initialize Anthropic client for Claude
+            if not ANTHROPIC_AVAILABLE:
+                raise RuntimeError("Anthropic library not installed. Run: pip install anthropic")
             try:
-                print(f"🔄 Attempting OpenAI client initialization (attempt {attempt_num})...")
-                self.openai_client = init_func()
-                print(f"✅ OpenAI client initialized successfully on attempt {attempt_num}")
-                break
-            except TypeError as e:
-                last_error = e
-                error_msg = str(e).lower()
-                print(f"⚠️  Attempt {attempt_num} failed: {e}")
-
-                if "proxies" in error_msg:
-                    print("   → Issue related to proxy parameter - trying next approach")
-                    continue
-                elif "unexpected keyword argument" in error_msg:
-                    print("   → Unexpected parameter issue - trying simpler initialization")
-                    continue
-                else:
-                    print(f"   → Unknown TypeError: {e}")
-                    continue
+                print(f"🔄 Attempting Anthropic client initialization...")
+                self.anthropic_client = anthropic.Anthropic(api_key=self.api_key)
+                print(f"✅ Anthropic client initialized successfully")
             except Exception as e:
-                last_error = e
-                print(f"⚠️  Attempt {attempt_num} failed with unexpected error: {e}")
-                continue
-
-        if self.openai_client is None:
-            raise RuntimeError(f"Failed to initialize OpenAI client after {len(initialization_attempts)} attempts. Last error: {last_error}")
-        logger.info(f"🤖 Using OpenAI model: {self.openai_model}")
-        logger.info(f"🔑 API key configured: {self.openai_api_key[:8]}...{self.openai_api_key[-4:]}")
-
-        # Log GPT-5 specific configuration
-        if self.is_gpt5:
-            logger.info(f"🚀 GPT-5 mode enabled")
-            logger.info(f"   • Reasoning effort: {self.reasoning_effort}")
-            logger.info(f"   • Verbosity: {self.verbosity}")
-            logger.info(f"   • Service tier: {self.service_tier}")
+                raise RuntimeError(f"Failed to initialize Anthropic client: {e}")
+            logger.info(f"🤖 Using Claude model: {self.model}")
+            logger.info(f"🔑 API key configured: {self.api_key[:8]}...{self.api_key[-4:]}")
+            logger.info(f"🚀 Claude mode enabled")
             logger.info(f"   • Max context tokens: {self.max_context_tokens:,}")
-            logger.info(f"   • Input price: ${self.input_price_per_million}/1M tokens")
-            logger.info(f"   • Output price: ${self.output_price_per_million}/1M tokens")
+        else:
+            # Initialize OpenAI client with comprehensive error handling for deployment environments
+            # Increase timeout to 120 seconds for large requests
+            client_kwargs = {"api_key": self.api_key, "timeout": 120.0}
+
+            # Try multiple initialization approaches for different environments
+            initialization_attempts = [
+                lambda: OpenAI(**client_kwargs),
+                lambda: OpenAI(api_key=self.api_key, timeout=120.0),  # Explicit API key with timeout
+                lambda: self._init_openai_minimal(),  # Minimal initialization for cloud environments
+                lambda: self._init_openai_aggressive(),  # Most aggressive approach for stubborn cases
+            ]
+
+            last_error = None
+
+            for attempt_num, init_func in enumerate(initialization_attempts, 1):
+                try:
+                    print(f"🔄 Attempting OpenAI client initialization (attempt {attempt_num})...")
+                    self.openai_client = init_func()
+                    print(f"✅ OpenAI client initialized successfully on attempt {attempt_num}")
+                    break
+                except TypeError as e:
+                    last_error = e
+                    error_msg = str(e).lower()
+                    print(f"⚠️  Attempt {attempt_num} failed: {e}")
+
+                    if "proxies" in error_msg:
+                        print("   → Issue related to proxy parameter - trying next approach")
+                        continue
+                    elif "unexpected keyword argument" in error_msg:
+                        print("   → Unexpected parameter issue - trying simpler initialization")
+                        continue
+                    else:
+                        print(f"   → Unknown TypeError: {e}")
+                        continue
+                except Exception as e:
+                    last_error = e
+                    print(f"⚠️  Attempt {attempt_num} failed with unexpected error: {e}")
+                    continue
+
+            if self.openai_client is None:
+                raise RuntimeError(f"Failed to initialize OpenAI client after {len(initialization_attempts)} attempts. Last error: {last_error}")
+            logger.info(f"🤖 Using OpenAI model: {self.model}")
+            logger.info(f"🔑 API key configured: {self.api_key[:8]}...{self.api_key[-4:]}")
+
+            # Log GPT-5 specific configuration
+            if self.is_gpt5:
+                logger.info(f"🚀 GPT-5 mode enabled")
+                logger.info(f"   • reasoning_effort: {self.reasoning_effort}")
+                logger.info(f"   • service_tier: {self.service_tier}")
+                logger.info(f"   • Max context tokens: {self.max_context_tokens:,}")
 
     def _init_openai_minimal(self):
         """Minimal OpenAI initialization for cloud environments that may have issues with advanced parameters."""
@@ -257,32 +290,6 @@ class LLMFinancialAnalyzer:
             raise e
 
     # ===========================
-    # Cost Calculation
-    # ===========================
-    def _calculate_cost(self, prompt_tokens: int, completion_tokens: int) -> dict:
-        """
-        Calculate the cost estimate based on token usage and pricing configuration.
-
-        Args:
-            prompt_tokens: Number of input/prompt tokens
-            completion_tokens: Number of output/completion tokens
-
-        Returns:
-            Dictionary with cost breakdown
-        """
-        input_cost = (prompt_tokens / 1_000_000) * self.input_price_per_million
-        output_cost = (completion_tokens / 1_000_000) * self.output_price_per_million
-        total_cost = input_cost + output_cost
-
-        return {
-            'input_cost': round(input_cost, 6),
-            'output_cost': round(output_cost, 6),
-            'total_cost': round(total_cost, 6),
-            'model': self.openai_model,
-            'currency': 'USD'
-        }
-
-    # ===========================
     # OpenAI API Methods
     # ===========================
     def _call_openai(self, system_prompt: str, user_prompt: str, retry_count: int = 0, max_retries: int = 3) -> dict:
@@ -329,22 +336,12 @@ class LLMFinancialAnalyzer:
 
             # Add GPT-5 specific parameters
             if self.is_gpt5:
-                # reasoning_effort: controls how much reasoning the model does
-                # Values: "minimal", "low", "medium", "high", or "none" (disables reasoning)
-                if self.reasoning_effort and self.reasoning_effort != "none":
-                    gpt5_params["reasoning"] = {"effort": self.reasoning_effort}
+                # reasoning_effort: top-level parameter that controls how much reasoning the model does
+                # Values: "none", "minimal", "low", "medium", "high" (xhigh only for gpt-5.1-codex-max)
+                # Note: gpt-5.1 defaults to "none", all other gpt-5 models default to "medium"
+                if self.reasoning_effort:
+                    gpt5_params["reasoning_effort"] = self.reasoning_effort
                     print(f"      • Reasoning effort: {self.reasoning_effort}")
-
-                # verbosity: controls output length (GPT-5 specific)
-                # Values: "low", "medium", "high"
-                if self.verbosity:
-                    gpt5_params["text"] = {"verbosity": self.verbosity}
-                    print(f"      • Verbosity: {self.verbosity}")
-
-                # Enable extended prompt caching for GPT-5.1 (24 hour retention)
-                if self.openai_model.startswith("gpt-5.1"):
-                    gpt5_params["prompt_cache_retention"] = "24h"
-                    print(f"      • Extended prompt caching: 24h")
 
             # Try with GPT-5 params first, fallback to basic params if API doesn't support them
             try:
@@ -379,7 +376,6 @@ class LLMFinancialAnalyzer:
 
                 prompt_tokens = usage.get('prompt_tokens', 0)
                 completion_tokens = usage.get('completion_tokens', 0)
-                cost_info = self._calculate_cost(prompt_tokens, completion_tokens)
 
                 return {
                     "message": {
@@ -387,8 +383,7 @@ class LLMFinancialAnalyzer:
                     },
                     "prompt_eval_count": prompt_tokens,
                     "eval_count": completion_tokens,
-                    "total_tokens": usage.get('total_tokens', 0),
-                    "cost": cost_info
+                    "total_tokens": usage.get('total_tokens', 0)
                 }
             else:
                 # Standard OpenAI client response
@@ -412,11 +407,10 @@ class LLMFinancialAnalyzer:
                 if content is None:
                     raise RuntimeError("OpenAI API returned None content")
 
-                # Get token counts and calculate cost
+                # Get token counts
                 prompt_tokens = response.usage.prompt_tokens if response.usage else 0
                 completion_tokens = response.usage.completion_tokens if response.usage else 0
                 total_tokens = response.usage.total_tokens if response.usage else 0
-                cost_info = self._calculate_cost(prompt_tokens, completion_tokens)
 
                 # DEBUG: Check if response was truncated
                 finish_reason = response.choices[0].finish_reason if response.choices else None
@@ -433,8 +427,7 @@ class LLMFinancialAnalyzer:
                     },
                     "prompt_eval_count": prompt_tokens,
                     "eval_count": completion_tokens,
-                    "total_tokens": total_tokens,
-                    "cost": cost_info
+                    "total_tokens": total_tokens
                 }
         except Exception as e:
             import time
@@ -656,19 +649,14 @@ class LLMFinancialAnalyzer:
             total_input_tokens = response.get('prompt_eval_count', 0)
             total_output_tokens = response.get('eval_count', 0)
             total_tokens_used = response.get('total_tokens', 0)
-            cost_info = response.get('cost', {})
 
             print(f"   ✅ Response received successfully:")
             print(f"      • Response length: {response_length:,} characters")
             if total_tokens_used > 0:
-                print(f"   💰 TOKEN USAGE & COST:")
+                print(f"   📊 TOKEN USAGE:")
                 print(f"      • Input tokens:  {total_input_tokens:,}")
                 print(f"      • Output tokens: {total_output_tokens:,}")
                 print(f"      • TOTAL TOKENS:  {total_tokens_used:,}")
-                if cost_info:
-                    print(f"      • Input cost:    ${cost_info.get('input_cost', 0):.6f}")
-                    print(f"      • Output cost:   ${cost_info.get('output_cost', 0):.6f}")
-                    print(f"      • TOTAL COST:    ${cost_info.get('total_cost', 0):.6f} USD")
                 print(f"      • Model: {self.openai_model}")
 
             print(f"   📝 Response preview: {result[:200]}...")
@@ -695,15 +683,10 @@ class LLMFinancialAnalyzer:
                 print(f"📄 Subsidiary: {subsidiary}")
                 print(f"📊 Anomalies detected: {len(anomalies)}")
                 print("")
-                print("💰 TOKEN USAGE & COST:")
+                print("📊 TOKEN USAGE:")
                 print(f"   • Input tokens:  {total_input_tokens:,}")
                 print(f"   • Output tokens: {total_output_tokens:,}")
                 print(f"   • TOTAL TOKENS:  {total_tokens_used:,}")
-                if cost_info:
-                    print("")
-                    print(f"   • Input cost:    ${cost_info.get('input_cost', 0):.6f}")
-                    print(f"   • Output cost:   ${cost_info.get('output_cost', 0):.6f}")
-                    print(f"   • TOTAL COST:    ${cost_info.get('total_cost', 0):.6f} USD")
                 print(f"   • Model:         {self.openai_model}")
                 print("="*80 + "\n")
 
@@ -888,16 +871,11 @@ class LLMFinancialAnalyzer:
             print(f"      • Configuration used: ctx={options.get('num_ctx') if options else 'n/a'}, predict={options.get('num_predict') if options else 'n/a'}")
 
             if total_tokens_used > 0:
-                print(f"   💰 FINAL TOKEN SUMMARY:")
+                print(f"   📊 FINAL TOKEN SUMMARY:")
                 print(f"      • Total Input Tokens: {total_input_tokens:,}")
                 print(f"      • Total Output Tokens: {total_output_tokens:,}")
                 print(f"      • TOTAL TOKENS USED: {total_tokens_used:,}")
                 print(f"      • Model: {self.openai_model}")
-
-                # Estimate cost for reference (OpenAI pricing for comparison)
-                if total_tokens_used > 0:
-                    gpt4_cost = (total_input_tokens * 0.00003) + (total_output_tokens * 0.00006)  # GPT-4 pricing
-                    print(f"      • Estimated cost if using GPT-4: ${gpt4_cost:.4f}")
                 print(f"   📝 Response preview: {result[:200]}...")
 
             # Debug: Check if response looks like JSON
