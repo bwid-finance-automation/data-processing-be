@@ -14,6 +14,7 @@ from .vtb_parser import VTBParser
 from .vcb_parser import VCBParser
 from .woori_parser import WooriParser
 from .scb_parser import SCBParser
+from .tcb_parser import TCBParser
 
 
 class ParserFactory:
@@ -29,14 +30,15 @@ class ParserFactory:
         VIBParser(),
         VCBParser(),      # Must be early (has "Opening balance :" that can match Woori)
         CTBCParser(),
-        KBANKParser(),
+        TCBParser(),      # Must be before KBANK (KBANK has broad "transaction date + debit + credit" detection)
+        SCBParser(),      # Must be before KBANK (Standard Chartered)
+        KBANKParser(),    # Has broader detection patterns for PDF
         SINOPACParser(),
         OCBParser(),      # Must be before MBB (MBB's "ACCOUNT STATEMENT" can match OCB)
         WooriParser(),    # Must be before MBB (MBB's "ACCOUNT STATEMENT" can match Woori)
         MBBParser(),      # Has broader detection patterns
         BIDVParser(),
         VTBParser(),
-        SCBParser(),      # Supports PDF via OCR
         # Add more parsers here as they are implemented
     ]
 
