@@ -10,6 +10,13 @@ from PIL import Image
 import fitz  # PyMuPDF
 import pytesseract
 
+# Try to import Anthropic for Claude support
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
 from app.presentation.schemas.contract_schemas import ContractInfo, ContractExtractionResult, RatePeriod, TokenUsage
 from app.shared.utils.logging_config import get_logger
 from .contract_validator import ContractValidator
@@ -20,16 +27,36 @@ logger = get_logger(__name__)
 
 
 class ContractOCRService:
-    """Service for reading and extracting information from contract documents using Tesseract OCR and OpenAI text extraction."""
+    """Service for reading and extracting information from contract documents using Tesseract OCR and AI text extraction."""
 
     def __init__(self, api_key: Optional[str] = None, enable_validation: bool = True):
-        """Initialize the OCR service with OpenAI API key."""
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY in .env file.")
+        """Initialize the OCR service with OpenAI or Anthropic API key."""
+        # Determine AI provider from environment (openai or anthropic)
+        self.ai_provider = os.getenv("AI_PROVIDER", "openai").lower()
 
-        self.client = OpenAI(api_key=self.api_key)
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        # Get model and API key based on provider
+        if self.ai_provider == "anthropic":
+            self.model = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-20250514")
+            self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+            if not self.api_key:
+                raise ValueError("Anthropic API key not found. Set ANTHROPIC_API_KEY in .env file.")
+            if not ANTHROPIC_AVAILABLE:
+                raise RuntimeError("Anthropic library not installed. Run: pip install anthropic")
+            self.anthropic_client = anthropic.Anthropic(api_key=self.api_key)
+            self.openai_client = None
+            self.is_claude = True
+        else:
+            self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
+            self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+            if not self.api_key:
+                raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY in .env file.")
+            self.openai_client = OpenAI(api_key=self.api_key)
+            self.anthropic_client = None
+            self.is_claude = False
+
+        # Keep backward compatibility
+        self.client = self.openai_client  # For legacy code that uses self.client
+
         self.pdf_max_pages = 10  # Maximum pages to process from PDF
 
         # Configure Tesseract path if needed (for Windows or custom installations)
@@ -46,10 +73,11 @@ class ContractOCRService:
         self.validator = ContractValidator() if enable_validation else None
 
         # Log and print model information prominently
-        model_info = f"Contract OCR Service initialized with Tesseract OCR + {self.model} (validation: {enable_validation})"
+        provider_name = "Anthropic Claude" if self.is_claude else "OpenAI"
+        model_info = f"Contract OCR Service initialized with Tesseract OCR + {provider_name} {self.model} (validation: {enable_validation})"
         logger.info(model_info)
         print("\n" + "="*80)
-        print(f"🤖 AI MODEL: {self.model}")
+        print(f"🤖 AI MODEL: {self.model} ({provider_name})")
         print("="*80 + "\n")
 
     def _chunk_text(self, text: str) -> List[str]:
@@ -382,15 +410,53 @@ class ContractOCRService:
         print("="*80 + "\n")
 
         # Log AI call
-        logger.info(f"Calling OpenAI API with model: {self.model}")
-        print(f"🤖 Calling AI model: {self.model}")
+        provider_name = "Anthropic" if self.is_claude else "OpenAI"
+        logger.info(f"Calling {provider_name} API with model: {self.model}")
+        print(f"🤖 Calling AI model: {self.model} ({provider_name})")
 
-        # Configure parameters based on model type
+        # Initialize usage info
+        usage_info = {
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0
+        }
+
         try:
-            if self.model.startswith("gpt-5"):
+            if self.is_claude:
+                # Use Anthropic Claude API with streaming (required for Claude Opus 4.5)
+                print(f"   Using Claude parameters: max_tokens=2000 (streaming)")
+                content_parts = []
+
+                with self.anthropic_client.messages.stream(
+                    model=self.model,
+                    max_tokens=2000,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                ) as stream:
+                    for text in stream.text_stream:
+                        content_parts.append(text)
+
+                    # Get final message for usage stats
+                    final_message = stream.get_final_message()
+                    if final_message:
+                        usage_info['prompt_tokens'] = final_message.usage.input_tokens if final_message.usage else 0
+                        usage_info['completion_tokens'] = final_message.usage.output_tokens if final_message.usage else 0
+                        usage_info['total_tokens'] = usage_info['prompt_tokens'] + usage_info['completion_tokens']
+                        stop_reason = final_message.stop_reason
+                    else:
+                        stop_reason = "unknown"
+
+                content = "".join(content_parts)
+                print(f"   Response received. Stop reason: {stop_reason}")
+
+            elif self.model.startswith("gpt-5"):
                 # GPT-5 uses new parameters and extended reasoning
                 print(f"   Using GPT-5 parameters: max_completion_tokens=2000, reasoning_effort=high")
-                response = self.client.chat.completions.create(
+                response = self.openai_client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {
@@ -401,10 +467,17 @@ class ContractOCRService:
                     max_completion_tokens=2000,
                     reasoning_effort="high",
                 )
+                print(f"   Response received. Finish reason: {response.choices[0].finish_reason}")
+                content = response.choices[0].message.content
+
+                if hasattr(response, 'usage') and response.usage:
+                    usage_info['prompt_tokens'] = response.usage.prompt_tokens
+                    usage_info['completion_tokens'] = response.usage.completion_tokens
+                    usage_info['total_tokens'] = response.usage.total_tokens
             else:
                 # GPT-4 and earlier models use traditional parameters
                 print(f"   Using GPT-4 parameters: max_tokens=2000, temperature=0.1")
-                response = self.client.chat.completions.create(
+                response = self.openai_client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {
@@ -415,30 +488,21 @@ class ContractOCRService:
                     max_tokens=2000,
                     temperature=0.1,
                 )
+                print(f"   Response received. Finish reason: {response.choices[0].finish_reason}")
+                content = response.choices[0].message.content
 
-            # Log response details
-            print(f"   Response received. Finish reason: {response.choices[0].finish_reason}")
-            content = response.choices[0].message.content
+                if hasattr(response, 'usage') and response.usage:
+                    usage_info['prompt_tokens'] = response.usage.prompt_tokens
+                    usage_info['completion_tokens'] = response.usage.completion_tokens
+                    usage_info['total_tokens'] = response.usage.total_tokens
 
-            # Extract token usage information
-            usage_info = {
-                'prompt_tokens': 0,
-                'completion_tokens': 0,
-                'total_tokens': 0
-            }
-
-            if hasattr(response, 'usage') and response.usage:
-                usage_info['prompt_tokens'] = response.usage.prompt_tokens
-                usage_info['completion_tokens'] = response.usage.completion_tokens
-                usage_info['total_tokens'] = response.usage.total_tokens
-
-                # Log token usage
-                logger.info(f"Token usage - Prompt: {usage_info['prompt_tokens']}, "
-                           f"Completion: {usage_info['completion_tokens']}, "
-                           f"Total: {usage_info['total_tokens']}")
-                print(f"   📊 Token usage: Prompt={usage_info['prompt_tokens']}, "
-                      f"Completion={usage_info['completion_tokens']}, "
-                      f"Total={usage_info['total_tokens']}")
+            # Log token usage
+            logger.info(f"Token usage - Prompt: {usage_info['prompt_tokens']}, "
+                       f"Completion: {usage_info['completion_tokens']}, "
+                       f"Total: {usage_info['total_tokens']}")
+            print(f"   📊 Token usage: Prompt={usage_info['prompt_tokens']}, "
+                  f"Completion={usage_info['completion_tokens']}, "
+                  f"Total={usage_info['total_tokens']}")
 
             if not content:
                 print(f"   ⚠️ WARNING: Empty response content from {self.model}")
