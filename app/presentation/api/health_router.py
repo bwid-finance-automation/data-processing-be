@@ -1,6 +1,7 @@
 # app/presentation/api/health_router.py
 """Health check endpoints."""
 
+import os
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from app.presentation.schemas.analysis import HealthResponse
@@ -48,5 +49,30 @@ async def detailed_health_check(settings: Settings = Depends(get_settings)):
             },
             "configuration": config_health.get("configuration_summary", {}),
             "environment": config_health.get("environment", "unknown")
+        }
+    )
+
+@router.get("/ai-config")
+async def get_ai_config():
+    """Get current AI/OpenAI configuration for display in frontend."""
+    # Model info
+    model = os.getenv("OPENAI_MODEL", "gpt-5")
+
+    # GPT-5 specific settings
+    reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "medium")
+    service_tier = os.getenv("OPENAI_SERVICE_TIER", "auto")
+
+    # Determine model family
+    is_gpt5 = model.startswith("gpt-5")
+    model_family = "GPT-5 Series" if is_gpt5 else "Legacy GPT-4"
+
+    return JSONResponse(
+        content={
+            "model": model,
+            "model_family": model_family,
+            "is_gpt5": is_gpt5,
+            "reasoning_effort": reasoning_effort if is_gpt5 else None,
+            "service_tier": service_tier,
+            "api_key_configured": bool(os.getenv("OPENAI_API_KEY"))
         }
     )

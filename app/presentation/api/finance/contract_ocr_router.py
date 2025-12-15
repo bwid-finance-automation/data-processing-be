@@ -12,7 +12,6 @@ from app.presentation.schemas.contract_schemas import (
     BatchContractResult,
     SupportedFormatsResponse,
     TokenUsage,
-    CostEstimate,
     ContractWithUnitsResult,
     UnitBreakdownSummary,
     UnitBreakdownInfo
@@ -186,23 +185,11 @@ async def process_multiple_contracts(files: List[UploadFile] = File(...)):
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_tokens = 0
-        total_input_cost = 0.0
-        total_output_cost = 0.0
-        total_cost = 0.0
-        model_name = None
-
         for result in results:
             if result.token_usage:
                 total_prompt_tokens += result.token_usage.prompt_tokens
                 total_completion_tokens += result.token_usage.completion_tokens
                 total_tokens += result.token_usage.total_tokens
-
-            if result.cost_estimate:
-                total_input_cost += result.cost_estimate.input_cost
-                total_output_cost += result.cost_estimate.output_cost
-                total_cost += result.cost_estimate.total_cost
-                if not model_name:
-                    model_name = result.cost_estimate.model
 
         # Create aggregated token usage object
         aggregated_token_usage = None
@@ -215,19 +202,6 @@ async def process_multiple_contracts(files: List[UploadFile] = File(...)):
             logger.info(f"Total token usage for batch - Prompt: {total_prompt_tokens}, "
                        f"Completion: {total_completion_tokens}, Total: {total_tokens}")
 
-        # Create aggregated cost estimate
-        aggregated_cost_estimate = None
-        if total_cost > 0:
-            aggregated_cost_estimate = CostEstimate(
-                input_cost=round(total_input_cost, 6),
-                output_cost=round(total_output_cost, 6),
-                total_cost=round(total_cost, 6),
-                model=model_name,
-                currency="USD"
-            )
-            logger.info(f"💰 Total estimated cost for batch: ${total_cost:.6f} "
-                       f"(input: ${total_input_cost:.6f}, output: ${total_output_cost:.6f})")
-
         logger.info(f"Batch processing complete: {successful}/{len(results)} successful")
 
         return BatchContractResult(
@@ -236,8 +210,7 @@ async def process_multiple_contracts(files: List[UploadFile] = File(...)):
             successful=successful,
             failed=failed,
             results=results,
-            total_token_usage=aggregated_token_usage,
-            total_cost_estimate=aggregated_cost_estimate
+            total_token_usage=aggregated_token_usage
         )
 
     except HTTPException:
@@ -334,10 +307,6 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
         total_prompt_tokens = sum(r.token_usage.prompt_tokens for r in successful_results if r.token_usage)
         total_completion_tokens = sum(r.token_usage.completion_tokens for r in successful_results if r.token_usage)
         total_tokens = sum(r.token_usage.total_tokens for r in successful_results if r.token_usage)
-        total_cost = sum(r.cost_estimate.total_cost for r in successful_results if r.cost_estimate)
-        total_input_cost = sum(r.cost_estimate.input_cost for r in successful_results if r.cost_estimate)
-        total_output_cost = sum(r.cost_estimate.output_cost for r in successful_results if r.cost_estimate)
-        model_used = successful_results[0].cost_estimate.model if successful_results and successful_results[0].cost_estimate else "N/A"
 
         # Print summary banner
         print("\n" + "="*80)
@@ -346,16 +315,10 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
         print(f"📄 Contracts processed: {len(successful_results)} successful, {len(results) - len(successful_results)} failed")
         print(f"📊 Total contracts exported: {len(results)}")
         print("")
-        print("💰 TOKEN USAGE & COST:")
+        print("📊 TOKEN USAGE:")
         print(f"   • Input tokens:      {total_prompt_tokens:,}")
         print(f"   • Output tokens:     {total_completion_tokens:,}")
         print(f"   • TOTAL TOKENS:      {total_tokens:,}")
-        print("")
-        print(f"   • Input cost:        ${total_input_cost:.6f}")
-        print(f"   • Output cost:       ${total_output_cost:.6f}")
-        print(f"   • TOTAL COST:        ${total_cost:.6f} USD")
-        print(f"   • Avg cost/contract: ${(total_cost/len(successful_results) if successful_results else 0):.6f}")
-        print(f"   • Model used:        {model_used}")
         print("")
         print(f"📁 Output file: contract_extractions_{len(results)}_contracts.xlsx")
         print("="*80 + "\n")
@@ -645,8 +608,7 @@ async def export_contract_with_units_to_excel(
                 data=unit_contract,
                 processing_time=result['base_result'].processing_time if result['base_result'] else None,
                 source_file=f"{contract_file.filename} - Unit {unit_contract.unit_for_lease}",
-                token_usage=result['base_result'].token_usage if result['base_result'] else None,
-                cost_estimate=result['base_result'].cost_estimate if result['base_result'] else None
+                token_usage=result['base_result'].token_usage if result['base_result'] else None
             )
             extraction_results.append(extraction_result)
 
@@ -665,23 +627,18 @@ async def export_contract_with_units_to_excel(
 
         logger.info(f"Successfully exported {len(extraction_results)} unit contracts to Excel")
 
-        # Print summary with token usage and costs
-        if result['base_result'] and result['base_result'].token_usage and result['base_result'].cost_estimate:
+        # Print summary with token usage
+        if result['base_result'] and result['base_result'].token_usage:
             print("\n" + "="*80)
             print("✅ EXPORT COMPLETE - SUMMARY")
             print("="*80)
             print(f"📄 Units exported: {len(unit_contracts)}")
             print(f"📊 Total rows in Excel: {len(unit_contracts) * len(result['base_result'].data.rate_periods) if result['base_result'].data.rate_periods else len(unit_contracts)}")
             print("")
-            print("💰 TOKEN USAGE & COST:")
+            print("📊 TOKEN USAGE:")
             print(f"   • Input tokens:      {result['base_result'].token_usage.prompt_tokens:,}")
             print(f"   • Output tokens:     {result['base_result'].token_usage.completion_tokens:,}")
             print(f"   • TOTAL TOKENS:      {result['base_result'].token_usage.total_tokens:,}")
-            print("")
-            print(f"   • Input cost:        ${result['base_result'].cost_estimate.input_cost:.6f}")
-            print(f"   • Output cost:       ${result['base_result'].cost_estimate.output_cost:.6f}")
-            print(f"   • TOTAL COST:        ${result['base_result'].cost_estimate.total_cost:.6f} USD")
-            print(f"   • Model used:        {result['base_result'].cost_estimate.model}")
             print("")
             print(f"📁 Output file: contract_with_units_{len(unit_contracts)}_units.xlsx")
             print("="*80 + "\n")

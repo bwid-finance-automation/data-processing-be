@@ -89,15 +89,6 @@ class TokenUsage(BaseModel):
     total_tokens: int = Field(0, description="Total tokens used (prompt + completion)")
 
 
-class CostEstimate(BaseModel):
-    """Cost estimate for API usage."""
-    input_cost: float = Field(0.0, description="Cost for input/prompt tokens in USD")
-    output_cost: float = Field(0.0, description="Cost for output/completion tokens in USD")
-    total_cost: float = Field(0.0, description="Total estimated cost in USD")
-    model: Optional[str] = Field(None, description="Model used for pricing")
-    currency: str = Field("USD", description="Currency of the cost estimate")
-
-
 class ContractExtractionResult(BaseModel):
     """Result of the contract extraction process."""
     success: bool
@@ -106,7 +97,6 @@ class ContractExtractionResult(BaseModel):
     processing_time: Optional[float] = None
     source_file: Optional[str] = None
     token_usage: Optional[TokenUsage] = Field(None, description="Token usage statistics for this extraction")
-    cost_estimate: Optional[CostEstimate] = Field(None, description="Estimated cost for this extraction")
 
 
 class BatchContractResult(BaseModel):
@@ -117,7 +107,6 @@ class BatchContractResult(BaseModel):
     failed: int
     results: List[ContractExtractionResult]
     total_token_usage: Optional[TokenUsage] = Field(None, description="Aggregated token usage across all contracts")
-    total_cost_estimate: Optional[CostEstimate] = Field(None, description="Aggregated cost estimate across all contracts")
 
 
 class SupportedFormatsResponse(BaseModel):
