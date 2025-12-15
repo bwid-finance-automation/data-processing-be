@@ -473,27 +473,45 @@ class LLMFinancialAnalyzer:
             raise RuntimeError(f"OpenAI API call failed: {str(e)}")
 
     def _call_anthropic(self, system_prompt: str, user_prompt: str, retry_count: int = 0, max_retries: int = 3) -> dict:
-        """Call Anthropic Claude API with retry logic."""
+        """Call Anthropic Claude API with streaming (required for Claude Opus 4.5 long requests)."""
         import time
 
         try:
             total_chars = len(system_prompt) + len(user_prompt)
             estimated_tokens = total_chars // 4
 
-            print(f"   🔄 Making Anthropic API call...")
+            print(f"   🔄 Making Anthropic API call (streaming)...")
             print(f"      • Model: {self.model}")
             print(f"      • System prompt: {len(system_prompt):,} chars")
             print(f"      • User prompt: {len(user_prompt):,} chars")
             print(f"      • Estimated tokens: ~{estimated_tokens:,}")
 
-            response = self.anthropic_client.messages.create(
+            # Use streaming for Claude Opus 4.5 (required for long requests)
+            content_parts = []
+            prompt_tokens = 0
+            completion_tokens = 0
+            stop_reason = None
+
+            with self.anthropic_client.messages.stream(
                 model=self.model,
                 max_tokens=32000,
                 system=system_prompt,
                 messages=[
                     {"role": "user", "content": user_prompt}
                 ]
-            )
+            ) as stream:
+                for text in stream.text_stream:
+                    content_parts.append(text)
+
+                # Get final message for usage stats
+                final_message = stream.get_final_message()
+                if final_message:
+                    prompt_tokens = final_message.usage.input_tokens if final_message.usage else 0
+                    completion_tokens = final_message.usage.output_tokens if final_message.usage else 0
+                    stop_reason = final_message.stop_reason
+
+            content = "".join(content_parts)
+            total_tokens = prompt_tokens + completion_tokens
 
             print(f"   ✅ Anthropic API call completed successfully")
 
@@ -502,17 +520,9 @@ class LLMFinancialAnalyzer:
                 self.current_progress = min(self.current_progress + self.progress_increment, 100)
                 self.progress_callback(self.current_progress, f"AI analysis in progress (~{estimated_tokens:,} tokens processed)")
 
-            # Extract content from response
-            content = response.content[0].text if response.content else ""
-
-            # Get token counts
-            prompt_tokens = response.usage.input_tokens if response.usage else 0
-            completion_tokens = response.usage.output_tokens if response.usage else 0
-            total_tokens = prompt_tokens + completion_tokens
-
             print(f"      • Input tokens: {prompt_tokens:,}")
             print(f"      • Output tokens: {completion_tokens:,}")
-            print(f"      • Stop reason: {response.stop_reason}")
+            print(f"      • Stop reason: {stop_reason}")
 
             # Return in consistent format
             return {
