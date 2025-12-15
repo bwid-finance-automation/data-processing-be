@@ -4,8 +4,33 @@ from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime
 import pandas as pd
 import csv
+import math
 from io import BytesIO, StringIO
 from collections import defaultdict
+
+
+def _safe_int(value, default=0) -> int:
+    """Safely convert value to int, handling NaN, None, and invalid values."""
+    if value is None:
+        return default
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(value, default=0.0) -> float:
+    """Safely convert value to float, handling NaN, None, and invalid values."""
+    if value is None:
+        return default
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
 
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
@@ -573,8 +598,8 @@ class ParseBankStatementsUseCase:
         tx_aggregates = defaultdict(lambda: {"total_debit": 0, "total_credit": 0, "max_date": None})
         for tx in all_transactions:
             key = f"{tx.bank_name}_{tx.acc_no}"
-            tx_aggregates[key]["total_debit"] += int(tx.debit or 0)
-            tx_aggregates[key]["total_credit"] += int(tx.credit or 0)
+            tx_aggregates[key]["total_debit"] += _safe_int(tx.debit)
+            tx_aggregates[key]["total_credit"] += _safe_int(tx.credit)
             if tx.date:
                 if tx_aggregates[key]["max_date"] is None or tx.date > tx_aggregates[key]["max_date"]:
                     tx_aggregates[key]["max_date"] = tx.date
@@ -615,8 +640,8 @@ class ParseBankStatementsUseCase:
                 name,
                 bal.acc_no,
                 bal.bank_name,
-                int(bal.opening_balance or 0),
-                int(bal.closing_balance or 0),
+                _safe_int(bal.opening_balance),
+                _safe_int(bal.closing_balance),
                 agg["total_debit"],
                 agg["total_credit"],
                 currency,
@@ -710,9 +735,9 @@ class ParseBankStatementsUseCase:
             # Name format: same as Bank Statement Daily with trailing /
             name = f"{bank_statement_daily}/"
 
-            # Debit/Credit as integers, 0 if None
-            debit_val = int(tx.debit or 0)
-            credit_val = int(tx.credit or 0)
+            # Debit/Credit as integers, 0 if None/NaN
+            debit_val = _safe_int(tx.debit)
+            credit_val = _safe_int(tx.credit)
 
             # Amount and Type
             if debit_val > 0:
@@ -787,8 +812,8 @@ class ParseBankStatementsUseCase:
 
             for tx in all_transactions:
                 key = f"{tx.bank_name}_{tx.acc_no}"
-                tx_aggregates[key]["total_debit"] += int(tx.debit or 0)
-                tx_aggregates[key]["total_credit"] += int(tx.credit or 0)
+                tx_aggregates[key]["total_debit"] += _safe_int(tx.debit)
+                tx_aggregates[key]["total_credit"] += _safe_int(tx.credit)
                 tx_aggregates[key]["transactions"].append(tx)
                 if tx.date:
                     if tx_aggregates[key]["max_date"] is None or tx.date > tx_aggregates[key]["max_date"]:
@@ -828,14 +853,14 @@ class ParseBankStatementsUseCase:
 
                 # For USD, keep decimals. For VND, use integers
                 if currency == "USD":
-                    opening_val = round(bal.opening_balance or 0, 2)
-                    closing_val = round(bal.closing_balance or 0, 2)
+                    opening_val = round(_safe_float(bal.opening_balance), 2)
+                    closing_val = round(_safe_float(bal.closing_balance), 2)
                     debit_val = round(agg["total_debit"], 2)
                     credit_val = round(agg["total_credit"], 2)
                 else:
-                    opening_val = int(bal.opening_balance or 0)
-                    closing_val = int(bal.closing_balance or 0)
-                    debit_val = int(agg["total_debit"])
+                    opening_val = _safe_int(bal.opening_balance)
+                    closing_val = _safe_int(bal.closing_balance)
+                    debit_val = _safe_int(agg["total_debit"])
                     credit_val = int(agg["total_credit"])
 
                 balance_data.append({
@@ -900,11 +925,11 @@ class ParseBankStatementsUseCase:
 
                 # Debit/Credit - keep decimals for USD, integers for VND
                 if currency == "USD":
-                    debit_val = round(tx.debit or 0, 2)
-                    credit_val = round(tx.credit or 0, 2)
+                    debit_val = round(_safe_float(tx.debit), 2)
+                    credit_val = round(_safe_float(tx.credit), 2)
                 else:
-                    debit_val = int(tx.debit or 0)
-                    credit_val = int(tx.credit or 0)
+                    debit_val = _safe_int(tx.debit)
+                    credit_val = _safe_int(tx.credit)
 
                 # Amount and Type
                 if debit_val > 0:

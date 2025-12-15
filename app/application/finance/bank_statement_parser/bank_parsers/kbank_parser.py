@@ -1,6 +1,7 @@
 """KBANK bank statement parser."""
 
 import io
+import math
 import re
 from typing import List, Optional
 import pandas as pd
@@ -64,11 +65,11 @@ class KBANKParser(BaseBankParser):
         """
         Parse KBANK transactions.
 
-        Logic from fxParse_KBANK_Transactions:
+        Logic:
         - Find header row with: "transaction date" + "debit amount" + "credit amount" + "description"
         - Flexible column detection (bilingual: English/Vietnamese)
-        - Map: Debit = "credit amount" (số tiền ghi có), Credit = "debit amount" (số tiền ghi nợ) - REVERSED!
-        - Extract account number from header (2 methods)
+        - Standard mapping: Debit = money OUT, Credit = money IN
+        - Extract account number from header
         - Currency detection (USD/VND)
         """
         try:
@@ -87,13 +88,13 @@ class KBANKParser(BaseBankParser):
             # ========== Find Columns (Bilingual) ==========
             col_date = self._find_column(data, ["transaction date", "ngày giao dịch"])
             col_time = self._find_column(data, ["transaction time", "thời gian giao dịch"])
-            col_credit_src = self._find_column(data, ["debit amount", "số tiền ghi nợ"])  # Source: debit
-            col_debit_src = self._find_column(data, ["credit amount", "số tiền ghi có"])   # Source: credit
+            col_debit = self._find_column(data, ["debit amount", "số tiền ghi nợ"])    # Money OUT
+            col_credit = self._find_column(data, ["credit amount", "số tiền ghi có"])  # Money IN
             col_balance = self._find_column(data, ["balance", "số dư"])
             col_desc = self._find_column(data, ["description", "diễn giải"])
 
             # Keep only available columns
-            keep_cols = [c for c in [col_date, col_time, col_debit_src, col_credit_src, col_balance, col_desc] if c]
+            keep_cols = [c for c in [col_date, col_time, col_debit, col_credit, col_balance, col_desc] if c]
             if not keep_cols:
                 return []
 
@@ -106,12 +107,26 @@ class KBANKParser(BaseBankParser):
             # ========== Parse Transactions ==========
             transactions = []
 
+            # Find STT/No. column for checking summary rows
+            col_stt = self._find_column(data, ["stt", "no.", "no"])
+
             for _, row in data.iterrows():
-                # KBANK REVERSED MAPPING:
-                # Debit output = "credit amount" column (money in)
-                # Credit output = "debit amount" column (money out)
-                debit_val = self._fix_number_kbank(row.get(col_debit_src)) if col_debit_src else None
-                credit_val = self._fix_number_kbank(row.get(col_credit_src)) if col_credit_src else None
+                # Skip summary/total rows ("Tổng / Total")
+                row_text = " ".join([self.to_text(cell).lower() for cell in row])
+                if "tổng" in row_text or "total" in row_text:
+                    continue
+
+                # Skip rows that look like "Previous Balance" or "Current Balance"
+                if "previous balance" in row_text or "số dư ban đầu" in row_text:
+                    continue
+                if "current balance" in row_text or "số dư hiện tại" in row_text:
+                    continue
+
+                # Standard mapping:
+                # Debit = "Debit Amount" column (Số tiền ghi nợ) = money OUT
+                # Credit = "Credit Amount" column (Số tiền ghi có) = money IN
+                debit_val = self._fix_number_kbank(row.get(col_debit)) if col_debit else None
+                credit_val = self._fix_number_kbank(row.get(col_credit)) if col_credit else None
 
                 # Skip rows where both are zero/blank
                 if (debit_val is None or debit_val == 0) and (credit_val is None or credit_val == 0):
@@ -144,8 +159,8 @@ class KBANKParser(BaseBankParser):
         Parse KBANK balance information.
 
         Logic from fxParse_KBANK_Balances:
-        - Closing = last non-null "Balance"
-        - Opening = first row's balance - first row's debit + first row's credit
+        - Opening = from "Previous Balance" / "Số dư ban đầu" row
+        - Closing = from "Current Balance" / "Số dư hiện tại" row, or last balance in table
         - Account number from header (2 methods)
         - Currency detection (USD/VND)
         """
@@ -157,47 +172,85 @@ class KBANKParser(BaseBankParser):
             top_100 = sheet.head(100)
             header_idx = self._find_header_row_kbank(top_100)
 
-            # ========== Promote Headers ==========
-            data = sheet.iloc[header_idx:].copy()
-            data.columns = data.iloc[0]
-            data = data[1:].reset_index(drop=True)
-
-            # ========== Find Columns (Bilingual) ==========
-            col_date = self._find_column(data, ["transaction date", "ngày giao dịch"])
-            col_debit_src = self._find_column(data, ["debit amount", "số tiền ghi nợ"])    # Money out
-            col_credit_src = self._find_column(data, ["credit amount", "số tiền ghi có"])  # Money in
-            col_balance = self._find_column(data, ["balance", "số dư"])
-
-            keep_cols = [c for c in [col_date, col_debit_src, col_credit_src, col_balance] if c]
-            if not keep_cols:
-                return None
-
-            data = data[keep_cols].copy()
-
-            # ========== Parse Numeric Columns ==========
-            data["_Date"] = data[col_date].apply(self.fix_date) if col_date else None
-            data["_Out"] = data[col_debit_src].apply(self._fix_number_kbank) if col_debit_src else 0
-            data["_In"] = data[col_credit_src].apply(self._fix_number_kbank) if col_credit_src else 0
-            data["_Bal"] = data[col_balance].apply(self._fix_number_kbank) if col_balance else None
-
-            # ========== Closing Balance (last non-null) ==========
-            bal_list = data["_Bal"].dropna().tolist()
-            closing = bal_list[-1] if bal_list else 0.0
-
-            # ========== Opening Balance (from first row) ==========
-            opening = 0.0
-            if len(data) > 0:
-                first_row = data.iloc[0]
-                first_bal = first_row.get("_Bal")
-                first_out = first_row.get("_Out", 0) or 0
-                first_in = first_row.get("_In", 0) or 0
-
-                if pd.notna(first_bal):
-                    opening = first_bal - first_out + first_in
-
-            # ========== Extract Account Number & Currency ==========
+            # ========== Extract Account Number & Currency from header ==========
             acc_no = self._extract_account_number_kbank(top_100)
             currency = self._extract_currency_kbank(top_100)
+
+            # ========== Find Opening & Closing Balance from special rows ==========
+            opening = 0.0
+            closing = 0.0
+
+            # Scan all rows for balance markers
+            for idx, row in sheet.iterrows():
+                row_text = " ".join([self.to_text(cell).lower() for cell in row])
+
+                # Opening balance: "Số dư ban đầu" / "Previous Balance"
+                if "previous balance" in row_text or "số dư ban đầu" in row_text:
+                    # Find the balance value in this row (look for number >= 8 digits or formatted number)
+                    for cell in row:
+                        val = self._fix_number_kbank(cell)
+                        if val is not None and val > 0:
+                            opening = val
+                            break
+
+                # Closing balance: "Số dư hiện tại" / "Current Balance"
+                if "current balance" in row_text or "số dư hiện tại" in row_text:
+                    for cell in row:
+                        val = self._fix_number_kbank(cell)
+                        if val is not None and val > 0:
+                            closing = val
+                            break
+
+            # ========== Fallback: Get closing from last balance in transaction table ==========
+            if closing == 0:
+                # Promote Headers
+                data = sheet.iloc[header_idx:].copy()
+                data.columns = data.iloc[0]
+                data = data[1:].reset_index(drop=True)
+
+                col_balance = self._find_column(data, ["balance", "số dư"])
+                if col_balance:
+                    data["_Bal"] = data[col_balance].apply(self._fix_number_kbank)
+                    bal_list = data["_Bal"].dropna().tolist()
+                    # Filter out potential NaN/inf values
+                    bal_list = [b for b in bal_list if isinstance(b, (int, float)) and not math.isnan(b) and not math.isinf(b)]
+                    if bal_list:
+                        closing = bal_list[-1]
+
+            # ========== Fallback: Calculate opening from first transaction ==========
+            if opening == 0 and closing > 0:
+                data = sheet.iloc[header_idx:].copy()
+                data.columns = data.iloc[0]
+                data = data[1:].reset_index(drop=True)
+
+                col_debit_src = self._find_column(data, ["debit amount", "số tiền ghi nợ"])
+                col_credit_src = self._find_column(data, ["credit amount", "số tiền ghi có"])
+                col_balance = self._find_column(data, ["balance", "số dư"])
+
+                if col_balance:
+                    data["_Out"] = data[col_debit_src].apply(self._fix_number_kbank) if col_debit_src else 0
+                    data["_In"] = data[col_credit_src].apply(self._fix_number_kbank) if col_credit_src else 0
+                    data["_Bal"] = data[col_balance].apply(self._fix_number_kbank)
+
+                    # Find first row with a valid balance (skip Previous Balance row which has no date)
+                    for _, row in data.iterrows():
+                        first_bal = row.get("_Bal")
+                        first_out = row.get("_Out")
+                        first_in = row.get("_In")
+
+                        # Skip if balance is NaN or if this looks like the "Previous Balance" row
+                        if pd.isna(first_bal):
+                            continue
+
+                        # Safe NaN handling for debit/credit
+                        if first_out is None or (isinstance(first_out, float) and math.isnan(first_out)):
+                            first_out = 0
+                        if first_in is None or (isinstance(first_in, float) and math.isnan(first_in)):
+                            first_in = 0
+
+                        # Calculate opening: balance + outflow - inflow
+                        opening = first_bal + first_out - first_in
+                        break
 
             return BankBalance(
                 bank_name="KBANK",
