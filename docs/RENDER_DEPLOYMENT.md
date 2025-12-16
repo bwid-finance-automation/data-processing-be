@@ -48,6 +48,7 @@ In Web Service → **Environment**:
 | `GEMINI_API_KEY` | (your Gemini key) |
 | `VARIANCE_APP__DEBUG` | `false` |
 | `VARIANCE_APP__LOG_LEVEL` | `INFO` |
+| `FORCE_HTTPS_REDIRECT` | `true` (recommended to prevent mixed-content issues) |
 
 ### Step 4: Run Migrations
 
@@ -87,6 +88,11 @@ DATABASE__SSL_MODE=require
 - Ensure `DATABASE__SSL_MODE=require` is set
 - Check if database is in same region as web service
 - Use **Internal Database URL** (not External)
+
+### Mixed Content (HTTPS vs HTTP)
+- Access the backend API using the HTTPS endpoint (e.g., `https://bwid-backend.onrender.com/api/...`).
+- Keep `FORCE_HTTPS_REDIRECT=true` so that any accidental HTTP requests are upgraded automatically.
+- For frontend apps (e.g., Vite/React), prefer an HTTPS API base URL via `VITE_API_BASE_URL`. If the app runs on HTTPS, guard against mixed content by upgrading any `http://` API URLs to `https://` at runtime before creating axios/fetch clients.
 
 ### Migration Errors
 ```bash
