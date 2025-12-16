@@ -47,6 +47,7 @@ async def create_project(
 
 
 @router.get("", response_model=ProjectListResponse)
+@router.get("/", response_model=ProjectListResponse)
 async def list_projects(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(50, ge=1, le=100, description="Maximum number of records"),
