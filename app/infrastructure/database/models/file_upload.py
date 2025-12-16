@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from typing import Optional
-import uuid
+import uuid as uuid_lib
 
 from sqlalchemy import String, Integer, Boolean, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -17,9 +17,9 @@ class FileUploadModel(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "file_uploads"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    uuid: Mapped[uuid.UUID] = mapped_column(
+    uuid: Mapped[uuid_lib.UUID] = mapped_column(
         UUID(as_uuid=True),
-        default=uuid.uuid4,
+        default=uuid_lib.uuid4,
         unique=True,
         nullable=False,
     )
@@ -44,14 +44,13 @@ class FileUploadModel(Base, TimestampMixin, SoftDeleteMixin):
 
     # Metadata
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    upload_timestamp: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
         Index("ix_file_uploads_filename", "filename"),
         Index("ix_file_uploads_file_type", "file_type"),
         Index("ix_file_uploads_session_id", "session_id"),
         Index("ix_file_uploads_processing_status", "processing_status"),
-        Index("ix_file_uploads_upload_timestamp", "upload_timestamp"),
+        Index("ix_file_uploads_created_at", "created_at"),
         Index("ix_file_uploads_is_deleted", "is_deleted"),
     )
 

@@ -2,8 +2,8 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, List
-import uuid
+from typing import Optional, List, TYPE_CHECKING
+import uuid as uuid_lib
 
 from sqlalchemy import String, Date, Numeric, ForeignKey, Index, Enum
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -11,6 +11,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 import enum
 
 from app.infrastructure.database.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.infrastructure.database.models.project import ProjectCaseModel
 
 
 class ProductType(str, enum.Enum):
@@ -44,12 +47,22 @@ class GLAProjectModel(Base, TimestampMixin):
     __tablename__ = "gla_projects"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    uuid: Mapped[uuid.UUID] = mapped_column(
+    uuid: Mapped[uuid_lib.UUID] = mapped_column(
         UUID(as_uuid=True),
-        default=uuid.uuid4,
+        default=uuid_lib.uuid4,
         unique=True,
         nullable=False,
     )
+
+    # Link to project case (nullable for backward compatibility)
+    case_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("project_cases.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # File info
+    file_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, default=datetime.utcnow)
 
     project_code: Mapped[str] = mapped_column(String(50), nullable=False)
     project_name: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -62,6 +75,10 @@ class GLAProjectModel(Base, TimestampMixin):
     period_label: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     # Relationships
+    case: Mapped[Optional["ProjectCaseModel"]] = relationship(
+        "ProjectCaseModel",
+        back_populates="gla_projects",
+    )
     records: Mapped[List["GLARecordModel"]] = relationship(
         "GLARecordModel",
         back_populates="project",
@@ -74,6 +91,7 @@ class GLAProjectModel(Base, TimestampMixin):
     )
 
     __table_args__ = (
+        Index("ix_gla_projects_case_id", "case_id"),
         Index("ix_gla_projects_project_code", "project_code"),
         Index("ix_gla_projects_product_type", "product_type"),
         Index("ix_gla_projects_region", "region"),

@@ -15,4 +15,5 @@ __pycache__/
 *.py[cod]
 logs/
 outputs/
+uploads/
 sample_for_test

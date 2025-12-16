@@ -2,14 +2,17 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, List
-import uuid
+from typing import Optional, List, TYPE_CHECKING
+import uuid as uuid_lib
 
 from sqlalchemy import String, Text, Date, Numeric, ForeignKey, Boolean, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.infrastructure.database.models.project import ProjectCaseModel
 
 
 class ContractModel(Base, TimestampMixin):
@@ -18,12 +21,22 @@ class ContractModel(Base, TimestampMixin):
     __tablename__ = "contracts"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    uuid: Mapped[uuid.UUID] = mapped_column(
+    uuid: Mapped[uuid_lib.UUID] = mapped_column(
         UUID(as_uuid=True),
-        default=uuid.uuid4,
+        default=uuid_lib.uuid4,
         unique=True,
         nullable=False,
     )
+
+    # Link to project case (nullable for backward compatibility)
+    case_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("project_cases.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # File info
+    file_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, default=datetime.utcnow)
 
     # Contract basic info
     contract_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -70,6 +83,10 @@ class ContractModel(Base, TimestampMixin):
     processing_time: Mapped[Optional[float]] = mapped_column(nullable=True)
 
     # Relationships
+    case: Mapped[Optional["ProjectCaseModel"]] = relationship(
+        "ProjectCaseModel",
+        back_populates="contracts",
+    )
     parties: Mapped[List["ContractPartyModel"]] = relationship(
         "ContractPartyModel",
         back_populates="contract",
@@ -87,6 +104,7 @@ class ContractModel(Base, TimestampMixin):
     )
 
     __table_args__ = (
+        Index("ix_contracts_case_id", "case_id"),
         Index("ix_contracts_contract_number", "contract_number"),
         Index("ix_contracts_tenant", "tenant"),
         Index("ix_contracts_customer_name", "customer_name"),

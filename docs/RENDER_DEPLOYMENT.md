@@ -17,7 +17,7 @@
 1. Go to Render Dashboard → **New** → **PostgreSQL**
 2. Configure:
    - Name: `data-processing-db`
-   - Database: `data_processing`
+   - Database: `dataprocessingdb`
    - User: `postgres`
    - Region: Singapore (or nearest)
    - Plan: Free (for testing) or Starter (for production)
@@ -69,7 +69,7 @@ buildCommand: pip install -r requirements.txt && alembic upgrade head
 ```env
 DATABASE__HOST=localhost
 DATABASE__PORT=5432
-DATABASE__NAME=data_processing
+DATABASE__NAME=dataprocessingdb
 DATABASE__USER=postgres
 DATABASE__PASSWORD=your_password
 DATABASE__SSL_MODE=prefer

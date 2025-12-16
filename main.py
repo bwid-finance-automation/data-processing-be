@@ -32,6 +32,7 @@ from app.core.exceptions import (
 
 # Import routers from presentation layer (Department + Function Structure)
 from app.presentation.api import health_router
+from app.presentation.api import project_router
 from app.presentation.api.finance import variance_analysis_router
 from app.presentation.api.finance import utility_billing_router
 from app.presentation.api.finance import contract_ocr_router
@@ -66,6 +67,9 @@ app.add_exception_handler(AnalysisError, analysis_error_handler)
 app.add_exception_handler(FileProcessingError, analysis_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
 
+# Include Project router (cross-module)
+app.include_router(project_router.router, prefix="/api", tags=["Projects"])
+
 # Include Finance Department routers with /api/finance prefix
 app.include_router(health_router.router, prefix="/api/finance", tags=["Finance - Health"])
 app.include_router(variance_analysis_router.router, prefix="/api/finance")
@@ -96,14 +100,28 @@ async def startup_event():
         logger.warning(f"⚠️ Database initialization skipped: {e}")
         logger.info("   (Database features will be unavailable)")
 
-    # Cleanup old files
+    # Cleanup old files (legacy use cases)
     fpa_use_case = CompareExcelFilesUseCase()
     fpa_use_case.cleanup_old_files()
 
     gla_use_case = GLAVarianceUseCase()
     gla_use_case.cleanup_old_files()
 
-    logger.info("✅ Startup complete - Logging enabled")
+    # Cleanup old bank statement uploads (30 days retention)
+    try:
+        from app.infrastructure.database.session import get_db
+        from app.application.finance.bank_statement_parser.bank_statement_db_service import BankStatementDbService
+
+        async for db in get_db():
+            db_service = BankStatementDbService(db)
+            stats = await db_service.cleanup_old_files(retention_days=30)
+            if stats["files_deleted"] > 0:
+                logger.info(f"Cleaned up {stats['files_deleted']} old bank statement files")
+            break
+    except Exception as e:
+        logger.warning(f"Bank statement cleanup skipped: {e}")
+
+    logger.info("Startup complete - Logging enabled")
 
 
 @app.on_event("shutdown")

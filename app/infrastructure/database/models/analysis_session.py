@@ -1,8 +1,8 @@
 """Analysis session related database models."""
 
 from datetime import datetime
-from typing import Optional, List
-import uuid
+from typing import Optional, List, TYPE_CHECKING
+import uuid as uuid_lib
 import enum
 
 from sqlalchemy import String, Text, Integer, Float, ForeignKey, Index, Enum
@@ -10,6 +10,9 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.infrastructure.database.models.project import ProjectCaseModel
 
 
 class SessionStatus(str, enum.Enum):
@@ -50,6 +53,12 @@ class AnalysisSessionModel(Base, TimestampMixin):
     session_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     user_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
+    # Link to project case (nullable for backward compatibility)
+    case_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("project_cases.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Status tracking
     status: Mapped[str] = mapped_column(
         String(20),
@@ -80,6 +89,10 @@ class AnalysisSessionModel(Base, TimestampMixin):
     errors: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
 
     # Relationships
+    case: Mapped[Optional["ProjectCaseModel"]] = relationship(
+        "ProjectCaseModel",
+        back_populates="analysis_sessions",
+    )
     results: Mapped[List["AnalysisResultModel"]] = relationship(
         "AnalysisResultModel",
         back_populates="session",
@@ -87,6 +100,7 @@ class AnalysisSessionModel(Base, TimestampMixin):
     )
 
     __table_args__ = (
+        Index("ix_analysis_sessions_case_id", "case_id"),
         Index("ix_analysis_sessions_session_id", "session_id"),
         Index("ix_analysis_sessions_status", "status"),
         Index("ix_analysis_sessions_user_id", "user_id"),
@@ -103,9 +117,9 @@ class AnalysisResultModel(Base, TimestampMixin):
     __tablename__ = "analysis_results"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    uuid: Mapped[uuid.UUID] = mapped_column(
+    uuid: Mapped[uuid_lib.UUID] = mapped_column(
         UUID(as_uuid=True),
-        default=uuid.uuid4,
+        default=uuid_lib.uuid4,
         unique=True,
         nullable=False,
     )

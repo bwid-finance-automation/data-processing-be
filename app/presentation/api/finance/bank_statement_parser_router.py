@@ -1,7 +1,7 @@
 """API router for bank statement parsing."""
 
 from typing import List, Tuple, Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends, BackgroundTasks
 from fastapi.responses import Response
 import uuid
 import math
@@ -19,6 +19,12 @@ from app.presentation.schemas.bank_statement_schemas import (
 )
 from app.application.finance.bank_statement_parser.parse_bank_statements import ParseBankStatementsUseCase
 from app.application.finance.bank_statement_parser.bank_parsers.parser_factory import ParserFactory
+from app.application.finance.bank_statement_parser.bank_statement_db_service import BankStatementDbService
+from app.core.dependencies import get_bank_statement_db_service
+from app.shared.utils.logging_config import get_logger
+from uuid import UUID as PyUUID
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/bank-statements", tags=["Finance - Bank Statement Parser"])
 
@@ -74,7 +80,9 @@ def get_supported_banks():
 
 @router.post("/parse", response_model=ParseBankStatementsResponse, summary="Parse Bank Statements (Batch)")
 async def parse_bank_statements(
-    files: List[UploadFile] = File(..., description="Bank statement Excel files (.xlsx, .xls)")
+    files: List[UploadFile] = File(..., description="Bank statement Excel files (.xlsx, .xls)"),
+    project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
+    db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
 ):
     """
     Parse multiple bank statement files in batch.
@@ -83,6 +91,7 @@ async def parse_bank_statements(
     - Auto-detect bank from file content
     - Parse transactions and balances
     - Generate standardized Excel output
+    - Save to project (optional)
 
     **Supported Banks:**
     - ACB (Asia Commercial Bank)
@@ -90,6 +99,7 @@ async def parse_bank_statements(
 
     **Input:**
     - Multiple Excel files (.xlsx, .xls)
+    - project_uuid (optional): UUID of project to save statements to
 
     **Output:**
     - Parsed statements with transactions and balances
@@ -130,6 +140,41 @@ async def parse_bank_statements(
             "content": excel_bytes,
             "filename": f"bank_statements_erp_{session_id}.xlsx"
         }
+
+        # Save to database
+        try:
+            # Parse project_uuid if provided
+            parsed_project_uuid = None
+            if project_uuid:
+                try:
+                    parsed_project_uuid = PyUUID(project_uuid)
+                except ValueError:
+                    logger.warning(f"Invalid project_uuid format: {project_uuid}")
+
+            # Save file upload records (with file content for download later)
+            for i, (filename, content) in enumerate(file_data):
+                await db_service.save_file_upload(
+                    filename=filename,
+                    file_size=len(content),
+                    file_content=content,  # Save actual file to disk
+                    file_type="bank_statement",
+                    session_id=session_id,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if filename.endswith('.xlsx') else "application/vnd.ms-excel",
+                    processing_status="completed",
+                    metadata={"source": "parse-excel", "project_uuid": project_uuid},
+                )
+
+            # Save parsed statements to database (with project linkage if provided)
+            await db_service.save_statements_batch(
+                result["statements"],
+                session_id,
+                project_uuid=parsed_project_uuid
+            )
+            await db_service.db.commit()
+            logger.info(f"Saved {len(result['statements'])} statements to database (session: {session_id}, project: {project_uuid})")
+        except Exception as db_error:
+            logger.error(f"Failed to save to database: {db_error}")
+            # Don't fail the request, just log the error - parsing was successful
 
         # Convert to response schema
         statements_response = []
@@ -182,7 +227,8 @@ async def parse_bank_statements(
         return ParseBankStatementsResponse(
             statements=statements_response,
             summary=result["summary"],
-            download_url=f"/api/finance/bank-statements/download/{session_id}"
+            download_url=f"/api/finance/bank-statements/download/{session_id}",
+            session_id=session_id
         )
 
     except HTTPException:
@@ -195,7 +241,9 @@ async def parse_bank_statements(
 async def parse_bank_statements_pdf(
     files: List[UploadFile] = File(..., description="Bank statement PDF files (.pdf)"),
     bank_codes: Optional[str] = Form(None, description="Comma-separated bank codes for each file (e.g., 'VIB,ACB,VCB'). Leave empty for auto-detection."),
-    passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted PDF files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted PDFs.")
+    passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted PDF files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted PDFs."),
+    project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
+    db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
 ):
     """
     Parse multiple bank statement PDF files using Gemini Flash OCR.
@@ -205,6 +253,7 @@ async def parse_bank_statements_pdf(
     - Auto-detect bank from OCR text
     - Parse transactions and balances
     - Generate standardized Excel output
+    - Save to project (optional)
 
     **Supported Banks:**
     - VIB (Vietnam International Bank)
@@ -217,6 +266,7 @@ async def parse_bank_statements_pdf(
     - Multiple PDF files (.pdf)
     - Optional: bank_codes (comma-separated, same order as files)
     - Optional: passwords (comma-separated, same order as files, empty for non-encrypted)
+    - Optional: project_uuid (UUID of project to save statements to)
 
     **Output:**
     - Parsed statements with transactions and balances
@@ -272,6 +322,41 @@ async def parse_bank_statements_pdf(
             "filename": f"bank_statements_erp_pdf_{session_id}.xlsx"
         }
 
+        # Save to database
+        try:
+            # Parse project_uuid if provided
+            parsed_project_uuid = None
+            if project_uuid:
+                try:
+                    parsed_project_uuid = PyUUID(project_uuid)
+                except ValueError:
+                    logger.warning(f"Invalid project_uuid format: {project_uuid}")
+
+            # Save file upload records (with file content for download later)
+            for i, (filename, content, bank_code, password) in enumerate(pdf_inputs):
+                await db_service.save_file_upload(
+                    filename=filename,
+                    file_size=len(content),
+                    file_content=content,  # Save actual file to disk
+                    file_type="bank_statement",
+                    session_id=session_id,
+                    content_type="application/pdf",
+                    processing_status="completed",
+                    metadata={"source": "parse-pdf", "bank_code": bank_code, "project_uuid": project_uuid},
+                )
+
+            # Save parsed statements to database (with project linkage if provided)
+            await db_service.save_statements_batch(
+                result["statements"],
+                session_id,
+                project_uuid=parsed_project_uuid
+            )
+            await db_service.db.commit()
+            logger.info(f"Saved {len(result['statements'])} statements to database (session: {session_id}, project: {project_uuid})")
+        except Exception as db_error:
+            logger.error(f"Failed to save to database: {db_error}")
+            # Don't fail the request, just log the error - parsing was successful
+
         # Convert to response schema
         statements_response = []
         for stmt in result["statements"]:
@@ -323,7 +408,8 @@ async def parse_bank_statements_pdf(
         return ParseBankStatementsResponse(
             statements=statements_response,
             summary=result["summary"],
-            download_url=f"/api/finance/bank-statements/download/{session_id}"
+            download_url=f"/api/finance/bank-statements/download/{session_id}",
+            session_id=session_id
         )
 
     except HTTPException:
@@ -358,6 +444,128 @@ def download_excel(session_id: str):
             "Content-Disposition": f"attachment; filename={file_data['filename']}"
         }
     )
+
+
+# ========== File History & Storage Endpoints ==========
+
+@router.get("/storage/stats", summary="Get Storage Statistics")
+async def get_storage_stats(
+    db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+):
+    """
+    Get storage statistics for uploaded files.
+
+    **Returns:**
+    - Total files count
+    - Total size in MB
+    - Files with content available
+    - Files expired (older than 30 days)
+    """
+    try:
+        stats = await db_service.get_storage_stats()
+        return {
+            "status": "ok",
+            "retention_days": 30,
+            **stats,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get storage stats: {str(e)}")
+
+
+@router.post("/storage/cleanup", summary="Cleanup Old Files")
+async def cleanup_old_files(
+    retention_days: int = 30,
+    db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+):
+    """
+    Manually trigger cleanup of old uploaded files.
+
+    **Parameters:**
+    - retention_days: Number of days to keep files (default: 30)
+
+    **Returns:**
+    - Cleanup statistics (files deleted, space freed, etc.)
+    """
+    try:
+        stats = await db_service.cleanup_old_files(retention_days)
+        return {
+            "status": "ok",
+            "message": f"Cleanup completed. {stats['files_deleted']} files deleted.",
+            **stats,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+
+
+@router.get("/uploaded-files/{session_id}", summary="List Uploaded Files by Session")
+async def list_uploaded_files_by_session(
+    session_id: str,
+    db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+):
+    """
+    List all uploaded files for a specific session.
+
+    **Parameters:**
+    - session_id: Session ID from parse response
+
+    **Returns:**
+    - List of uploaded files with metadata
+    """
+    try:
+        files = await db_service.get_files_by_session(session_id)
+        return {
+            "session_id": session_id,
+            "files": [
+                {
+                    "id": f.id,
+                    "original_filename": f.original_filename,
+                    "file_size": f.file_size,
+                    "file_type": f.file_type,
+                    "content_type": f.content_type,
+                    "processing_status": f.processing_status,
+                    "uploaded_at": f.created_at.isoformat() if f.created_at else None,
+                    "download_url": f"/api/finance/bank-statements/uploaded-file/{f.id}" if f.file_path else None,
+                }
+                for f in files
+            ],
+            "count": len(files),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+
+
+@router.get("/uploaded-file/{file_id}", summary="Download Uploaded File")
+async def download_uploaded_file(
+    file_id: int,
+    db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+):
+    """
+    Download a previously uploaded file by ID.
+
+    **Parameters:**
+    - file_id: File ID from the uploaded files list
+
+    **Returns:**
+    - Original uploaded file (PDF, Excel, etc.)
+    """
+    try:
+        result = await db_service.get_file_content(file_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="File not found or no longer available")
+
+        content, filename, content_type = result
+
+        return Response(
+            content=content,
+            media_type=content_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename=\"{filename}\""
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download file: {str(e)}")
 
 
 # ========== Power Automate Endpoint ==========

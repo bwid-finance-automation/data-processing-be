@@ -398,7 +398,7 @@ class DatabaseConfig(BaseSettings):
         le=65535
     )
     name: str = Field(
-        default="data_processing",
+        default="dataprocessingdb",
         description="Database name"
     )
     user: str = Field(

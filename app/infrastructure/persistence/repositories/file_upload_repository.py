@@ -47,7 +47,7 @@ class FileUploadRepository(BaseRepository[FileUploadModel]):
                     FileUploadModel.is_deleted == False,
                 )
             )
-            .order_by(FileUploadModel.upload_timestamp.desc())
+            .order_by(FileUploadModel.created_at.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -68,7 +68,7 @@ class FileUploadRepository(BaseRepository[FileUploadModel]):
                     FileUploadModel.is_deleted == False,
                 )
             )
-            .order_by(FileUploadModel.upload_timestamp.desc())
+            .order_by(FileUploadModel.created_at.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -89,7 +89,7 @@ class FileUploadRepository(BaseRepository[FileUploadModel]):
                     FileUploadModel.is_deleted == False,
                 )
             )
-            .order_by(FileUploadModel.upload_timestamp.desc())
+            .order_by(FileUploadModel.created_at.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -115,11 +115,11 @@ class FileUploadRepository(BaseRepository[FileUploadModel]):
             select(FileUploadModel)
             .where(
                 and_(
-                    FileUploadModel.upload_timestamp >= since,
+                    FileUploadModel.created_at >= since,
                     FileUploadModel.is_deleted == False,
                 )
             )
-            .order_by(FileUploadModel.upload_timestamp.desc())
+            .order_by(FileUploadModel.created_at.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -194,7 +194,7 @@ class FileUploadRepository(BaseRepository[FileUploadModel]):
             select(FileUploadModel)
             .where(
                 and_(
-                    FileUploadModel.upload_timestamp < cutoff,
+                    FileUploadModel.created_at < cutoff,
                     FileUploadModel.is_deleted == False,
                 )
             )

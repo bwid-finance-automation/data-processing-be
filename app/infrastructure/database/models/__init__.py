@@ -1,5 +1,10 @@
 """Database models package - Import all models here for Alembic discovery."""
 
+from app.infrastructure.database.models.project import (
+    ProjectModel,
+    ProjectCaseModel,
+    CaseType,
+)
 from app.infrastructure.database.models.bank_statement import (
     BankStatementModel,
     BankTransactionModel,
@@ -23,6 +28,10 @@ from app.infrastructure.database.models.analysis_session import (
 from app.infrastructure.database.models.file_upload import FileUploadModel
 
 __all__ = [
+    # Project models
+    "ProjectModel",
+    "ProjectCaseModel",
+    "CaseType",
     # Bank Statement models
     "BankStatementModel",
     "BankTransactionModel",

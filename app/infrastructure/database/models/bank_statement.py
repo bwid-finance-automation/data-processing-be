@@ -2,14 +2,17 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, List
-import uuid
+from typing import Optional, List, TYPE_CHECKING
+import uuid as uuid_lib
 
 from sqlalchemy import String, Text, Date, Numeric, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.infrastructure.database.models.project import ProjectCaseModel
 
 
 class BankStatementModel(Base, TimestampMixin):
@@ -18,21 +21,33 @@ class BankStatementModel(Base, TimestampMixin):
     __tablename__ = "bank_statements"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    uuid: Mapped[uuid.UUID] = mapped_column(
+    uuid: Mapped[uuid_lib.UUID] = mapped_column(
         UUID(as_uuid=True),
-        default=uuid.uuid4,
+        default=uuid_lib.uuid4,
         unique=True,
         nullable=False,
     )
+
+    # Link to project case (nullable for backward compatibility)
+    case_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("project_cases.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     bank_name: Mapped[str] = mapped_column(String(100), nullable=False)
     file_name: Mapped[str] = mapped_column(String(500), nullable=False)
     file_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     uploaded_at: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, default=datetime.utcnow)
 
     # Metadata
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     # Relationships
+    case: Mapped[Optional["ProjectCaseModel"]] = relationship(
+        "ProjectCaseModel",
+        back_populates="bank_statements",
+    )
     transactions: Mapped[List["BankTransactionModel"]] = relationship(
         "BankTransactionModel",
         back_populates="statement",
@@ -45,6 +60,7 @@ class BankStatementModel(Base, TimestampMixin):
     )
 
     __table_args__ = (
+        Index("ix_bank_statements_case_id", "case_id"),
         Index("ix_bank_statements_bank_name", "bank_name"),
         Index("ix_bank_statements_uploaded_at", "uploaded_at"),
     )

@@ -79,7 +79,8 @@ class ParseBankStatementsResponse(BaseModel):
                     "total_transactions": 125,
                     "total_balances": 4
                 },
-                "download_url": "/api/finance/bank-statements/download/abc123"
+                "download_url": "/api/finance/bank-statements/download/abc123",
+                "session_id": "abc123"
             }
         }
     )
@@ -87,6 +88,7 @@ class ParseBankStatementsResponse(BaseModel):
     statements: List[BankStatementResponse] = Field(default_factory=list)
     summary: Dict[str, Any] = Field(default_factory=dict)
     download_url: Optional[str] = Field(None, description="URL to download Excel output")
+    session_id: Optional[str] = Field(None, description="Session ID for retrieving uploaded files")
 
 
 class SupportedBanksResponse(BaseModel):

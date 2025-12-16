@@ -1,6 +1,10 @@
 """Repository implementations for database access."""
 
 from app.infrastructure.persistence.repositories.base import BaseRepository
+from app.infrastructure.persistence.repositories.project_repository import (
+    ProjectRepository,
+    ProjectCaseRepository,
+)
 from app.infrastructure.persistence.repositories.bank_statement_repository import (
     BankStatementRepository,
     BankTransactionRepository,
@@ -23,6 +27,9 @@ from app.infrastructure.persistence.repositories.file_upload_repository import (
 __all__ = [
     # Base
     "BaseRepository",
+    # Project
+    "ProjectRepository",
+    "ProjectCaseRepository",
     # Bank Statement
     "BankStatementRepository",
     "BankTransactionRepository",
