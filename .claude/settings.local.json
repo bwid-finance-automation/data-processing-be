@@ -20,7 +20,8 @@
       "Bash(del test_styled_output.xlsx)",
       "Bash(findstr:*)",
       "Bash(del test_scb_parser.py)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(dir:*)"
     ],
     "deny": [],
     "ask": []

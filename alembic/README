@@ -1,0 +1,39 @@
+Generic single-database configuration with async PostgreSQL support.
+
+## Usage
+
+### Create a new migration:
+```bash
+alembic revision --autogenerate -m "Description of changes"
+```
+
+### Apply migrations:
+```bash
+alembic upgrade head
+```
+
+### Rollback one migration:
+```bash
+alembic downgrade -1
+```
+
+### View current revision:
+```bash
+alembic current
+```
+
+### View migration history:
+```bash
+alembic history
+```
+
+## Configuration
+
+Database connection is configured via environment variables in `.env`:
+- DATABASE__HOST
+- DATABASE__PORT
+- DATABASE__NAME
+- DATABASE__USER
+- DATABASE__PASSWORD
+
+Or directly in `alembic.ini` for the `sqlalchemy.url` setting.

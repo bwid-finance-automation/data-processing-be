@@ -367,6 +367,126 @@ class ApplicationConfig(BaseSettings):
             raise ValueError(f"Log level must be one of: {', '.join(valid_levels)}")
         return v.upper()
 
+class DatabaseConfig(BaseSettings):
+    """
+    Database connection configuration section.
+
+    Supports two modes:
+    1. URL mode (for cloud platforms like Render, Heroku, Railway):
+       - Set DATABASE_URL environment variable
+    2. Component mode (for local development):
+       - Set individual DATABASE__HOST, DATABASE__PORT, etc.
+    """
+    model_config = SettingsConfigDict(env_prefix="DATABASE__")
+
+    # Direct URL (priority - used by Render, Heroku, Railway, etc.)
+    url: Optional[str] = Field(
+        default=None,
+        description="Full database URL (e.g., postgres://user:pass@host:port/db)",
+        alias="DATABASE_URL"
+    )
+
+    # Component-based configuration (for local development)
+    host: str = Field(
+        default="localhost",
+        description="Database host"
+    )
+    port: int = Field(
+        default=5432,
+        description="Database port",
+        ge=1,
+        le=65535
+    )
+    name: str = Field(
+        default="data_processing",
+        description="Database name"
+    )
+    user: str = Field(
+        default="postgres",
+        description="Database user"
+    )
+    password: str = Field(
+        default="",
+        description="Database password"
+    )
+
+    # Connection pool settings
+    pool_size: int = Field(
+        default=5,
+        description="Connection pool size",
+        ge=1,
+        le=100
+    )
+    max_overflow: int = Field(
+        default=10,
+        description="Max overflow connections",
+        ge=0,
+        le=100
+    )
+
+    # SSL settings (required for Render and most cloud providers)
+    ssl_mode: str = Field(
+        default="prefer",
+        description="SSL mode: disable, allow, prefer, require, verify-ca, verify-full"
+    )
+
+    # Debug settings
+    echo: bool = Field(
+        default=False,
+        description="Echo SQL statements for debugging"
+    )
+
+    def _parse_url(self, url: str) -> dict:
+        """Parse database URL into components."""
+        import re
+        # Pattern: postgres[ql]://user:password@host:port/database
+        pattern = r'postgres(?:ql)?:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)'
+        match = re.match(pattern, url)
+        if match:
+            return {
+                'user': match.group(1),
+                'password': match.group(2),
+                'host': match.group(3),
+                'port': int(match.group(4)),
+                'name': match.group(5).split('?')[0],  # Remove query params
+            }
+        return {}
+
+    @property
+    def async_url(self) -> str:
+        """Generate async database URL for SQLAlchemy."""
+        if self.url:
+            # Convert postgres:// to postgresql+asyncpg://
+            parsed = self._parse_url(self.url)
+            if parsed:
+                base_url = f"postgresql+asyncpg://{parsed['user']}:{parsed['password']}@{parsed['host']}:{parsed['port']}/{parsed['name']}"
+                # Add SSL for cloud deployments
+                if self.ssl_mode == "require":
+                    return f"{base_url}?ssl=require"
+                return base_url
+            # Fallback: simple replacement
+            url = self.url.replace("postgres://", "postgresql+asyncpg://")
+            url = url.replace("postgresql://", "postgresql+asyncpg://")
+            return url
+
+        return f"postgresql+asyncpg://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
+
+    @property
+    def sync_url(self) -> str:
+        """Generate sync database URL for Alembic migrations."""
+        if self.url:
+            # Ensure it starts with postgresql://
+            url = self.url.replace("postgres://", "postgresql://")
+            return url
+
+        return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
+
+    @property
+    def is_cloud(self) -> bool:
+        """Check if using cloud database (URL mode)."""
+        return self.url is not None
+
+
 class DataProcessingConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VARIANCE_DATA_PROCESSING__")
     """Data processing constants and defaults."""
@@ -405,6 +525,7 @@ class UnifiedConfig(BaseSettings):
 
     # Configuration sections
     app: ApplicationConfig = Field(default_factory=ApplicationConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     revenue_analysis: RevenueAnalysisConfig = Field(default_factory=RevenueAnalysisConfig)
     excel_processing: ExcelProcessingConfig = Field(default_factory=ExcelProcessingConfig)
     core_analysis: CoreAnalysisConfig = Field(default_factory=CoreAnalysisConfig)

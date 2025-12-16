@@ -2,15 +2,67 @@
 """Dependency injection for FastAPI."""
 
 from functools import lru_cache
+from typing import Optional, AsyncGenerator
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer
-from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings, Settings
 from app.application.finance.use_cases.analysis_service import analysis_service, AnalysisService
 
 # Security scheme (optional - for future authentication)
 security = HTTPBearer(auto_error=False)
+
+
+# =============================================================================
+# Database Dependencies
+# =============================================================================
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """
+    FastAPI dependency that provides a database session.
+
+    Usage:
+        @router.get("/items")
+        async def get_items(db: AsyncSession = Depends(get_db)):
+            result = await db.execute(select(Item))
+            return result.scalars().all()
+    """
+    from app.infrastructure.database.session import get_db as db_session_generator
+    async for session in db_session_generator():
+        yield session
+
+
+# Repository dependencies - lazy import to avoid circular imports
+def get_bank_statement_repository(db: AsyncSession = Depends(get_db)):
+    """Get BankStatementRepository instance."""
+    from app.infrastructure.persistence.repositories import BankStatementRepository
+    return BankStatementRepository(db)
+
+
+def get_bank_transaction_repository(db: AsyncSession = Depends(get_db)):
+    """Get BankTransactionRepository instance."""
+    from app.infrastructure.persistence.repositories import BankTransactionRepository
+    return BankTransactionRepository(db)
+
+
+def get_contract_repository(db: AsyncSession = Depends(get_db)):
+    """Get ContractRepository instance."""
+    from app.infrastructure.persistence.repositories import ContractRepository
+    return ContractRepository(db)
+
+
+def get_analysis_session_repository(db: AsyncSession = Depends(get_db)):
+    """Get AnalysisSessionRepository instance."""
+    from app.infrastructure.persistence.repositories import AnalysisSessionRepository
+    return AnalysisSessionRepository(db)
+
+
+def get_file_upload_repository(db: AsyncSession = Depends(get_db)):
+    """Get FileUploadRepository instance."""
+    from app.infrastructure.persistence.repositories import FileUploadRepository
+    return FileUploadRepository(db)
 
 @lru_cache()
 def get_analysis_service() -> AnalysisService:

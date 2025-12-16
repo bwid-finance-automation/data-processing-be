@@ -81,17 +81,45 @@ app.include_router(gla_variance_router.router, prefix="/api")
 import logging
 logger = logging.getLogger(__name__)
 
-# Startup event for cleanup
+# Startup event for cleanup and database initialization
 @app.on_event("startup")
 async def startup_event():
-    """Run cleanup on startup"""
+    """Run cleanup and initialize database on startup"""
     logger.info("🚀 Application starting up...")
+
+    # Initialize database connection
+    try:
+        from app.infrastructure.database import init_db
+        await init_db()
+        logger.info("✅ Database initialized successfully")
+    except Exception as e:
+        logger.warning(f"⚠️ Database initialization skipped: {e}")
+        logger.info("   (Database features will be unavailable)")
+
+    # Cleanup old files
     fpa_use_case = CompareExcelFilesUseCase()
     fpa_use_case.cleanup_old_files()
-    logger.info("✅ Startup complete - Logging enabled")
 
     gla_use_case = GLAVarianceUseCase()
     gla_use_case.cleanup_old_files()
+
+    logger.info("✅ Startup complete - Logging enabled")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("🛑 Application shutting down...")
+
+    # Close database connections
+    try:
+        from app.infrastructure.database import close_db
+        await close_db()
+        logger.info("✅ Database connections closed")
+    except Exception as e:
+        logger.warning(f"⚠️ Error closing database: {e}")
+
+    logger.info("👋 Shutdown complete")
 
 # Root health check
 @app.get("/", tags=["Root"])
@@ -104,7 +132,12 @@ def root():
             "presentation": "API routers, middleware, request/response schemas",
             "application": "Use cases, orchestration, application services",
             "domain": "Business logic, domain models, domain services",
-            "infrastructure": "External dependencies (Excel, AI, OCR, storage)"
+            "infrastructure": "External dependencies (Excel, AI, OCR, storage, database)"
+        },
+        "database": {
+            "type": "PostgreSQL",
+            "orm": "SQLAlchemy 2.0 Async",
+            "migrations": "Alembic"
         },
         "modules": {
             "finance": {
