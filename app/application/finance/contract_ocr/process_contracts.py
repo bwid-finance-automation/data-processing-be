@@ -2,6 +2,7 @@
 import json
 import time
 import os
+import tempfile
 from pathlib import Path
 from typing import Union, Optional, List, Dict
 
@@ -17,6 +18,14 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
+# Try to import Google Generative AI for Gemini OCR support
+try:
+    import google.generativeai as genai
+    from google.generativeai import types as genai_types
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
 from app.presentation.schemas.contract_schemas import ContractInfo, ContractExtractionResult, RatePeriod, TokenUsage
 from app.shared.utils.logging_config import get_logger
 from .contract_validator import ContractValidator
@@ -27,14 +36,35 @@ logger = get_logger(__name__)
 
 
 class ContractOCRService:
-    """Service for reading and extracting information from contract documents using Tesseract OCR and AI text extraction."""
+    """Service for reading and extracting information from contract documents using OCR and AI text extraction."""
 
     def __init__(self, api_key: Optional[str] = None, enable_validation: bool = True):
         """Initialize the OCR service with OpenAI or Anthropic API key."""
-        # Determine AI provider from environment (openai or anthropic)
+        # Determine AI provider from environment (openai or anthropic) - for text analysis
         self.ai_provider = os.getenv("AI_PROVIDER", "openai").lower()
 
-        # Get model and API key based on provider
+        # Determine OCR provider from environment (tesseract or gemini) - for PDF text extraction
+        # OCR_PROVIDER controls how text is extracted from PDFs
+        # AI_PROVIDER controls how the extracted text is analyzed
+        self.ocr_provider = os.getenv("OCR_PROVIDER", "tesseract").lower()
+
+        # Initialize Gemini for OCR if selected
+        self.gemini_model = None
+        if self.ocr_provider == "gemini":
+            if not GEMINI_AVAILABLE:
+                raise RuntimeError("Google Generative AI library not installed. Run: pip install google-generativeai")
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if not gemini_api_key or gemini_api_key == "your_gemini_api_key_here":
+                raise ValueError("Gemini API key not found. Set GEMINI_API_KEY in .env file.")
+            genai.configure(api_key=gemini_api_key)
+            gemini_model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+            self.gemini_model = genai.GenerativeModel(
+                gemini_model_name,
+                generation_config=genai_types.GenerationConfig(temperature=0),
+            )
+            logger.info(f"Gemini OCR initialized with model: {gemini_model_name}")
+
+        # Get model and API key based on AI provider (for analysis)
         if self.ai_provider == "anthropic":
             self.model = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-20250514")
             self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
@@ -74,9 +104,11 @@ class ContractOCRService:
 
         # Log and print model information prominently
         provider_name = "Anthropic Claude" if self.is_claude else "OpenAI"
-        model_info = f"Contract OCR Service initialized with Tesseract OCR + {provider_name} {self.model} (validation: {enable_validation})"
+        ocr_name = "Gemini Flash" if self.ocr_provider == "gemini" else "Tesseract"
+        model_info = f"Contract OCR Service initialized with {ocr_name} OCR + {provider_name} {self.model} (validation: {enable_validation})"
         logger.info(model_info)
         print("\n" + "="*80)
+        print(f"📷 OCR ENGINE: {ocr_name}")
         print(f"🤖 AI MODEL: {self.model} ({provider_name})")
         print("="*80 + "\n")
 
@@ -310,6 +342,91 @@ class ContractOCRService:
             return ""
 
     def _extract_text_from_pdf(self, pdf_path: Union[str, Path]) -> str:
+        """
+        Extract text from PDF using configured OCR provider (Gemini or Tesseract).
+
+        Args:
+            pdf_path: Path to PDF file
+
+        Returns:
+            Combined text from all pages
+        """
+        # Use Gemini Flash for OCR if configured
+        if self.ocr_provider == "gemini" and self.gemini_model:
+            return self._extract_text_from_pdf_gemini(pdf_path)
+        else:
+            return self._extract_text_from_pdf_tesseract(pdf_path)
+
+    def _extract_text_from_pdf_gemini(self, pdf_path: Union[str, Path]) -> str:
+        """
+        Extract text from PDF using Gemini Flash API.
+
+        Args:
+            pdf_path: Path to PDF file
+
+        Returns:
+            Extracted text from PDF
+        """
+        logger.info(f"Extracting text from PDF using Gemini Flash: {pdf_path}")
+        print("\n" + "="*80)
+        print("📷 Using Gemini Flash for OCR...")
+        print("="*80 + "\n")
+
+        try:
+            # Upload file to Gemini
+            uploaded_file = genai.upload_file(
+                path=str(pdf_path),
+                mime_type="application/pdf"
+            )
+
+            logger.info(f"File uploaded to Gemini: {uploaded_file.uri}")
+
+            # Extract text using Gemini
+            prompt = """Extract ALL text from this contract PDF document.
+
+Instructions:
+- Extract every single piece of text from all pages
+- Preserve the document structure as much as possible
+- Include all contract details, dates, amounts, names, addresses
+- Include all terms, conditions, and clauses
+- Keep numbers exactly as they appear (with commas, dots, currency symbols)
+- Do not summarize or interpret - just extract the raw text
+- Separate different sections with blank lines
+- Mark page breaks with "--- PAGE BREAK ---"
+
+Output the extracted text:"""
+
+            # Generate with timeout
+            response = self.gemini_model.generate_content(
+                [prompt, uploaded_file],
+                request_options={"timeout": 120}
+            )
+
+            # Clean up uploaded file from Gemini
+            try:
+                genai.delete_file(uploaded_file.name)
+            except Exception as e:
+                logger.warning(f"Failed to delete uploaded file from Gemini: {e}")
+
+            extracted_text = response.text
+            logger.info(f"Gemini extracted {len(extracted_text)} characters")
+
+            # Print extracted text
+            print("\n" + "="*80)
+            print(f"📋 GEMINI EXTRACTED TEXT ({len(extracted_text)} characters):")
+            print("="*80)
+            print(extracted_text[:2000] + "..." if len(extracted_text) > 2000 else extracted_text)
+            print("="*80 + "\n")
+
+            return extracted_text.strip()
+
+        except Exception as e:
+            logger.error(f"Gemini OCR failed: {e}, falling back to Tesseract")
+            print(f"⚠️ Gemini OCR failed: {e}")
+            print("Falling back to Tesseract OCR...")
+            return self._extract_text_from_pdf_tesseract(pdf_path)
+
+    def _extract_text_from_pdf_tesseract(self, pdf_path: Union[str, Path]) -> str:
         """
         Extract text from PDF using PyMuPDF and Tesseract OCR.
 
