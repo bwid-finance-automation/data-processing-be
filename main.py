@@ -16,7 +16,6 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.exceptions import RequestValidationError
 
 # Setup logging first (before any other imports that might use logging)
@@ -55,10 +54,6 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
-
-# Enforce HTTPS in production deployments to avoid mixed-content blocks in browsers
-if os.getenv("FORCE_HTTPS_REDIRECT", "true").lower() == "true":
-    app.add_middleware(HTTPSRedirectMiddleware)
 
 # Allow CORS (optional, if your frontend calls this API)
 app.add_middleware(
