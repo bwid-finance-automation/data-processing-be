@@ -10,6 +10,7 @@ Usage:
     python scripts/migrate.py
 """
 
+import asyncio
 import os
 import sys
 
@@ -18,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from alembic.config import Config
 from alembic import command
-from sqlalchemy import create_engine, text, inspect
 
 
 def get_database_url():
@@ -42,48 +42,91 @@ def get_database_url():
     return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
 
-def check_tables_exist(engine):
-    """Check if main tables already exist in the database."""
-    inspector = inspect(engine)
-    existing_tables = inspector.get_table_names()
+async def check_database_state(db_url: str):
+    """Check database state using asyncpg directly."""
+    import asyncpg
 
-    # Check for key tables from initial migration
-    initial_tables = ["analysis_sessions", "bank_statements", "contracts", "file_uploads"]
+    # Parse the URL for asyncpg
+    # Remove postgresql:// prefix and any query params
+    clean_url = db_url
+    if clean_url.startswith("postgresql://"):
+        clean_url = clean_url.replace("postgresql://", "")
+    elif clean_url.startswith("postgres://"):
+        clean_url = clean_url.replace("postgres://", "")
 
-    tables_exist = {table: table in existing_tables for table in initial_tables}
+    # Handle query params (like ?sslmode=require)
+    if "?" in clean_url:
+        clean_url, params = clean_url.split("?", 1)
+    else:
+        params = ""
 
-    return tables_exist, existing_tables
+    # Parse user:pass@host:port/dbname
+    if "@" in clean_url:
+        auth, rest = clean_url.split("@", 1)
+        if ":" in auth:
+            user, password = auth.split(":", 1)
+        else:
+            user, password = auth, ""
+    else:
+        user, password = "postgres", ""
+        rest = clean_url
 
+    if "/" in rest:
+        host_port, database = rest.rsplit("/", 1)
+    else:
+        host_port, database = rest, "postgres"
 
-def check_alembic_version(engine):
-    """Check if alembic_version table exists and has a version."""
-    inspector = inspect(engine)
+    if ":" in host_port:
+        host, port = host_port.split(":", 1)
+        port = int(port)
+    else:
+        host, port = host_port, 5432
 
-    if "alembic_version" not in inspector.get_table_names():
-        return None
+    # Determine SSL mode
+    ssl = "require" if "sslmode=require" in params or os.environ.get("DATABASE_URL") else None
 
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT version_num FROM alembic_version"))
-        row = result.fetchone()
-        return row[0] if row else None
+    print(f"  Connecting to {host}:{port}/{database}...")
+
+    conn = await asyncpg.connect(
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        database=database,
+        ssl=ssl
+    )
+
+    try:
+        # Get all table names
+        tables = await conn.fetch("""
+            SELECT tablename FROM pg_tables
+            WHERE schemaname = 'public'
+        """)
+        existing_tables = [t['tablename'] for t in tables]
+
+        # Check alembic version
+        alembic_version = None
+        if 'alembic_version' in existing_tables:
+            result = await conn.fetchrow("SELECT version_num FROM alembic_version")
+            if result:
+                alembic_version = result['version_num']
+
+        return existing_tables, alembic_version
+
+    finally:
+        await conn.close()
 
 
 def determine_stamp_revision(existing_tables):
     """Determine which revision to stamp based on existing tables."""
-    # Check for tables from each migration
     has_initial = "analysis_sessions" in existing_tables
     has_projects = "projects" in existing_tables and "project_cases" in existing_tables
 
-    # Check for columns added in later migrations
-    # This is a simplified check - in production you might want to inspect columns too
-
     if has_projects:
-        # Has projects tables, likely at or past a1b2c3d4e5f6
-        # Could be at head (34595774c5f5)
+        # Has projects tables - stamp at head
         return "head"
     elif has_initial:
-        # Has initial tables but not projects
-        # Stamp at initial and let migrations add the rest
+        # Has initial tables but not projects - stamp at initial
         return "52dd49119a74"
 
     return None
@@ -96,26 +139,24 @@ def main():
 
     # Get database URL
     db_url = get_database_url()
-    sync_url = db_url.replace("+asyncpg", "").replace("postgresql+asyncpg", "postgresql")
 
     print(f"\nConnecting to database...")
 
-    # Create sync engine for inspection
-    engine = create_engine(sync_url)
-
     try:
-        # Check current state
-        tables_exist, existing_tables = check_tables_exist(engine)
-        current_version = check_alembic_version(engine)
+        # Check current state using asyncpg
+        existing_tables, current_version = asyncio.run(check_database_state(db_url))
+
+        # Check for key tables
+        initial_tables = ["analysis_sessions", "bank_statements", "contracts", "file_uploads"]
+        tables_exist = {table: table in existing_tables for table in initial_tables}
 
         print(f"\nDatabase state:")
         print(f"  - Existing tables: {len(existing_tables)}")
         print(f"  - Key tables present: {tables_exist}")
         print(f"  - Alembic version: {current_version or 'Not set'}")
 
-        # Configure Alembic
+        # Configure Alembic (it uses its own connection from env.py)
         alembic_cfg = Config("alembic.ini")
-        alembic_cfg.set_main_option("sqlalchemy.url", sync_url)
 
         # Determine action
         if current_version:
@@ -150,15 +191,15 @@ def main():
             print("  ✓ Migrations complete!")
 
         # Verify final state
-        final_version = check_alembic_version(engine)
+        _, final_version = asyncio.run(check_database_state(db_url))
         print(f"\n✓ Final Alembic version: {final_version}")
         print("=" * 60)
 
     except Exception as e:
         print(f"\n✗ Migration failed: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
-    finally:
-        engine.dispose()
 
 
 if __name__ == "__main__":
