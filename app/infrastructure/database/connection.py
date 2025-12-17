@@ -3,6 +3,7 @@
 from typing import Optional
 from contextlib import asynccontextmanager
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -86,20 +87,24 @@ def get_async_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 async def init_db() -> None:
-    """Initialize database connection and create tables if needed."""
-    from app.infrastructure.database.base import Base
+    """Initialize database connection and verify connectivity.
+
+    Note: Table creation is handled by Alembic migrations.
+    This function only initializes the connection pool.
+    """
     # Import all models to register them with Base
     from app.infrastructure.database import models  # noqa: F401
 
     engine = get_async_engine()
 
-    logger.info("Initializing database...")
+    logger.info("Initializing database connection...")
 
+    # Just verify we can connect - don't create tables
+    # Table creation is handled by Alembic migrations
     async with engine.begin() as conn:
-        # Create all tables (for development; use Alembic for production)
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("SELECT 1"))
 
-    logger.info("Database initialized successfully")
+    logger.info("Database connection initialized successfully")
 
 
 async def close_db() -> None:
