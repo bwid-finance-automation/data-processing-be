@@ -47,11 +47,17 @@ class ProjectService:
         password: Optional[str] = None,
     ) -> ProjectModel:
         """Create a new project."""
+        password_hash = self.hash_password(password) if password else None
+
+        logger.info(f"Creating project: {project_name}, protected={password is not None}")
+        if password:
+            logger.info(f"Password provided, hash: {password_hash[:20]}...")
+
         project = ProjectModel(
             project_name=project_name,
             description=description,
             is_protected=password is not None,
-            password_hash=self.hash_password(password) if password else None,
+            password_hash=password_hash,
             last_accessed_at=datetime.utcnow(),
         )
 
@@ -149,7 +155,7 @@ class ProjectService:
         logger.info(f"Updated password for project: {uuid}")
         return await self.project_repo.get_by_uuid(uuid)
 
-    async def verify_password(self, uuid: UUID, password: str) -> bool:
+    async def verify_project_password(self, uuid: UUID, password: str) -> bool:
         """Verify project password."""
         project = await self.project_repo.get_by_uuid(uuid)
         if not project:
@@ -158,7 +164,7 @@ class ProjectService:
         if not project.is_protected:
             return True
 
-        return self.verify_password(password, project.password_hash)
+        return ProjectService.verify_password(password, project.password_hash)
 
     async def search_projects(self, name: str, limit: int = 10) -> List[ProjectModel]:
         """Search projects by name."""
@@ -239,3 +245,25 @@ class ProjectService:
         total = await self.case_repo.count_bank_statements_by_case(case.id)
 
         return case, statements, total
+
+    async def get_bank_statement_sessions_by_project(
+        self,
+        project_uuid: UUID,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> tuple[Optional[ProjectCaseModel], List[dict], int]:
+        """Get bank statement parse sessions grouped by session_id."""
+        project = await self.project_repo.get_by_uuid(project_uuid)
+        if not project:
+            return None, [], 0
+
+        case = await self.case_repo.get_by_project_and_type(project.id, "bank_statement")
+        if not case:
+            return None, [], 0
+
+        sessions = await self.case_repo.get_parse_sessions_by_case(
+            case.id, skip, limit
+        )
+        total = await self.case_repo.count_parse_sessions_by_case(case.id)
+
+        return case, sessions, total

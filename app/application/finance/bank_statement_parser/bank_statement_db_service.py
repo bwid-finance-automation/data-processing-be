@@ -130,6 +130,60 @@ class BankStatementDbService:
         logger.info(f"Saved file to disk: {file_path}")
         return str(file_path)
 
+    async def save_excel_output(
+        self,
+        session_id: str,
+        excel_bytes: bytes,
+    ) -> str:
+        """
+        Save generated Excel output file to disk.
+
+        Args:
+            session_id: Session ID for organizing files
+            excel_bytes: Excel file content bytes
+
+        Returns:
+            File path where Excel was saved
+        """
+        # Create directory structure: uploads/bank_statements/{session_id}/
+        upload_dir = UPLOAD_BASE_DIR / session_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use fixed filename for Excel output
+        filename = f"output_{session_id[:8]}.xlsx"
+        file_path = upload_dir / filename
+
+        # Write file asynchronously
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(excel_bytes)
+
+        logger.info(f"Saved Excel output to disk: {file_path}")
+        return str(file_path)
+
+    async def get_excel_output(self, session_id: str) -> Optional[bytes]:
+        """
+        Get Excel output file content from disk.
+
+        Args:
+            session_id: Session ID
+
+        Returns:
+            Excel file bytes or None if not found
+        """
+        # Check for output file
+        upload_dir = UPLOAD_BASE_DIR / session_id
+        filename = f"output_{session_id[:8]}.xlsx"
+        file_path = upload_dir / filename
+
+        if not file_path.exists():
+            logger.warning(f"Excel output not found: {file_path}")
+            return None
+
+        async with aiofiles.open(file_path, 'rb') as f:
+            content = await f.read()
+
+        return content
+
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize filename to prevent path traversal attacks."""
         # Remove path separators and null bytes
@@ -151,6 +205,20 @@ class BankStatementDbService:
             select(FileUploadModel)
             .where(FileUploadModel.session_id == session_id)
             .order_by(FileUploadModel.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_statements_by_session(self, session_id: str) -> List[BankStatementModel]:
+        """Get all bank statements for a session with transactions and balances loaded."""
+        from sqlalchemy.orm import selectinload
+        result = await self.db.execute(
+            select(BankStatementModel)
+            .options(
+                selectinload(BankStatementModel.transactions),
+                selectinload(BankStatementModel.balances),
+            )
+            .where(BankStatementModel.session_id == session_id)
+            .order_by(BankStatementModel.id.asc())  # Maintain upload order
         )
         return list(result.scalars().all())
 
@@ -218,14 +286,14 @@ class BankStatementDbService:
 
         return case
 
-    async def _increment_case_file_count(self, case_id: int) -> None:
-        """Increment file count for a case."""
+    async def _update_case_file_count(self, case_id: int, count: int = 1) -> None:
+        """Update file count for a case (increment by count)."""
         result = await self.db.execute(
             select(ProjectCaseModel).where(ProjectCaseModel.id == case_id)
         )
         case = result.scalar_one_or_none()
         if case:
-            case.total_files += 1
+            case.total_files += count
             case.last_processed_at = datetime.utcnow()
 
     async def save_bank_statement(
@@ -252,8 +320,8 @@ class BankStatementDbService:
             uploaded_at=datetime.utcnow(),
             processed_at=datetime.utcnow(),
             case_id=case_id,
+            session_id=session_id,  # Store session_id directly for grouping
             metadata_json={
-                "session_id": session_id,
                 "transaction_count": len(statement.transactions),
                 "has_balance": statement.balance is not None,
             },
@@ -312,9 +380,9 @@ class BankStatementDbService:
                 # Continue with other statements
                 continue
 
-        # Update case file count
+        # Update case file count - increment by actual number of saved statements
         if case_id and saved_statements:
-            await self._increment_case_file_count(case_id)
+            await self._update_case_file_count(case_id, len(saved_statements))
 
         logger.info(f"Batch saved {len(saved_statements)} of {len(statements)} statements (case_id: {case_id})")
         return saved_statements

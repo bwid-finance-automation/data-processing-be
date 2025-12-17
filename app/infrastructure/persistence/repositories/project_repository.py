@@ -199,3 +199,70 @@ class ProjectCaseRepository(BaseRepository[ProjectCaseModel]):
             .where(BankStatementModel.case_id == case_id)
         )
         return result.scalar_one()
+
+    async def get_parse_sessions_by_case(
+        self,
+        case_id: int,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[dict]:
+        """
+        Get parse sessions grouped by session_id for a case.
+        Returns list of sessions with aggregated info.
+        Files within each session are ordered by upload order (id asc).
+        """
+        # Get all statements for this case, ordered by id (upload order)
+        result = await self.session.execute(
+            select(BankStatementModel)
+            .options(
+                selectinload(BankStatementModel.transactions),
+            )
+            .where(BankStatementModel.case_id == case_id)
+            .order_by(BankStatementModel.id.asc())  # Keep upload order
+        )
+        statements = list(result.scalars().all())
+
+        # Group by session_id
+        sessions_dict = {}
+        for stmt in statements:
+            session_id = stmt.session_id or str(stmt.uuid)  # Fallback to uuid if no session_id
+            if session_id not in sessions_dict:
+                sessions_dict[session_id] = {
+                    "session_id": session_id,
+                    "processed_at": stmt.processed_at,
+                    "files": [],
+                    "total_transactions": 0,
+                    "banks": set(),
+                }
+            sessions_dict[session_id]["files"].append({
+                "uuid": str(stmt.uuid),
+                "file_name": stmt.file_name,
+                "bank_name": stmt.bank_name,
+                "transaction_count": len(stmt.transactions),
+            })
+            sessions_dict[session_id]["total_transactions"] += len(stmt.transactions)
+            sessions_dict[session_id]["banks"].add(stmt.bank_name)
+            # Update processed_at to latest
+            if stmt.processed_at and (
+                sessions_dict[session_id]["processed_at"] is None or
+                stmt.processed_at > sessions_dict[session_id]["processed_at"]
+            ):
+                sessions_dict[session_id]["processed_at"] = stmt.processed_at
+
+        # Convert to list and sort sessions by processed_at (newest first)
+        sessions = list(sessions_dict.values())
+        for s in sessions:
+            s["banks"] = list(s["banks"])
+            s["file_count"] = len(s["files"])
+        sessions.sort(key=lambda x: x["processed_at"] or datetime.min, reverse=True)
+
+        # Apply pagination
+        return sessions[skip:skip + limit]
+
+    async def count_parse_sessions_by_case(self, case_id: int) -> int:
+        """Count distinct parse sessions in a case."""
+        result = await self.session.execute(
+            select(func.count(func.distinct(BankStatementModel.session_id)))
+            .where(BankStatementModel.case_id == case_id)
+        )
+        return result.scalar_one() or 0

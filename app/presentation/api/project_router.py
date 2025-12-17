@@ -11,6 +11,7 @@ from app.presentation.schemas.project_schemas import (
     ProjectCreateRequest,
     ProjectUpdateRequest,
     ProjectSetPasswordRequest,
+    ProjectDeleteRequest,
     ProjectVerifyPasswordRequest,
     ProjectResponse,
     ProjectDetailResponse,
@@ -22,6 +23,29 @@ from app.presentation.schemas.project_schemas import (
 )
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
+
+
+# ============== Debug endpoint (remove in production) ==============
+
+@router.get("/{project_uuid}/debug-hash")
+async def debug_project_hash(
+    project_uuid: UUID,
+    test_password: str = Query(..., description="Password to test"),
+    service: ProjectService = Depends(get_project_service),
+):
+    """Debug endpoint to check password hash."""
+    project = await service.get_project(project_uuid)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    input_hash = ProjectService.hash_password(test_password)
+    return {
+        "project_uuid": str(project_uuid),
+        "is_protected": project.is_protected,
+        "stored_hash": project.password_hash,
+        "input_hash": input_hash,
+        "match": input_hash == project.password_hash if project.password_hash else None,
+    }
 
 
 # ============== Project CRUD ==============
@@ -125,28 +149,70 @@ async def update_project(
 ):
     """
     Update project details.
+
+    If project is password protected, current_password is required.
     """
-    project = await service.update_project(
-        uuid=project_uuid,
-        project_name=request.project_name,
-        description=request.description,
-    )
+    # Get project to check if protected
+    project = await service.get_project(project_uuid)
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project not found: {project_uuid}",
         )
-    return ProjectResponse.model_validate(project)
+
+    # Verify password if protected
+    if project.is_protected:
+        if not request.current_password:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Password required for protected project",
+            )
+        if not ProjectService.verify_password(request.current_password, project.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid password",
+            )
+
+    updated_project = await service.update_project(
+        uuid=project_uuid,
+        project_name=request.project_name,
+        description=request.description,
+    )
+    return ProjectResponse.model_validate(updated_project)
 
 
-@router.delete("/{project_uuid}", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/{project_uuid}/delete", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(
     project_uuid: UUID,
+    request: ProjectDeleteRequest,
     service: ProjectService = Depends(get_project_service),
 ):
     """
     Delete a project and all its cases.
+
+    If project is password protected, current_password is required.
     """
+    # Get project to check if protected
+    project = await service.get_project(project_uuid)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_uuid}",
+        )
+
+    # Verify password if protected
+    if project.is_protected:
+        if not request.current_password:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Password required for protected project",
+            )
+        if not ProjectService.verify_password(request.current_password, project.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid password",
+            )
+
     deleted = await service.delete_project(project_uuid)
     if not deleted:
         raise HTTPException(
@@ -166,16 +232,33 @@ async def set_project_password(
     """
     Set or remove project password.
 
+    If project is currently protected, current_password is required.
     - Pass password to set/change
     - Pass null/empty to remove password protection
     """
-    project = await service.set_password(project_uuid, request.password)
+    # Get project to check if protected
+    project = await service.get_project(project_uuid)
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project not found: {project_uuid}",
         )
-    return ProjectResponse.model_validate(project)
+
+    # Verify current password if project is protected
+    if project.is_protected:
+        if not request.current_password:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Current password required for protected project",
+            )
+        if not ProjectService.verify_password(request.current_password, project.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid current password",
+            )
+
+    updated_project = await service.set_password(project_uuid, request.password)
+    return ProjectResponse.model_validate(updated_project)
 
 
 @router.post("/{project_uuid}/verify", response_model=ProjectVerifyResponse)
@@ -187,6 +270,9 @@ async def verify_project_password(
     """
     Verify project password.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     project = await service.get_project(project_uuid)
     if not project:
         raise HTTPException(
@@ -197,7 +283,15 @@ async def verify_project_password(
     if not project.is_protected:
         return ProjectVerifyResponse(verified=True, message="Project is not protected")
 
-    verified = service.verify_password(request.password, project.password_hash)
+    # Debug logging
+    input_hash = ProjectService.hash_password(request.password)
+    logger.info(f"Verify password for project {project_uuid}")
+    logger.info(f"Input password hash: {input_hash[:20]}...")
+    logger.info(f"Stored password hash: {project.password_hash[:20] if project.password_hash else 'None'}...")
+
+    verified = ProjectService.verify_password(request.password, project.password_hash)
+    logger.info(f"Verification result: {verified}")
+
     return ProjectVerifyResponse(
         verified=verified,
         message="Password verified" if verified else "Invalid password",
@@ -225,7 +319,7 @@ async def get_project_cases(
     return [ProjectCaseSummary.model_validate(c) for c in cases]
 
 
-@router.get("/{project_uuid}/cases/bank-statement", response_model=CaseDetailResponse)
+@router.get("/{project_uuid}/cases/bank-statement")
 async def get_bank_statement_case(
     project_uuid: UUID,
     skip: int = Query(0, ge=0),
@@ -233,11 +327,12 @@ async def get_bank_statement_case(
     service: ProjectService = Depends(get_project_service),
 ):
     """
-    Get bank statement case history for a project.
+    Get bank statement parse sessions for a project.
 
-    Returns the bank_statement case with list of processed files.
+    Returns sessions grouped by parse operation (not individual files).
+    Each session contains all files that were processed together.
     """
-    case, statements, total = await service.get_bank_statement_history_by_project(
+    case, sessions, total = await service.get_bank_statement_sessions_by_project(
         project_uuid, skip, limit
     )
 
@@ -247,25 +342,11 @@ async def get_bank_statement_case(
             detail=f"No bank statement case found for project: {project_uuid}",
         )
 
-    files = []
-    for stmt in statements:
-        files.append(
-            BankStatementFileItem(
-                uuid=stmt.uuid,
-                file_name=stmt.file_name,
-                processed_at=stmt.processed_at,
-                created_at=stmt.created_at,
-                bank_name=stmt.bank_name,
-                total_transactions=len(stmt.transactions) if stmt.transactions else 0,
-                total_accounts=len(stmt.balances) if stmt.balances else 0,
-            )
-        )
-
-    return CaseDetailResponse(
-        uuid=case.uuid,
-        case_type=case.case_type,
-        total_files=total,
-        last_processed_at=case.last_processed_at,
-        created_at=case.created_at,
-        files=files,
-    )
+    return {
+        "uuid": str(case.uuid),
+        "case_type": case.case_type,
+        "total_sessions": total,
+        "last_processed_at": case.last_processed_at,
+        "created_at": case.created_at,
+        "sessions": sessions,
+    }

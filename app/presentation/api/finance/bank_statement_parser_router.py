@@ -170,6 +170,10 @@ async def parse_bank_statements(
                 session_id,
                 project_uuid=parsed_project_uuid
             )
+
+            # Save Excel output to disk for later download from history
+            await db_service.save_excel_output(session_id, excel_bytes)
+
             await db_service.db.commit()
             logger.info(f"Saved {len(result['statements'])} statements to database (session: {session_id}, project: {project_uuid})")
         except Exception as db_error:
@@ -351,6 +355,10 @@ async def parse_bank_statements_pdf(
                 session_id,
                 project_uuid=parsed_project_uuid
             )
+
+            # Save Excel output to disk for later download from history
+            await db_service.save_excel_output(session_id, excel_bytes)
+
             await db_service.db.commit()
             logger.info(f"Saved {len(result['statements'])} statements to database (session: {session_id}, project: {project_uuid})")
         except Exception as db_error:
@@ -421,7 +429,7 @@ async def parse_bank_statements_pdf(
 @router.get("/download/{session_id}", summary="Download Excel Output")
 def download_excel(session_id: str):
     """
-    Download the Excel output file for a parsing session.
+    Download the Excel output file for a parsing session (from memory).
 
     **Parameters:**
     - session_id: Session ID from parse response
@@ -444,6 +452,109 @@ def download_excel(session_id: str):
             "Content-Disposition": f"attachment; filename={file_data['filename']}"
         }
     )
+
+
+@router.get("/download-history/{session_id}", summary="Download Excel from History")
+async def download_excel_from_history(
+    session_id: str,
+    db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+):
+    """
+    Download Excel output from history.
+
+    First tries to read cached Excel file from disk.
+    Falls back to regenerating from database if not found.
+
+    **Parameters:**
+    - session_id: Session ID from parse history
+
+    **Returns:**
+    - Excel file with ERP template format
+    """
+    from app.domain.finance.bank_statement_parser.models.bank_transaction import BankTransaction
+    from app.domain.finance.bank_statement_parser.models.bank_statement import BankBalance
+
+    try:
+        # First, try to get cached Excel from disk
+        excel_bytes = await db_service.get_excel_output(session_id)
+
+        if excel_bytes:
+            logger.info(f"Serving cached Excel for session: {session_id}")
+            filename = f"bank_statements_{session_id[:8]}.xlsx"
+            return Response(
+                content=excel_bytes,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}"
+                }
+            )
+
+        # Fallback: regenerate from database
+        logger.info(f"Excel not cached, regenerating from database for session: {session_id}")
+
+        # Get statements from database
+        statements = await db_service.get_statements_by_session(session_id)
+
+        if not statements:
+            raise HTTPException(status_code=404, detail="Session not found in history")
+
+        # Convert database models to domain models
+        all_transactions = []
+        all_balances = []
+
+        for stmt in statements:
+            # Convert transactions
+            for tx in stmt.transactions:
+                all_transactions.append(BankTransaction(
+                    bank_name=stmt.bank_name,
+                    acc_no=tx.acc_no or "",
+                    debit=float(tx.debit) if tx.debit else None,
+                    credit=float(tx.credit) if tx.credit else None,
+                    date=tx.transaction_date,
+                    description=tx.description or "",
+                    currency=tx.currency or "VND",
+                    transaction_id=tx.transaction_id or "",
+                    beneficiary_bank=tx.beneficiary_bank or "",
+                    beneficiary_acc_no=tx.beneficiary_acc_no or "",
+                    beneficiary_acc_name=tx.beneficiary_acc_name or "",
+                ))
+
+            # Convert balances
+            for bal in stmt.balances:
+                all_balances.append(BankBalance(
+                    bank_name=stmt.bank_name,
+                    acc_no=bal.acc_no or "",
+                    currency=bal.currency or "VND",
+                    opening_balance=float(bal.opening_balance) if bal.opening_balance else 0.0,
+                    closing_balance=float(bal.closing_balance) if bal.closing_balance else 0.0,
+                ))
+
+        if not all_transactions and not all_balances:
+            raise HTTPException(status_code=404, detail="No data found for this session")
+
+        # Generate Excel using the use case
+        use_case = ParseBankStatementsUseCase()
+        excel_bytes = use_case.export_to_erp_template_excel(all_transactions, all_balances)
+
+        # Save to disk for future requests
+        await db_service.save_excel_output(session_id, excel_bytes)
+
+        # Generate filename
+        filename = f"bank_statements_{session_id[:8]}.xlsx"
+
+        return Response(
+            content=excel_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get Excel from history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get Excel: {str(e)}")
 
 
 # ========== File History & Storage Endpoints ==========

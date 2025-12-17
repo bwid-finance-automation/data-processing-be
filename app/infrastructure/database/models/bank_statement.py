@@ -34,6 +34,9 @@ class BankStatementModel(Base, TimestampMixin):
         nullable=True,
     )
 
+    # Session ID for grouping files parsed together
+    session_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
     bank_name: Mapped[str] = mapped_column(String(100), nullable=False)
     file_name: Mapped[str] = mapped_column(String(500), nullable=False)
     file_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
@@ -52,6 +55,7 @@ class BankStatementModel(Base, TimestampMixin):
         "BankTransactionModel",
         back_populates="statement",
         cascade="all, delete-orphan",
+        order_by="BankTransactionModel.id",  # Maintain insertion order
     )
     balances: Mapped[List["BankBalanceModel"]] = relationship(
         "BankBalanceModel",

@@ -20,11 +20,18 @@ class ProjectUpdateRequest(BaseModel):
     """Request schema for updating a project."""
     project_name: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = Field(None, max_length=1000)
+    current_password: Optional[str] = Field(None, description="Current password (required if project is protected)")
 
 
 class ProjectSetPasswordRequest(BaseModel):
     """Request schema for setting/changing project password."""
+    current_password: Optional[str] = Field(None, description="Current password (required if project is protected)")
     password: Optional[str] = Field(None, min_length=4, max_length=100, description="New password, null to remove")
+
+
+class ProjectDeleteRequest(BaseModel):
+    """Request schema for deleting a project."""
+    current_password: Optional[str] = Field(None, description="Current password (required if project is protected)")
 
 
 class ProjectVerifyPasswordRequest(BaseModel):
@@ -108,3 +115,31 @@ class BankStatementFileItem(CaseFileItem):
     bank_name: Optional[str] = None
     total_transactions: Optional[int] = None
     total_accounts: Optional[int] = None
+
+
+class ParseSessionFileItem(BaseModel):
+    """File item within a parse session."""
+    uuid: str
+    file_name: str
+    bank_name: str
+    transaction_count: int
+
+
+class ParseSessionItem(BaseModel):
+    """A parse session containing multiple files processed together."""
+    session_id: str
+    processed_at: Optional[datetime] = None
+    file_count: int
+    total_transactions: int
+    banks: List[str] = Field(default_factory=list)
+    files: List[ParseSessionFileItem] = Field(default_factory=list)
+
+
+class BankStatementSessionsResponse(BaseModel):
+    """Response for bank statement parse sessions."""
+    uuid: UUID
+    case_type: str
+    total_sessions: int
+    last_processed_at: Optional[datetime] = None
+    created_at: datetime
+    sessions: List[ParseSessionItem] = Field(default_factory=list)
