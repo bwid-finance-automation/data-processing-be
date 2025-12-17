@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database.models.project import ProjectModel, ProjectCaseModel
 from app.infrastructure.database.models.bank_statement import BankStatementModel
+from app.infrastructure.database.models.contract import ContractModel
 from app.infrastructure.persistence.repositories.project_repository import (
     ProjectRepository,
     ProjectCaseRepository,
@@ -265,5 +266,29 @@ class ProjectService:
             case.id, skip, limit
         )
         total = await self.case_repo.count_parse_sessions_by_case(case.id)
+
+        return case, sessions, total
+
+    # ============== Contract Case Operations ==============
+
+    async def get_contract_sessions_by_project(
+        self,
+        project_uuid: UUID,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> tuple[Optional[ProjectCaseModel], List[dict], int]:
+        """Get contract processing sessions grouped by session for a project."""
+        project = await self.project_repo.get_by_uuid(project_uuid)
+        if not project:
+            return None, [], 0
+
+        case = await self.case_repo.get_by_project_and_type(project.id, "contract")
+        if not case:
+            return None, [], 0
+
+        sessions = await self.case_repo.get_contract_sessions_by_case(
+            case.id, skip, limit
+        )
+        total = await self.case_repo.count_contract_sessions_by_case(case.id)
 
         return case, sessions, total

@@ -350,3 +350,36 @@ async def get_bank_statement_case(
         "created_at": case.created_at,
         "sessions": sessions,
     }
+
+
+@router.get("/{project_uuid}/cases/contract")
+async def get_contract_case(
+    project_uuid: UUID,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    service: ProjectService = Depends(get_project_service),
+):
+    """
+    Get contract OCR processing sessions for a project.
+
+    Returns sessions grouped by processing operation.
+    Each session contains all contracts that were processed together.
+    """
+    case, sessions, total = await service.get_contract_sessions_by_project(
+        project_uuid, skip, limit
+    )
+
+    if not case:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No contract case found for project: {project_uuid}",
+        )
+
+    return {
+        "uuid": str(case.uuid),
+        "case_type": case.case_type,
+        "total_sessions": total,
+        "last_processed_at": case.last_processed_at,
+        "created_at": case.created_at,
+        "sessions": sessions,
+    }

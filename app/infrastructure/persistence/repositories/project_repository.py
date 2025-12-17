@@ -266,3 +266,106 @@ class ProjectCaseRepository(BaseRepository[ProjectCaseModel]):
             .where(BankStatementModel.case_id == case_id)
         )
         return result.scalar_one() or 0
+
+    # ============== Contract Case Operations ==============
+
+    async def get_contracts_by_case(
+        self,
+        case_id: int,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[ContractModel]:
+        """Get contracts for a case."""
+        from sqlalchemy.orm import selectinload
+        result = await self.session.execute(
+            select(ContractModel)
+            .options(
+                selectinload(ContractModel.parties),
+                selectinload(ContractModel.rate_periods),
+                selectinload(ContractModel.units),
+            )
+            .where(ContractModel.case_id == case_id)
+            .order_by(ContractModel.processed_at.desc().nullslast())
+            .offset(skip)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def count_contracts_by_case(self, case_id: int) -> int:
+        """Count contracts in a case."""
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(ContractModel)
+            .where(ContractModel.case_id == case_id)
+        )
+        return result.scalar_one()
+
+    async def get_contract_sessions_by_case(
+        self,
+        case_id: int,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[dict]:
+        """
+        Get contract processing sessions grouped by session_id for a case.
+        Returns list of sessions with aggregated info.
+        """
+        from sqlalchemy.orm import selectinload
+        # Get all contracts for this case, ordered by id (upload order)
+        result = await self.session.execute(
+            select(ContractModel)
+            .options(
+                selectinload(ContractModel.parties),
+                selectinload(ContractModel.rate_periods),
+                selectinload(ContractModel.units),
+            )
+            .where(ContractModel.case_id == case_id)
+            .order_by(ContractModel.id.asc())
+        )
+        contracts = list(result.scalars().all())
+
+        # Group by session_id (using source_file as session marker for now)
+        sessions_dict = {}
+        for contract in contracts:
+            # Use processed_at timestamp as session identifier
+            session_key = contract.processed_at.strftime("%Y%m%d%H%M%S") if contract.processed_at else str(contract.uuid)
+            if session_key not in sessions_dict:
+                sessions_dict[session_key] = {
+                    "session_id": session_key,
+                    "processed_at": contract.processed_at,
+                    "files": [],
+                    "total_contracts": 0,
+                    "tenants": set(),
+                }
+            sessions_dict[session_key]["files"].append({
+                "uuid": str(contract.uuid),
+                "file_name": contract.file_name or contract.source_file,
+                "contract_number": contract.contract_number,
+                "tenant": contract.tenant or contract.customer_name,
+                "unit_for_lease": contract.unit_for_lease,
+                "contract_title": contract.contract_title,
+            })
+            sessions_dict[session_key]["total_contracts"] += 1
+            if contract.tenant:
+                sessions_dict[session_key]["tenants"].add(contract.tenant)
+            elif contract.customer_name:
+                sessions_dict[session_key]["tenants"].add(contract.customer_name)
+
+        # Convert to list and sort sessions by processed_at (newest first)
+        sessions = list(sessions_dict.values())
+        for s in sessions:
+            s["tenants"] = list(s["tenants"])
+            s["file_count"] = len(s["files"])
+        sessions.sort(key=lambda x: x["processed_at"] or datetime.min, reverse=True)
+
+        # Apply pagination
+        return sessions[skip:skip + limit]
+
+    async def count_contract_sessions_by_case(self, case_id: int) -> int:
+        """Count distinct contract processing sessions in a case."""
+        # Count unique processed_at timestamps (approximate session count)
+        result = await self.session.execute(
+            select(func.count(func.distinct(ContractModel.processed_at)))
+            .where(ContractModel.case_id == case_id)
+        )
+        return result.scalar_one() or 0

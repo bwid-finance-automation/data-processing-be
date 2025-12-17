@@ -2,10 +2,12 @@
 import os
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from uuid import UUID
 
-from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Depends
 from fastapi.responses import JSONResponse, FileResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.presentation.schemas.contract_schemas import (
     ContractExtractionResult,
@@ -20,6 +22,9 @@ from app.application.finance.contract_ocr.process_contracts import ContractOCRSe
 from app.application.finance.contract_ocr.contract_excel_export import ContractExcelExporter
 from app.application.finance.contract_ocr.unit_breakdown_reader import UnitBreakdownReader
 from app.shared.utils.logging_config import get_logger
+from app.core.dependencies import get_db, get_project_service
+from app.application.project.project_service import ProjectService
+from app.infrastructure.database.models.project import CaseType
 
 logger = get_logger(__name__)
 
@@ -119,17 +124,22 @@ async def process_single_contract(file: UploadFile = File(...)):
 
 
 @router.post("/process-contracts-batch", response_model=BatchContractResult)
-async def process_multiple_contracts(files: List[UploadFile] = File(...)):
+async def process_multiple_contracts(
+    files: List[UploadFile] = File(...),
+    project_uuid: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Process multiple contract documents in batch.
 
     - **files**: List of contract documents (PDF, PNG, JPG, JPEG)
+    - **project_uuid**: Optional project UUID to link contracts
 
     Returns:
     - Summary of batch processing (total, successful, failed)
     - Individual results for each contract
     """
-    logger.info(f"Received batch processing request: {len(files)} files")
+    logger.info(f"Received batch processing request: {len(files)} files, project_uuid={project_uuid}")
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -203,6 +213,99 @@ async def process_multiple_contracts(files: List[UploadFile] = File(...)):
                        f"Completion: {total_completion_tokens}, Total: {total_tokens}")
 
         logger.info(f"Batch processing complete: {successful}/{len(results)} successful")
+
+        # Save to database if project_uuid provided
+        if project_uuid and successful > 0:
+            try:
+                from app.application.project.project_service import ProjectService
+                from app.infrastructure.database.models.contract import (
+                    ContractModel,
+                    ContractPartyModel,
+                    ContractRatePeriodModel,
+                )
+                from datetime import datetime
+                from uuid import UUID as UUIDType
+
+                project_service = ProjectService(db)
+                case = await project_service.get_or_create_case(
+                    UUIDType(project_uuid), "contract"
+                )
+
+                if case:
+                    processed_at = datetime.utcnow()
+                    for result in results:
+                        if result.success and result.data:
+                            # Create contract model
+                            contract = ContractModel(
+                                case_id=case.id,
+                                file_name=result.source_file,
+                                processed_at=processed_at,
+                                contract_title=result.data.contract_title,
+                                contract_type=result.data.contract_type,
+                                contract_number=result.data.contract_number,
+                                effective_date=result.data.effective_date,
+                                expiration_date=result.data.expiration_date,
+                                contract_date=result.data.contract_date,
+                                contract_value=result.data.contract_value,
+                                deposit_amount=result.data.deposit_amount,
+                                payment_terms=result.data.payment_terms,
+                                tenant=result.data.tenant,
+                                customer_name=result.data.customer_name,
+                                unit_for_lease=result.data.unit_for_lease,
+                                gla_for_lease=result.data.gla_for_lease,
+                                gfa=result.data.gfa,
+                                status=result.data.status,
+                                months=result.data.months,
+                                handover_date=result.data.handover_date,
+                                service_charge_rate=result.data.service_charge_rate,
+                                service_charge_applies_to=result.data.service_charge_applies_to,
+                                governing_law=result.data.governing_law,
+                                termination_clauses=result.data.termination_clauses,
+                                signatures_present=result.data.signatures_present or False,
+                                key_obligations=result.data.key_obligations,
+                                special_conditions=result.data.special_conditions,
+                                source_file=result.source_file,
+                                processing_time=result.processing_time,
+                            )
+                            db.add(contract)
+                            await db.flush()
+
+                            # Add parties
+                            if result.data.parties:
+                                for party in result.data.parties:
+                                    party_model = ContractPartyModel(
+                                        contract_id=contract.id,
+                                        name=party.name,
+                                        role=party.role,
+                                        address=party.address,
+                                    )
+                                    db.add(party_model)
+
+                            # Add rate periods
+                            if result.data.rate_periods:
+                                for period in result.data.rate_periods:
+                                    period_model = ContractRatePeriodModel(
+                                        contract_id=contract.id,
+                                        start_date=period.start_date,
+                                        end_date=period.end_date,
+                                        monthly_rate_per_sqm=period.monthly_rate_per_sqm,
+                                        total_monthly_rate=period.total_monthly_rate,
+                                        num_months=period.num_months,
+                                        foc_from=period.foc_from,
+                                        foc_to=period.foc_to,
+                                        foc_num_months=period.foc_num_months,
+                                        service_charge_rate_per_sqm=period.service_charge_rate_per_sqm,
+                                    )
+                                    db.add(period_model)
+
+                            # Increment file count
+                            await project_service.increment_case_file_count(case.id)
+
+                    await db.commit()
+                    logger.info(f"Saved {successful} contracts to project {project_uuid}")
+            except Exception as e:
+                logger.error(f"Failed to save contracts to database: {e}", exc_info=True)
+                # Don't fail the request, just log the error
 
         return BatchContractResult(
             success=True,
