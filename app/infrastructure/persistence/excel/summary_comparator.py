@@ -2299,3 +2299,394 @@ class SummaryComparator:
         except Exception as e:
             print(f"   Error generating Excel output file: {e}")
             raise
+
+    def _extract_month_from_filename(self, filename: str) -> str:
+        """
+        Extract month identifier from filename for output naming.
+        Looks for patterns like T9, T10, T11, or month names.
+
+        Args:
+            filename: The filename to extract month from
+
+        Returns:
+            Month identifier string (e.g., 'T9', 'T10', 'Nov')
+        """
+        import re
+
+        # Try to find T+number pattern (e.g., T9, T10, T11)
+        t_match = re.search(r'[Tt](\d{1,2})', filename)
+        if t_match:
+            return f"T{t_match.group(1)}"
+
+        # Try month abbreviations
+        month_patterns = [
+            (r'[Jj]an', 'Jan'), (r'[Ff]eb', 'Feb'), (r'[Mm]ar', 'Mar'),
+            (r'[Aa]pr', 'Apr'), (r'[Mm]ay', 'May'), (r'[Jj]un', 'Jun'),
+            (r'[Jj]ul', 'Jul'), (r'[Aa]ug', 'Aug'), (r'[Ss]ep', 'Sep'),
+            (r'[Oo]ct', 'Oct'), (r'[Nn]ov', 'Nov'), (r'[Dd]ec', 'Dec')
+        ]
+
+        for pattern, month in month_patterns:
+            if re.search(pattern, filename):
+                return month
+
+        # Fallback: use first part of filename
+        base = os.path.splitext(os.path.basename(filename))[0]
+        return base[:10] if len(base) > 10 else base
+
+    def _get_project_phase_statistics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Generate statistics grouped by Project and Phase.
+
+        Args:
+            df: DataFrame containing the data
+
+        Returns:
+            DataFrame with Project/Phase statistics
+        """
+        # Find Project and Phase columns (case-insensitive)
+        project_col = None
+        phase_col = None
+
+        for col in df.columns:
+            col_lower = col.lower().strip()
+            if 'project' in col_lower and project_col is None:
+                project_col = col
+            if 'phase' in col_lower and phase_col is None:
+                phase_col = col
+
+        if not project_col:
+            print("   Warning: No 'Project' column found for statistics")
+            return pd.DataFrame()
+
+        # Create grouping columns list
+        group_cols = [project_col]
+        if phase_col:
+            group_cols.append(phase_col)
+
+        # Group and count
+        try:
+            stats = df.groupby(group_cols).size().reset_index(name='Row Count')
+
+            # Add GLA sum if available
+            gla_col = None
+            for col in df.columns:
+                if 'gla' in col.lower():
+                    gla_col = col
+                    break
+
+            if gla_col:
+                gla_stats = df.groupby(group_cols)[gla_col].sum().reset_index()
+                gla_stats.columns = group_cols + ['Total GLA']
+                stats = stats.merge(gla_stats, on=group_cols, how='left')
+
+            return stats
+        except Exception as e:
+            print(f"   Warning: Could not generate Project/Phase statistics: {e}")
+            return pd.DataFrame()
+
+    def generate_unified_comparison_output(self, summary_old_path: str, summary_new_path: str,
+                                          output_dir: str = None) -> str:
+        """
+        Generate a UNIFIED comparison output file with all improvements:
+
+        1. MERGED FILE: Single output file with highlighted data + comparison sheets
+        2. ENHANCED HIGHLIGHTING:
+           - Light yellow background for entire updated rows
+           - Different color (orange/darker) for specific changed columns
+           - Yellow for new rows
+        3. PROJECT/PHASE STATISTICS: Summary table broken down by Project and Phase
+        4. ENHANCED NEW_ROWS SHEET: Includes Document Number, Item, Type columns
+        5. SMART FILENAME: Auto-named as "Leasing SS_Comparison [PrevMonth] – [CurrMonth].xlsx"
+
+        Args:
+            summary_old_path: Path to previous period Summary file
+            summary_new_path: Path to current period Summary file
+            output_dir: Directory to save output file (defaults to current directory)
+
+        Returns:
+            Path to the generated unified Excel file
+        """
+        from openpyxl import load_workbook
+        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        from openpyxl.utils.dataframe import dataframe_to_rows
+        import shutil
+
+        print("=" * 60)
+        print("GENERATING UNIFIED COMPARISON OUTPUT (v2.0)")
+        print("=" * 60)
+
+        try:
+            # Load both files
+            old_df = self.load_summary_file(summary_old_path)
+            new_df = self.load_summary_file(summary_new_path)
+
+            print(f"   Previous file: {len(old_df)} rows")
+            print(f"   Current file: {len(new_df)} rows")
+
+            # === IMPROVEMENT 5: Smart filename with month range ===
+            old_month = self._extract_month_from_filename(summary_old_path)
+            new_month = self._extract_month_from_filename(summary_new_path)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"Leasing SS_Comparison {old_month} – {new_month}_{timestamp}.xlsx"
+
+            if output_dir:
+                output_path = os.path.join(output_dir, output_filename)
+            else:
+                output_path = output_filename
+
+            print(f"   Output filename: {output_filename}")
+
+            # Get comparison results
+            comparison_results = self.compare_summary_files_by_document_item_key(
+                summary_old_path, summary_new_path, apply_90_day_filter=True
+            )
+
+            new_rows_indices = comparison_results['new_rows_indices']
+            update_rows_indices = comparison_results['update_rows_indices']
+            unchanged_rows_indices = comparison_results['unchanged_rows_indices']
+            changed_cells = comparison_results['changed_cells']
+
+            print(f"   New rows: {len(new_rows_indices)}")
+            print(f"   Updated rows: {len(update_rows_indices)}")
+            print(f"   Unchanged rows: {len(unchanged_rows_indices)}")
+
+            # === IMPROVEMENT 1: Create merged file (copy of new file as base) ===
+            shutil.copy2(summary_new_path, output_path)
+            print("   Created base file from current month data")
+
+            # Open the file for modifications
+            wb = load_workbook(output_path)
+
+            # Rename first sheet to 'Highlighted Data'
+            ws_main = wb.active
+            ws_main.title = 'Highlighted Data'
+
+            # === IMPROVEMENT 2: Enhanced highlighting ===
+            # Define colors
+            yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # New rows
+            blue_fill = PatternFill(start_color="B4C6E7", end_color="B4C6E7", fill_type="solid")  # Updated row background (light blue)
+            red_font = Font(color="FF0000", bold=True)  # Changed cells - red text
+            header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")  # Header
+
+            last_col = ws_main.max_column
+
+            # Apply yellow highlighting to NEW rows (entire row)
+            print(f"   Applying yellow highlight to {len(new_rows_indices)} new rows...")
+            for df_idx in new_rows_indices:
+                excel_row = df_idx + 2  # Convert to Excel row
+                try:
+                    for col in range(1, last_col + 1):
+                        cell = ws_main.cell(row=excel_row, column=col)
+                        cell.fill = yellow_fill
+                except Exception as e:
+                    print(f"   Warning: Could not highlight new row {excel_row}: {e}")
+
+            # Apply enhanced highlighting to UPDATED rows
+            # Blue background for entire row, red text for changed cells
+            print(f"   Applying enhanced highlight to {len(update_rows_indices)} updated rows...")
+            headers = list(new_df.columns)
+
+            for df_idx in update_rows_indices:
+                excel_row = df_idx + 2
+                try:
+                    # First apply blue background to entire row
+                    for col in range(1, last_col + 1):
+                        cell = ws_main.cell(row=excel_row, column=col)
+                        cell.fill = blue_fill
+
+                    # Then apply red text to changed cells
+                    if excel_row in changed_cells:
+                        for col_name in changed_cells[excel_row]:
+                            if col_name in headers:
+                                col_idx = headers.index(col_name) + 1
+                                cell = ws_main.cell(row=excel_row, column=col_idx)
+                                cell.font = red_font
+                except Exception as e:
+                    print(f"   Warning: Could not highlight updated row {excel_row}: {e}")
+
+            # === IMPROVEMENT 4: Create enhanced new_rows sheet with Document Number, Item, Type ===
+            ws_new_rows = wb.create_sheet('new_rows')
+
+            # Define columns to include (ensure Document Number, Item, Type are first)
+            priority_cols = ['Document Number', 'Type', 'Item']
+            other_cols = [col for col in new_df.columns if col not in priority_cols]
+            ordered_cols = priority_cols + other_cols
+
+            # Filter to only existing columns
+            ordered_cols = [col for col in ordered_cols if col in new_df.columns]
+
+            # Write headers
+            for col_idx, col_name in enumerate(ordered_cols, 1):
+                cell = ws_new_rows.cell(row=1, column=col_idx, value=col_name)
+                cell.fill = header_fill
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.alignment = Alignment(horizontal='center')
+
+            # Write new rows data
+            new_rows_df = new_df.iloc[new_rows_indices] if new_rows_indices else pd.DataFrame()
+            for row_idx, (df_idx, row) in enumerate(new_rows_df.iterrows(), 2):
+                for col_idx, col_name in enumerate(ordered_cols, 1):
+                    value = row.get(col_name, '')
+                    if pd.isna(value):
+                        value = ''
+                    ws_new_rows.cell(row=row_idx, column=col_idx, value=value)
+
+            print(f"   Created new_rows sheet with {len(new_rows_df)} rows")
+
+            # === Create update_rows sheet ===
+            ws_update_rows = wb.create_sheet('update_rows')
+
+            # Write headers
+            for col_idx, col_name in enumerate(ordered_cols, 1):
+                cell = ws_update_rows.cell(row=1, column=col_idx, value=col_name)
+                cell.fill = header_fill
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.alignment = Alignment(horizontal='center')
+
+            # Write update rows data with changed cells highlighted
+            update_rows_df = new_df.iloc[update_rows_indices] if update_rows_indices else pd.DataFrame()
+            for row_idx, (df_idx, row) in enumerate(update_rows_df.iterrows(), 2):
+                excel_row_in_main = df_idx + 2  # Row number in main sheet for changed_cells lookup
+                changed_cols_for_row = changed_cells.get(excel_row_in_main, [])
+
+                for col_idx, col_name in enumerate(ordered_cols, 1):
+                    value = row.get(col_name, '')
+                    if pd.isna(value):
+                        value = ''
+                    cell = ws_update_rows.cell(row=row_idx, column=col_idx, value=value)
+
+                    # Highlight changed cells with red text
+                    if col_name in changed_cols_for_row:
+                        cell.font = red_font
+
+            print(f"   Created update_rows sheet with {len(update_rows_df)} rows")
+
+            # === IMPROVEMENT 3: Add Project/Phase statistics to summary sheet ===
+            ws_summary = wb.create_sheet('Summary')
+
+            # Overall statistics
+            summary_data = [
+                ['COMPARISON SUMMARY', ''],
+                ['', ''],
+                ['Previous File', os.path.basename(summary_old_path)],
+                ['Current File', os.path.basename(summary_new_path)],
+                ['', ''],
+                ['Total Rows (Previous)', len(old_df)],
+                ['Total Rows (Current)', len(new_df)],
+                ['New Rows', len(new_rows_indices)],
+                ['Updated Rows', len(update_rows_indices)],
+                ['Unchanged Rows', len(unchanged_rows_indices)],
+                ['', ''],
+                ['Comparison Method', 'Document Number + Type + Item'],
+                ['90-Day Filter', 'Applied'],
+                ['Generated At', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
+            ]
+
+            for row_idx, row_data in enumerate(summary_data, 1):
+                for col_idx, value in enumerate(row_data, 1):
+                    cell = ws_summary.cell(row=row_idx, column=col_idx, value=value)
+                    if row_idx == 1:
+                        cell.font = Font(bold=True, size=14)
+
+            # Add Project/Phase statistics
+            current_row = len(summary_data) + 3
+
+            # Statistics for NEW rows
+            ws_summary.cell(row=current_row, column=1, value='NEW ROWS BY PROJECT/PHASE').font = Font(bold=True, size=12)
+            current_row += 1
+
+            if new_rows_indices:
+                new_rows_stats = self._get_project_phase_statistics(new_df.iloc[new_rows_indices])
+                if not new_rows_stats.empty:
+                    # Write headers
+                    for col_idx, col_name in enumerate(new_rows_stats.columns, 1):
+                        cell = ws_summary.cell(row=current_row, column=col_idx, value=col_name)
+                        cell.fill = header_fill
+                        cell.font = Font(bold=True, color="FFFFFF")
+                    current_row += 1
+
+                    # Write data
+                    for _, row in new_rows_stats.iterrows():
+                        for col_idx, value in enumerate(row, 1):
+                            ws_summary.cell(row=current_row, column=col_idx, value=value)
+                        current_row += 1
+                else:
+                    ws_summary.cell(row=current_row, column=1, value='No Project/Phase data available')
+                    current_row += 1
+            else:
+                ws_summary.cell(row=current_row, column=1, value='No new rows')
+                current_row += 1
+
+            current_row += 2
+
+            # Statistics for UPDATE rows
+            ws_summary.cell(row=current_row, column=1, value='UPDATED ROWS BY PROJECT/PHASE').font = Font(bold=True, size=12)
+            current_row += 1
+
+            if update_rows_indices:
+                update_rows_stats = self._get_project_phase_statistics(new_df.iloc[update_rows_indices])
+                if not update_rows_stats.empty:
+                    # Write headers
+                    for col_idx, col_name in enumerate(update_rows_stats.columns, 1):
+                        cell = ws_summary.cell(row=current_row, column=col_idx, value=col_name)
+                        cell.fill = header_fill
+                        cell.font = Font(bold=True, color="FFFFFF")
+                    current_row += 1
+
+                    # Write data
+                    for _, row in update_rows_stats.iterrows():
+                        for col_idx, value in enumerate(row, 1):
+                            ws_summary.cell(row=current_row, column=col_idx, value=value)
+                        current_row += 1
+                else:
+                    ws_summary.cell(row=current_row, column=1, value='No Project/Phase data available')
+                    current_row += 1
+            else:
+                ws_summary.cell(row=current_row, column=1, value='No updated rows')
+                current_row += 1
+
+            # Add legend
+            current_row += 2
+            ws_summary.cell(row=current_row, column=1, value='HIGHLIGHTING LEGEND').font = Font(bold=True, size=12)
+            current_row += 1
+
+            # Legend item 1: Yellow for new rows
+            cell = ws_summary.cell(row=current_row, column=1, value='Yellow Row')
+            cell.fill = yellow_fill
+            ws_summary.cell(row=current_row, column=2, value='New row (Document Number + Type + Item not in previous file)')
+            current_row += 1
+
+            # Legend item 2: Blue for updated rows
+            cell = ws_summary.cell(row=current_row, column=1, value='Blue Row')
+            cell.fill = blue_fill
+            ws_summary.cell(row=current_row, column=2, value='Updated row (existing combination with changes)')
+            current_row += 1
+
+            # Legend item 3: Red text for changed cells
+            cell = ws_summary.cell(row=current_row, column=1, value='Red Text')
+            cell.fill = blue_fill
+            cell.font = red_font
+            ws_summary.cell(row=current_row, column=2, value='Specific cell that changed value')
+            current_row += 1
+
+            # Adjust column widths
+            ws_summary.column_dimensions['A'].width = 30
+            ws_summary.column_dimensions['B'].width = 60
+
+            # Save the workbook
+            wb.save(output_path)
+            wb.close()
+
+            print("=" * 60)
+            print(f"UNIFIED OUTPUT GENERATED: {output_path}")
+            print("=" * 60)
+
+            return output_path
+
+        except Exception as e:
+            print(f"   Error generating unified comparison output: {e}")
+            import traceback
+            traceback.print_exc()
+            raise

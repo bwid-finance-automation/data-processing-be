@@ -28,6 +28,15 @@ except ImportError:
     ANTHROPIC_AVAILABLE = False
 
 from app.shared.utils.logging_config import get_logger
+from app.shared.prompts import (
+    GLA_VARIANCE_SYSTEM_PROMPT,
+    GLA_NOTES_SYSTEM_PROMPT,
+    GLA_FILE_STRUCTURE_SYSTEM_PROMPT,
+    format_variance_data,
+    get_variance_user_prompt,
+    get_notes_user_prompt,
+    get_file_structure_user_prompt,
+)
 from ..models.gla_models import GLAVarianceResult, GLAAnalysisSummary, TenantChange
 
 logger = get_logger(__name__)
@@ -88,106 +97,15 @@ class GLAAIAnalyzer:
 
     def _get_system_prompt(self) -> str:
         """Get the system prompt for GLA variance analysis."""
-        return """You are a senior real estate analyst specializing in industrial properties in Vietnam.
-You are analyzing Gross Leasable Area (GLA) variance data for BW Industrial Development.
-
-Your role is to:
-1. Analyze changes in Handover GLA (units already handed over to tenants)
-2. Analyze changes in Committed GLA (units with signed contracts - Open + Handed Over)
-3. Provide business explanations for significant variances
-4. Identify patterns and trends across the portfolio
-
-Key concepts:
-- RBF = Ready Built Factory (industrial manufacturing space)
-- RBW = Ready Built Warehouse (logistics and storage space)
-- Positive variance = GLA increased (new leases, handovers)
-- Negative variance = GLA decreased (terminations, lease expirations)
-- Committed > Handover typically indicates pipeline deals not yet handed over
-
-Common reasons for GLA changes:
-- New tenant handovers
-- Lease terminations (early or normal)
-- Contract expansions
-- New committed deals (signed but not yet handed over)
-- Project completions adding new inventory
-
-When analyzing, consider:
-- Materiality (changes > 1,000 sqm are significant)
-- Regional trends (North vs South Vietnam)
-- Product type trends (RBF vs RBW demand)
-- Individual project performance"""
+        return GLA_VARIANCE_SYSTEM_PROMPT
 
     def _format_variance_data(self, summary: GLAAnalysisSummary) -> str:
         """Format variance data for the AI prompt."""
-        lines = []
-        lines.append("GLA VARIANCE DATA")
-        lines.append("=" * 60)
-        lines.append(f"Period: {summary.previous_period} to {summary.current_period}")
-        lines.append("")
-        lines.append("PROJECT DETAILS:")
-        lines.append("-" * 60)
-        lines.append(f"{'Project':<30} {'Type':<5} {'Region':<8} {'Committed Var':>15} {'Handover Var':>15}")
-        lines.append("-" * 60)
-
-        # Sort by absolute variance for importance
-        sorted_results = sorted(
-            summary.results,
-            key=lambda r: abs(r.committed_variance) + abs(r.handover_variance),
-            reverse=True
-        )
-
-        for r in sorted_results:
-            if r.committed_variance != 0 or r.handover_variance != 0:
-                lines.append(
-                    f"{r.project_name:<30} {r.product_type:<5} {r.region:<8} "
-                    f"{r.committed_variance:>15,.2f} {r.handover_variance:>15,.2f}"
-                )
-
-        lines.append("")
-        lines.append("PORTFOLIO TOTALS:")
-        lines.append("-" * 60)
-        lines.append(f"Total RBF Committed Variance: {summary.total_rbf_committed_variance:,.2f} sqm")
-        lines.append(f"Total RBF Handover Variance: {summary.total_rbf_handover_variance:,.2f} sqm")
-        lines.append(f"Total RBW Committed Variance: {summary.total_rbw_committed_variance:,.2f} sqm")
-        lines.append(f"Total RBW Handover Variance: {summary.total_rbw_handover_variance:,.2f} sqm")
-        lines.append(f"Total Portfolio Committed Variance: {summary.total_portfolio_committed_variance:,.2f} sqm")
-        lines.append(f"Total Portfolio Handover Variance: {summary.total_portfolio_handover_variance:,.2f} sqm")
-
-        return "\n".join(lines)
+        return format_variance_data(summary)
 
     def _get_user_prompt(self, summary: GLAAnalysisSummary) -> str:
         """Generate the user prompt with variance data."""
-        data = self._format_variance_data(summary)
-
-        return f"""{data}
-
-Please analyze this GLA variance data and provide:
-
-1. **Executive Summary** (2-3 sentences)
-   - Overall portfolio performance
-   - Key highlights
-
-2. **Significant Changes** (top 5-10 projects by impact)
-   For each significant project, provide:
-   - Project name and product type
-   - Variance amounts (Committed and Handover)
-   - Likely business explanation
-   - Risk or opportunity assessment
-
-3. **Regional Analysis**
-   - North vs South performance comparison
-   - Regional trends
-
-4. **Product Type Analysis**
-   - RBF vs RBW demand trends
-   - Market insights
-
-5. **Recommendations**
-   - Areas requiring attention
-   - Opportunities to pursue
-
-Format your response in clear markdown with headers and bullet points.
-Be specific and quantitative where possible."""
+        return get_variance_user_prompt(summary)
 
     def analyze_variance(
         self,
@@ -409,25 +327,10 @@ Be specific and quantitative where possible."""
                 # Create a batch prompt for efficiency
                 prompt = self._create_notes_prompt(projects_with_variance)
 
-                system_prompt = """You are a real estate analyst for BW Industrial.
-Based on the tenant change data provided, generate concise notes explaining each variance.
-Focus on the most significant tenant changes (largest GLA impact).
-
-Format each note as: "[Tenant1] (+X sqm), [Tenant2] (-Y sqm)" or similar brief explanation.
-Keep each note under 100 characters.
-
-Return a JSON array with objects containing:
-- project_name: string
-- product_type: string
-- committed_note: string (brief explanation of committed GLA change)
-- handover_note: string (brief explanation of handover GLA change)
-
-Only include projects where you have meaningful tenant information."""
-
                 if self.is_claude:
-                    response = self._call_claude(system_prompt, prompt)
+                    response = self._call_claude(GLA_NOTES_SYSTEM_PROMPT, prompt)
                 else:
-                    response = self._call_openai(system_prompt, prompt)
+                    response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
 
                 # Parse JSON response
                 notes = self._parse_notes_response(response.get("content", ""))
@@ -475,29 +378,7 @@ Only include projects where you have meaningful tenant information."""
 
     def _create_notes_prompt(self, results: List[GLAVarianceResult]) -> str:
         """Create prompt for generating project notes with tenant details."""
-        lines = ["Generate brief explanations for these GLA variances. Tenant change data is provided:", ""]
-
-        for r in results:
-            lines.append(f"Project: {r.project_name} ({r.product_type}, {r.region})")
-            lines.append(f"  Committed: {r.committed_previous:,.0f} -> {r.committed_current:,.0f} ({r.committed_variance:+,.0f} sqm)")
-
-            # Include committed tenant changes
-            if r.committed_tenant_changes:
-                lines.append("  Committed tenant changes:")
-                for tc in r.committed_tenant_changes[:5]:
-                    lines.append(f"    - {tc.tenant_name}: {tc.previous_gla:,.0f} -> {tc.current_gla:,.0f} ({tc.change_type})")
-
-            lines.append(f"  Handover: {r.handover_previous:,.0f} -> {r.handover_current:,.0f} ({r.handover_variance:+,.0f} sqm)")
-
-            # Include handover tenant changes
-            if r.handover_tenant_changes:
-                lines.append("  Handover tenant changes:")
-                for tc in r.handover_tenant_changes[:5]:
-                    lines.append(f"    - {tc.tenant_name}: {tc.previous_gla:,.0f} -> {tc.current_gla:,.0f} ({tc.change_type})")
-
-            lines.append("")
-
-        return "\n".join(lines)
+        return get_notes_user_prompt(results)
 
     def _parse_notes_response(self, content: str) -> List[Dict[str, str]]:
         """Parse AI response for project notes."""
@@ -522,3 +403,276 @@ Only include projects where you have meaningful tenant information."""
         except Exception as e:
             logger.warning(f"Failed to parse notes JSON: {e}")
             return []
+
+    def detect_file_structure(self, file_path: str, sheet_name: str = None) -> Dict[str, Any]:
+        """
+        Use AI to dynamically detect the structure of a GLA Excel file.
+
+        This is a FULLY AI-POWERED detection that sends all relevant Excel data
+        to the AI and receives complete structure analysis including all monthly
+        column mappings.
+
+        Args:
+            file_path: Path to the Excel file
+            sheet_name: Optional specific sheet to analyze
+
+        Returns:
+            Dict with detected structure including monthly_columns mapping
+        """
+        import pandas as pd
+
+        logger.info(f"AI detecting file structure for: {file_path}")
+
+        if not self.client:
+            logger.error("No AI client available - AI detection requires an API key")
+            raise ValueError("AI client required for file structure detection. Please configure OPENAI_API_KEY or ANTHROPIC_API_KEY.")
+
+        try:
+            xl = pd.ExcelFile(file_path)
+            sheets = xl.sheet_names if sheet_name is None else [sheet_name]
+
+            # Find target sheet
+            target_sheet = None
+            for s in sheets:
+                if 'handover' in s.lower() or 'committed' in s.lower():
+                    target_sheet = s
+                    break
+            if not target_sheet:
+                target_sheet = sheets[0]
+
+            # Read raw data for AI analysis
+            df_raw = pd.read_excel(file_path, sheet_name=target_sheet, header=None, nrows=10)
+
+            # Build comprehensive data for AI - include ALL date columns with headers
+            ai_data = self._extract_complete_file_data(df_raw, file_path, target_sheet)
+
+            # Send to AI for complete analysis
+            result = self._ai_analyze_file_structure(ai_data)
+
+            logger.info(f"AI detection complete: format={result.get('format')}, monthly_columns={len(result.get('monthly_columns', {}))}")
+            return result
+
+        except Exception as e:
+            logger.error(f"AI file structure detection failed: {e}")
+            raise
+
+    def _extract_complete_file_data(self, df_raw, file_path: str, sheet_name: str) -> Dict[str, Any]:
+        """Extract complete file data for AI analysis - includes ALL date columns."""
+        import pandas as pd
+        import os
+
+        data = {
+            'file_name': os.path.basename(file_path),
+            'sheet_name': sheet_name,
+            'total_columns': len(df_raw.columns),
+            'first_rows': [],
+            'date_columns': []
+        }
+
+        # Extract first 6 rows (first 15 columns each)
+        for row_idx in range(min(6, len(df_raw))):
+            row_data = []
+            for col_idx in range(min(15, len(df_raw.columns))):
+                val = df_raw.iloc[row_idx, col_idx]
+                if pd.notna(val):
+                    row_data.append({'col': col_idx, 'value': str(val)[:30]})
+            data['first_rows'].append({'row': row_idx, 'cells': row_data})
+
+        # Find ALL date columns with their headers
+        for row_idx in range(min(5, len(df_raw))):
+            row = df_raw.iloc[row_idx]
+            header_row = df_raw.iloc[row_idx + 1] if row_idx + 1 < len(df_raw) else None
+
+            for col_idx, val in enumerate(row):
+                if pd.notna(val) and hasattr(val, 'month'):
+                    header = ""
+                    if header_row is not None and col_idx < len(header_row):
+                        header = str(header_row.iloc[col_idx]).strip() if pd.notna(header_row.iloc[col_idx]) else ""
+
+                    data['date_columns'].append({
+                        'column_index': col_idx,
+                        'date_row': row_idx,
+                        'date_value': val.strftime('%Y-%m-%d') if hasattr(val, 'strftime') else str(val),
+                        'year': val.year if hasattr(val, 'year') else None,
+                        'month': val.month if hasattr(val, 'month') else None,
+                        'header': header
+                    })
+
+        return data
+
+    def _ai_analyze_file_structure(self, file_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Send file data to AI for complete structure analysis."""
+        user_prompt = get_file_structure_user_prompt(file_data)
+
+        try:
+            if self.is_claude:
+                response = self._call_claude(GLA_FILE_STRUCTURE_SYSTEM_PROMPT, user_prompt)
+            else:
+                response = self._call_openai(GLA_FILE_STRUCTURE_SYSTEM_PROMPT, user_prompt)
+
+            content = response.get("content", "")
+            result = self._parse_structure_response(content)
+
+            # Convert monthly_columns from "YYYY-MM" string keys to (year, month) tuples
+            if result.get("monthly_columns"):
+                converted = {}
+                for key, col_idx in result["monthly_columns"].items():
+                    if isinstance(key, str) and '-' in key:
+                        parts = key.split('-')
+                        year = int(parts[0])
+                        month = int(parts[1])
+                        converted[(year, month)] = col_idx
+                result["monthly_columns"] = converted
+
+            # If AI didn't return monthly_columns but detected pivot_table,
+            # extract from the date_columns data we already have
+            if result.get("format") == "pivot_table" and not result.get("monthly_columns"):
+                gla_header = result.get("monthly_gla_header", "Handover GLA")
+                monthly_cols = {}
+                for dc in file_data['date_columns']:
+                    if dc['header'] == gla_header and dc['year'] and dc['month']:
+                        monthly_cols[(dc['year'], dc['month'])] = dc['column_index']
+                result["monthly_columns"] = monthly_cols
+                logger.info(f"Extracted {len(monthly_cols)} monthly columns from file data")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"AI analysis failed: {e}")
+            raise
+
+    def _parse_structure_response(self, content: str) -> Dict[str, Any]:
+        """Parse AI response for structure detection."""
+        try:
+            # Try to extract JSON from response
+            if "```json" in content:
+                start = content.find("```json") + 7
+                end = content.find("```", start)
+                content = content[start:end].strip()
+            elif "```" in content:
+                start = content.find("```") + 3
+                end = content.find("```", start)
+                content = content[start:end].strip()
+
+            # Find JSON object
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                content = content[start:end]
+
+            return json.loads(content)
+        except Exception as e:
+            logger.error(f"Failed to parse structure JSON: {e}")
+            raise ValueError(f"AI returned invalid JSON response: {e}")
+
+    def detect_comparison_months(self, file_path: str, sheet_names: List[str] = None) -> Dict[str, Any]:
+        """
+        Detect which months should be compared based on file name and sheet structure.
+
+        Priority:
+        1. Extract months from filename (Dec-Nov, T11-T12, etc.)
+        2. Validate against available data columns
+        3. Find matching year from available data
+        4. Fallback to most recent months in data
+
+        Args:
+            file_path: Path to the Excel file
+            sheet_names: Optional list of sheet names to analyze
+
+        Returns:
+            Dict with:
+            {
+                "previous_month": (year, month),
+                "current_month": (year, month),
+                "source": "filename" | "sheet_data" | "default"
+            }
+        """
+        import re
+        import os
+
+        filename = os.path.basename(file_path)
+
+        # First, get available months from the data
+        structure = self.detect_file_structure(file_path)
+        available_months = []
+        if structure.get("format") == "pivot_table" and structure.get("monthly_columns"):
+            available_months = sorted(structure["monthly_columns"].keys())
+            logger.info(f"Available months in data: {available_months}")
+
+        month_map = {
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+
+        # Try "Month1-Month2" pattern (e.g., "Dec-Nov")
+        # Convention: First month is CURRENT, second is PREVIOUS
+        # Example: "Dec-Nov" means comparing Dec (current) vs Nov (previous)
+        pattern = r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[^\w]*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)'
+        match = re.search(pattern, filename.lower())
+
+        if match:
+            current_month_num = month_map[match.group(1)]  # First month = current
+            previous_month_num = month_map[match.group(2)]  # Second month = previous
+
+            # Find the correct year from available data
+            prev_found = None
+            curr_found = None
+
+            for year, month in available_months:
+                if month == previous_month_num and prev_found is None:
+                    prev_found = (year, month)
+                if month == current_month_num and curr_found is None:
+                    curr_found = (year, month)
+
+            if prev_found and curr_found:
+                logger.info(f"Matched filename months to data: {prev_found} (prev) -> {curr_found} (curr)")
+                return {
+                    "previous_month": prev_found,
+                    "current_month": curr_found,
+                    "source": "filename"
+                }
+
+        # Try "T##-T##" pattern (Vietnamese month notation)
+        # Convention: First T## is CURRENT, second is PREVIOUS
+        # Example: "T12-T11" means comparing T12 (current) vs T11 (previous)
+        t_pattern = r'[Tt](\d{1,2})[^\d]+[Tt](\d{1,2})'
+        match = re.search(t_pattern, filename)
+
+        if match:
+            current_month_num = int(match.group(1))  # First T## = current
+            previous_month_num = int(match.group(2))  # Second T## = previous
+
+            # Find the correct year from available data
+            prev_found = None
+            curr_found = None
+
+            for year, month in available_months:
+                if month == previous_month_num and prev_found is None:
+                    prev_found = (year, month)
+                if month == current_month_num and curr_found is None:
+                    curr_found = (year, month)
+
+            if prev_found and curr_found:
+                logger.info(f"Matched T-notation months to data: {prev_found} (prev) -> {curr_found} (curr)")
+                return {
+                    "previous_month": prev_found,
+                    "current_month": curr_found,
+                    "source": "filename"
+                }
+
+        # Fallback: use the two most recent months from the data
+        if len(available_months) >= 2:
+            logger.info(f"Using most recent months from data: {available_months[-2]} -> {available_months[-1]}")
+            return {
+                "previous_month": available_months[-2],
+                "current_month": available_months[-1],
+                "source": "sheet_data"
+            }
+
+        # Default to Nov-Dec 2024
+        logger.warning("Could not detect months, using default Nov-Dec 2024")
+        return {
+            "previous_month": (2024, 11),
+            "current_month": (2024, 12),
+            "source": "default"
+        }

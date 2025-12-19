@@ -500,3 +500,260 @@ class GLAProcessor:
             raise
 
         return result
+
+    def process_pivot_table_file(
+        self,
+        file_path: str,
+        previous_month: Tuple[int, int] = None,
+        current_month: Tuple[int, int] = None,
+        ai_analyzer=None
+    ) -> Dict[str, Dict[str, Dict[Tuple[str, str], ProjectGLASummary]]]:
+        """
+        Process a pivot table format Excel file where monthly GLA values are in separate columns.
+
+        This method uses AI detection to identify the file structure and extract the correct
+        monthly GLA columns for comparison.
+
+        Args:
+            file_path: Path to the Excel file
+            previous_month: Tuple of (year, month) for previous period, e.g., (2024, 11)
+            current_month: Tuple of (year, month) for current period, e.g., (2024, 12)
+            ai_analyzer: Optional GLAAIAnalyzer instance for structure detection
+
+        Returns:
+            Dict with structure: {
+                'handover': {'previous': {...}, 'current': {...}},
+                'committed': {'previous': {...}, 'current': {...}}
+            }
+        """
+        from .gla_ai_analyzer import GLAAIAnalyzer
+
+        logger.info(f"Processing pivot table file: {file_path}")
+
+        # Initialize AI analyzer if not provided
+        if ai_analyzer is None:
+            ai_analyzer = GLAAIAnalyzer()
+
+        # Detect file structure
+        structure = ai_analyzer.detect_file_structure(file_path)
+        logger.info(f"Detected format: {structure.get('format')}")
+
+        if structure.get('format') != 'pivot_table':
+            logger.info("File is not pivot table format, using standard processing")
+            return self.process_single_file_with_periods(file_path)
+
+        # Detect comparison months if not provided
+        if previous_month is None or current_month is None:
+            months = ai_analyzer.detect_comparison_months(file_path)
+            previous_month = previous_month or months.get('previous_month')
+            current_month = current_month or months.get('current_month')
+            logger.info(f"Detected months - Previous: {previous_month}, Current: {current_month}")
+
+        monthly_columns = structure.get('monthly_columns', {})
+        date_row = structure.get('date_row', 3)
+        header_row = structure.get('header_row', 4)
+        data_start_row = structure.get('data_start_row', 5)
+
+        # Validate that we have the required months
+        if previous_month not in monthly_columns:
+            logger.warning(f"Previous month {previous_month} not found in data. Available: {list(monthly_columns.keys())}")
+        if current_month not in monthly_columns:
+            logger.warning(f"Current month {current_month} not found in data. Available: {list(monthly_columns.keys())}")
+
+        pivot_result = {
+            'handover': {'previous': {}, 'current': {}},
+            'committed': {'previous': {}, 'current': {}}
+        }
+
+        try:
+            xl = pd.ExcelFile(file_path)
+            sheet_names = xl.sheet_names
+
+            for sheet_name in sheet_names:
+                # Skip output sheets
+                if sheet_name.startswith('>>') or sheet_name.lower() == 'output':
+                    continue
+
+                data_type, _ = self.detect_sheet_type(sheet_name)
+                if data_type == 'unknown':
+                    continue
+
+                logger.info(f"Processing pivot sheet '{sheet_name}' for {data_type}")
+
+                # Get monthly columns for this sheet (they might differ slightly)
+                sheet_structure = ai_analyzer.detect_file_structure(file_path, sheet_name)
+                sheet_monthly_cols = sheet_structure.get('monthly_columns', monthly_columns)
+
+                # Process previous month
+                if previous_month in sheet_monthly_cols:
+                    prev_summaries = self._aggregate_pivot_data(
+                        file_path, sheet_name, data_type,
+                        sheet_monthly_cols[previous_month],
+                        header_row, data_start_row
+                    )
+                    pivot_result[data_type]['previous'] = prev_summaries
+                    logger.info(f"  Previous ({previous_month}): {len(prev_summaries)} projects")
+
+                # Process current month
+                if current_month in sheet_monthly_cols:
+                    curr_summaries = self._aggregate_pivot_data(
+                        file_path, sheet_name, data_type,
+                        sheet_monthly_cols[current_month],
+                        header_row, data_start_row
+                    )
+                    pivot_result[data_type]['current'] = curr_summaries
+                    logger.info(f"  Current ({current_month}): {len(curr_summaries)} projects")
+
+        except Exception as e:
+            logger.error(f"Error processing pivot table file: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+        return pivot_result
+
+    def _aggregate_pivot_data(
+        self,
+        file_path: str,
+        sheet_name: str,
+        data_type: str,
+        gla_column_idx: int,
+        header_row: int,
+        data_start_row: int
+    ) -> Dict[Tuple[str, str], ProjectGLASummary]:
+        """
+        Aggregate GLA data from a specific column in a pivot table format file.
+
+        Args:
+            file_path: Path to Excel file
+            sheet_name: Sheet name to process
+            data_type: 'handover' or 'committed'
+            gla_column_idx: Column index for the GLA values
+            header_row: Row index containing column headers
+            data_start_row: Row index where data starts
+
+        Returns:
+            Dict mapping (project_name, product_type) to ProjectGLASummary
+        """
+        logger.debug(f"Aggregating pivot data from column {gla_column_idx}")
+
+        # Read the full sheet
+        df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+
+        # Get headers for column name lookup
+        headers = df_raw.iloc[header_row].tolist()
+
+        # Find key column indices
+        project_col = None
+        product_type_col = None
+        region_col = None
+        tenant_col = None
+        status_col = None
+        bwid_project_col = None
+
+        for col_idx, header in enumerate(headers):
+            if pd.isna(header):
+                continue
+            header_str = str(header).strip()
+
+            if header_str == 'Project Name':
+                project_col = col_idx
+            elif header_str == 'CCS_Product Type':
+                product_type_col = col_idx
+            elif header_str == 'Region':
+                region_col = col_idx
+            elif header_str in ['Tenant', 'Tenant Name', 'Customer Name']:
+                tenant_col = col_idx
+            elif header_str == 'Unit for Lease Status':
+                status_col = col_idx
+            elif header_str == 'BWID Project.':
+                bwid_project_col = col_idx
+
+        if project_col is None or product_type_col is None:
+            logger.warning(f"Could not find required columns. Project: {project_col}, Type: {product_type_col}")
+            return {}
+
+        # Get data rows
+        data = df_raw.iloc[data_start_row:].copy()
+
+        # Aggregate by project and product type
+        summaries: Dict[Tuple[str, str], ProjectGLASummary] = {}
+        tenant_data: Dict[Tuple[str, str], Dict[str, TenantGLA]] = {}
+
+        for idx in range(len(data)):
+            row = data.iloc[idx]
+
+            try:
+                project_code = str(row.iloc[project_col]).strip() if pd.notna(row.iloc[project_col]) else ''
+                product_type = str(row.iloc[product_type_col]).strip() if pd.notna(row.iloc[product_type_col]) else ''
+                region = str(row.iloc[region_col]).strip() if region_col and pd.notna(row.iloc[region_col]) else ''
+                gla = pd.to_numeric(row.iloc[gla_column_idx], errors='coerce')
+
+                if pd.isna(gla):
+                    gla = 0.0
+
+                # Get tenant name
+                tenant_name = "Unknown"
+                if tenant_col and pd.notna(row.iloc[tenant_col]):
+                    tenant_name = str(row.iloc[tenant_col]).strip()
+                    if not tenant_name or tenant_name == '- None -':
+                        tenant_name = "Vacant"
+
+                # Get status for filtering
+                status = ""
+                if status_col and pd.notna(row.iloc[status_col]):
+                    status = str(row.iloc[status_col]).strip()
+
+                # Apply status filter based on data type
+                if data_type == 'handover':
+                    if status != LeaseStatus.HANDED_OVER.value:
+                        continue
+                elif data_type == 'committed':
+                    if status not in [LeaseStatus.OPEN.value, LeaseStatus.HANDED_OVER.value]:
+                        continue
+
+                # Skip invalid records
+                if not project_code or not product_type:
+                    continue
+
+                # Only process RBF and RBW
+                if product_type not in [ProductType.RBF.value, ProductType.RBW.value]:
+                    continue
+
+                # Get readable project name
+                bwid_project = row.iloc[bwid_project_col] if bwid_project_col and pd.notna(row.iloc[bwid_project_col]) else ''
+                readable_name = self.extract_readable_project_name(bwid_project, project_code)
+
+                key = (readable_name, product_type)
+
+                if key not in summaries:
+                    summaries[key] = ProjectGLASummary(
+                        project_name=readable_name,
+                        product_type=product_type,
+                        region=region,
+                        gla_sqm=0.0,
+                        tenants=[]
+                    )
+                    tenant_data[key] = {}
+
+                summaries[key].gla_sqm += gla
+
+                # Track tenant GLA
+                if tenant_name not in tenant_data[key]:
+                    tenant_data[key][tenant_name] = TenantGLA(
+                        tenant_name=tenant_name,
+                        gla_sqm=0.0,
+                        status=status
+                    )
+                tenant_data[key][tenant_name].gla_sqm += gla
+
+            except Exception as e:
+                logger.warning(f"Error processing row {idx}: {e}")
+                continue
+
+        # Convert tenant dicts to lists
+        for key, tenant_dict in tenant_data.items():
+            summaries[key].tenants = list(tenant_dict.values())
+
+        logger.debug(f"Aggregated {len(summaries)} project-type combinations")
+        return summaries
