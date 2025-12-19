@@ -3,8 +3,8 @@
 from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
-import hashlib
 
+from passlib.hash import bcrypt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database.models.project import ProjectModel, ProjectCaseModel
@@ -31,13 +31,18 @@ class ProjectService:
 
     @staticmethod
     def hash_password(password: str) -> str:
-        """Hash password using SHA256."""
-        return hashlib.sha256(password.encode()).hexdigest()
+        """Hash password using bcrypt."""
+        return bcrypt.hash(password)
 
     @staticmethod
     def verify_password(password: str, password_hash: str) -> bool:
-        """Verify password against hash."""
-        return hashlib.sha256(password.encode()).hexdigest() == password_hash
+        """Verify password against bcrypt hash."""
+        try:
+            return bcrypt.verify(password, password_hash)
+        except ValueError:
+            # Fallback for legacy SHA256 hashes (backward compatibility)
+            import hashlib
+            return hashlib.sha256(password.encode()).hexdigest() == password_hash
 
     # ============== Project Operations ==============
 

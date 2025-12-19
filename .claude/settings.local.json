@@ -5,7 +5,13 @@
       "Bash(python:*)",
       "Bash(netstat:*)",
       "Bash(findstr:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(set:*)",
+      "Bash(psql:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(cd:*)",
+      "Bash(alembic stamp:*)"
     ],
     "deny": [],
     "ask": []

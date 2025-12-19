@@ -17,3 +17,6 @@ logs/
 outputs/
 uploads/
 sample_for_test
+
+# Claude
+.claude/

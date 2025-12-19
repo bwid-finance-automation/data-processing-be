@@ -122,11 +122,12 @@ class KBANKParser(BaseBankParser):
                 if "current balance" in row_text or "số dư hiện tại" in row_text:
                     continue
 
-                # Standard mapping:
-                # Debit = "Debit Amount" column (Số tiền ghi nợ) = money OUT
-                # Credit = "Credit Amount" column (Số tiền ghi có) = money IN
-                debit_val = self._fix_number_kbank(row.get(col_debit)) if col_debit else None
-                credit_val = self._fix_number_kbank(row.get(col_credit)) if col_credit else None
+                # KBANK mapping (swapped for ERP convention):
+                # In bank file: "Debit Amount" = money OUT, "Credit Amount" = money IN
+                # In ERP output: Debit = money IN, Credit = money OUT
+                # So we swap: file's Credit → output Debit, file's Debit → output Credit
+                debit_val = self._fix_number_kbank(row.get(col_credit)) if col_credit else None   # Credit Amount → Debit
+                credit_val = self._fix_number_kbank(row.get(col_debit)) if col_debit else None    # Debit Amount → Credit
 
                 # Skip rows where both are zero/blank
                 if (debit_val is None or debit_val == 0) and (credit_val is None or credit_val == 0):
@@ -228,6 +229,7 @@ class KBANKParser(BaseBankParser):
                 col_balance = self._find_column(data, ["balance", "số dư"])
 
                 if col_balance:
+                    # In bank file: Debit = money OUT, Credit = money IN
                     data["_Out"] = data[col_debit_src].apply(self._fix_number_kbank) if col_debit_src else 0
                     data["_In"] = data[col_credit_src].apply(self._fix_number_kbank) if col_credit_src else 0
                     data["_Bal"] = data[col_balance].apply(self._fix_number_kbank)
@@ -235,8 +237,8 @@ class KBANKParser(BaseBankParser):
                     # Find first row with a valid balance (skip Previous Balance row which has no date)
                     for _, row in data.iterrows():
                         first_bal = row.get("_Bal")
-                        first_out = row.get("_Out")
-                        first_in = row.get("_In")
+                        first_out = row.get("_Out")  # Debit Amount = money OUT
+                        first_in = row.get("_In")    # Credit Amount = money IN
 
                         # Skip if balance is NaN or if this looks like the "Previous Balance" row
                         if pd.isna(first_bal):
@@ -249,6 +251,8 @@ class KBANKParser(BaseBankParser):
                             first_in = 0
 
                         # Calculate opening: balance + outflow - inflow
+                        # Bank convention: balance = previous_balance - debit + credit
+                        # So: previous_balance = balance + debit - credit = balance + out - in
                         opening = first_bal + first_out - first_in
                         break
 
@@ -513,23 +517,27 @@ class KBANKParser(BaseBankParser):
                 # Build final description
                 description = ' '.join(description_parts).strip()
 
-                # Parse amounts: [Debit, Credit, Balance]
+                # Parse amounts: [Debit, Credit, Balance] from bank file
+                # Swap for ERP convention: file's Credit → output Debit, file's Debit → output Credit
                 debit_val = None
                 credit_val = None
 
                 if len(amounts) >= 3:
-                    # Standard format: [debit, credit, balance]
-                    if amounts[0] > 0:
-                        debit_val = amounts[0]
-                    if amounts[1] > 0:
-                        credit_val = amounts[1]
+                    # Bank file format: [debit (out), credit (in), balance]
+                    # ERP output: Debit = money IN, Credit = money OUT
+                    if amounts[1] > 0:  # Bank's Credit (money IN) → ERP Debit
+                        debit_val = amounts[1]
+                    if amounts[0] > 0:  # Bank's Debit (money OUT) → ERP Credit
+                        credit_val = amounts[0]
                 elif len(amounts) == 2:
                     # Could be [amount, balance] - check description for hints
                     desc_lower = description.lower()
                     if 'withdrawal' in desc_lower or 'debit' in desc_lower:
-                        debit_val = amounts[0] if amounts[0] > 0 else None
-                    else:
+                        # Money OUT → ERP Credit
                         credit_val = amounts[0] if amounts[0] > 0 else None
+                    else:
+                        # Money IN → ERP Debit
+                        debit_val = amounts[0] if amounts[0] > 0 else None
 
                 # Create transaction if we have valid amounts
                 if debit_val or credit_val:
