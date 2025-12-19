@@ -2466,8 +2466,8 @@ class SummaryComparator:
             # === IMPROVEMENT 2: Enhanced highlighting ===
             # Define colors
             yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # New rows
-            light_yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")  # Updated row background
-            orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")  # Changed cells
+            blue_fill = PatternFill(start_color="B4C6E7", end_color="B4C6E7", fill_type="solid")  # Updated row background (light blue)
+            red_font = Font(color="FF0000", bold=True)  # Changed cells - red text
             header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")  # Header
 
             last_col = ws_main.max_column
@@ -2484,25 +2484,25 @@ class SummaryComparator:
                     print(f"   Warning: Could not highlight new row {excel_row}: {e}")
 
             # Apply enhanced highlighting to UPDATED rows
-            # First: light yellow for entire row, then orange for changed cells
+            # Blue background for entire row, red text for changed cells
             print(f"   Applying enhanced highlight to {len(update_rows_indices)} updated rows...")
             headers = list(new_df.columns)
 
             for df_idx in update_rows_indices:
                 excel_row = df_idx + 2
                 try:
-                    # First apply light yellow to entire row
+                    # First apply blue background to entire row
                     for col in range(1, last_col + 1):
                         cell = ws_main.cell(row=excel_row, column=col)
-                        cell.fill = light_yellow_fill
+                        cell.fill = blue_fill
 
-                    # Then apply orange to changed cells
+                    # Then apply red text to changed cells
                     if excel_row in changed_cells:
                         for col_name in changed_cells[excel_row]:
                             if col_name in headers:
                                 col_idx = headers.index(col_name) + 1
                                 cell = ws_main.cell(row=excel_row, column=col_idx)
-                                cell.fill = orange_fill
+                                cell.font = red_font
                 except Exception as e:
                     print(f"   Warning: Could not highlight updated row {excel_row}: {e}")
 
@@ -2557,9 +2557,9 @@ class SummaryComparator:
                         value = ''
                     cell = ws_update_rows.cell(row=row_idx, column=col_idx, value=value)
 
-                    # Highlight changed cells in orange
+                    # Highlight changed cells with red text
                     if col_name in changed_cols_for_row:
-                        cell.fill = orange_fill
+                        cell.font = red_font
 
             print(f"   Created update_rows sheet with {len(update_rows_df)} rows")
 
@@ -2652,17 +2652,24 @@ class SummaryComparator:
             ws_summary.cell(row=current_row, column=1, value='HIGHLIGHTING LEGEND').font = Font(bold=True, size=12)
             current_row += 1
 
-            legend_items = [
-                ('Yellow Row', 'New row (Document Number + Type + Item not in previous file)', yellow_fill),
-                ('Light Yellow Row', 'Updated row (existing combination with changes)', light_yellow_fill),
-                ('Orange Cell', 'Specific cell that changed value', orange_fill),
-            ]
+            # Legend item 1: Yellow for new rows
+            cell = ws_summary.cell(row=current_row, column=1, value='Yellow Row')
+            cell.fill = yellow_fill
+            ws_summary.cell(row=current_row, column=2, value='New row (Document Number + Type + Item not in previous file)')
+            current_row += 1
 
-            for label, description, fill in legend_items:
-                cell = ws_summary.cell(row=current_row, column=1, value=label)
-                cell.fill = fill
-                ws_summary.cell(row=current_row, column=2, value=description)
-                current_row += 1
+            # Legend item 2: Blue for updated rows
+            cell = ws_summary.cell(row=current_row, column=1, value='Blue Row')
+            cell.fill = blue_fill
+            ws_summary.cell(row=current_row, column=2, value='Updated row (existing combination with changes)')
+            current_row += 1
+
+            # Legend item 3: Red text for changed cells
+            cell = ws_summary.cell(row=current_row, column=1, value='Red Text')
+            cell.fill = blue_fill
+            cell.font = red_font
+            ws_summary.cell(row=current_row, column=2, value='Specific cell that changed value')
+            current_row += 1
 
             # Adjust column widths
             ws_summary.column_dimensions['A'].width = 30

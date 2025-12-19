@@ -757,6 +757,12 @@ Only include columns where the header is exactly "Handover GLA"."""
         """
         Detect which months should be compared based on file name and sheet structure.
 
+        Priority:
+        1. Extract months from filename (Dec-Nov, T11-T12, etc.)
+        2. Validate against available data columns
+        3. Find matching year from available data
+        4. Fallback to most recent months in data
+
         Args:
             file_path: Path to the Excel file
             sheet_names: Optional list of sheet names to analyze
@@ -766,7 +772,7 @@ Only include columns where the header is exactly "Handover GLA"."""
             {
                 "previous_month": (year, month),
                 "current_month": (year, month),
-                "source": "filename" | "sheet_data" | "ai_detected"
+                "source": "filename" | "sheet_data" | "default"
             }
         """
         import re
@@ -774,61 +780,85 @@ Only include columns where the header is exactly "Handover GLA"."""
 
         filename = os.path.basename(file_path)
 
-        # Try to detect from filename (e.g., "Dec-Nov" or "T11-T12")
-        # Pattern: Dec-Nov, Nov-Dec, T11-T12, etc.
+        # First, get available months from the data
+        structure = self.detect_file_structure(file_path)
+        available_months = []
+        if structure.get("format") == "pivot_table" and structure.get("monthly_columns"):
+            available_months = sorted(structure["monthly_columns"].keys())
+            logger.info(f"Available months in data: {available_months}")
+
         month_map = {
             'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
             'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
         }
 
-        # Try "Month1-Month2" pattern
+        # Try "Month1-Month2" pattern (e.g., "Dec-Nov")
+        # Convention: First month is CURRENT, second is PREVIOUS
+        # Example: "Dec-Nov" means comparing Dec (current) vs Nov (previous)
         pattern = r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[^\w]*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)'
         match = re.search(pattern, filename.lower())
 
         if match:
-            month1 = month_map[match.group(1)]
-            month2 = month_map[match.group(2)]
-            # Assume current year for now
-            from datetime import datetime
-            year = datetime.now().year
+            current_month_num = month_map[match.group(1)]  # First month = current
+            previous_month_num = month_map[match.group(2)]  # Second month = previous
 
-            # Determine which is previous/current based on order
-            # "Dec-Nov" means comparing Dec (current) vs Nov (previous)
-            return {
-                "previous_month": (year, month1),
-                "current_month": (year, month2),
-                "source": "filename"
-            }
+            # Find the correct year from available data
+            prev_found = None
+            curr_found = None
+
+            for year, month in available_months:
+                if month == previous_month_num and prev_found is None:
+                    prev_found = (year, month)
+                if month == current_month_num and curr_found is None:
+                    curr_found = (year, month)
+
+            if prev_found and curr_found:
+                logger.info(f"Matched filename months to data: {prev_found} (prev) -> {curr_found} (curr)")
+                return {
+                    "previous_month": prev_found,
+                    "current_month": curr_found,
+                    "source": "filename"
+                }
 
         # Try "T##-T##" pattern (Vietnamese month notation)
+        # Convention: First T## is CURRENT, second is PREVIOUS
+        # Example: "T12-T11" means comparing T12 (current) vs T11 (previous)
         t_pattern = r'[Tt](\d{1,2})[^\d]+[Tt](\d{1,2})'
         match = re.search(t_pattern, filename)
 
         if match:
-            month1 = int(match.group(1))
-            month2 = int(match.group(2))
-            from datetime import datetime
-            year = datetime.now().year
+            current_month_num = int(match.group(1))  # First T## = current
+            previous_month_num = int(match.group(2))  # Second T## = previous
 
-            return {
-                "previous_month": (year, month1),
-                "current_month": (year, month2),
-                "source": "filename"
-            }
+            # Find the correct year from available data
+            prev_found = None
+            curr_found = None
 
-        # Fallback: use the two most recent months from the data
-        structure = self.detect_file_structure(file_path)
-        if structure.get("format") == "pivot_table" and structure.get("monthly_columns"):
-            monthly_cols = structure["monthly_columns"]
-            if len(monthly_cols) >= 2:
-                sorted_months = sorted(monthly_cols.keys())
+            for year, month in available_months:
+                if month == previous_month_num and prev_found is None:
+                    prev_found = (year, month)
+                if month == current_month_num and curr_found is None:
+                    curr_found = (year, month)
+
+            if prev_found and curr_found:
+                logger.info(f"Matched T-notation months to data: {prev_found} (prev) -> {curr_found} (curr)")
                 return {
-                    "previous_month": sorted_months[-2],
-                    "current_month": sorted_months[-1],
-                    "source": "sheet_data"
+                    "previous_month": prev_found,
+                    "current_month": curr_found,
+                    "source": "filename"
                 }
 
+        # Fallback: use the two most recent months from the data
+        if len(available_months) >= 2:
+            logger.info(f"Using most recent months from data: {available_months[-2]} -> {available_months[-1]}")
+            return {
+                "previous_month": available_months[-2],
+                "current_month": available_months[-1],
+                "source": "sheet_data"
+            }
+
         # Default to Nov-Dec 2024
+        logger.warning("Could not detect months, using default Nov-Dec 2024")
         return {
             "previous_month": (2024, 11),
             "current_month": (2024, 12),

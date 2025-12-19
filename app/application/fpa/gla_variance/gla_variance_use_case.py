@@ -41,22 +41,94 @@ class GLAVarianceUseCase:
             self.ai_analyzer = GLAAIAnalyzer()
         return self.ai_analyzer
 
+    def _process_file_with_format_detection(
+        self,
+        file_path: str,
+        ai_analyzer: GLAAIAnalyzer,
+        progress_callback=None
+    ) -> Dict[str, Any]:
+        """
+        Detect file format using AI and process accordingly.
+
+        Supports multiple formats:
+        - standard: 4 sheets (Handover/Committed x Previous/Current)
+        - pivot_table: Monthly GLA columns with dates in header rows
+        - Other formats: AI will attempt to understand and process
+
+        Args:
+            file_path: Path to the Excel file
+            ai_analyzer: AI analyzer instance for structure detection
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Dict with structure: {
+                'handover': {'previous': {...}, 'current': {...}},
+                'committed': {'previous': {...}, 'current': {...}}
+            }
+        """
+        try:
+            logger.info("Detecting file structure with AI...")
+            if progress_callback:
+                progress_callback(10, "Analyzing file structure...")
+
+            structure = ai_analyzer.detect_file_structure(file_path)
+            file_format = structure.get('format', 'standard')
+            logger.info(f"AI detected file format: {file_format}")
+
+            if file_format == 'pivot_table':
+                # Pivot table format: monthly GLA columns
+                logger.info("Processing as pivot table format...")
+                if progress_callback:
+                    progress_callback(20, "Processing pivot table format...")
+
+                # Detect which months to compare
+                months = ai_analyzer.detect_comparison_months(file_path)
+                previous_month = months.get('previous_month')
+                current_month = months.get('current_month')
+                month_source = months.get('source', 'unknown')
+
+                logger.info(f"Comparison months (source: {month_source}): {previous_month} -> {current_month}")
+
+                return self.processor.process_pivot_table_file(
+                    file_path,
+                    previous_month=previous_month,
+                    current_month=current_month,
+                    ai_analyzer=ai_analyzer
+                )
+
+            else:
+                # Standard or unknown format - try 4-sheet processing
+                logger.info("Processing as standard 4-sheet format...")
+                if progress_callback:
+                    progress_callback(20, "Processing standard format...")
+
+                return self.processor.process_single_file_with_periods(file_path)
+
+        except Exception as e:
+            logger.warning(f"AI-based format detection failed: {e}")
+            logger.info("Falling back to standard 4-sheet processing...")
+
+            # Fallback to standard processing
+            if progress_callback:
+                progress_callback(20, "Processing file (fallback mode)...")
+
+            return self.processor.process_single_file_with_periods(file_path)
+
     async def execute(
         self,
         file: UploadFile,
         previous_label: Optional[str] = None,
         current_label: Optional[str] = None,
-        use_ai: bool = False,
         progress_callback=None
     ) -> Dict[str, Any]:
         """
         Execute the GLA variance analysis workflow with a single file.
+        Always uses AI for generating variance explanations and notes.
 
         Args:
             file: Excel file containing 4 sheets (2 previous + 2 current periods)
             previous_label: Optional label for previous period (e.g., "Oct 2025")
             current_label: Optional label for current period (e.g., "Nov 2025")
-            use_ai: If True, use AI to generate explanations for variances
             progress_callback: Optional callback for progress updates
 
         Returns:
@@ -74,9 +146,13 @@ class GLAVarianceUseCase:
             with open(file_path, "wb") as f:
                 shutil.copyfileobj(file.file, f)
 
-            # Process single file with 4 sheets
-            logger.info("Processing GLA file with 4 sheets...")
-            processed_data = self.processor.process_single_file_with_periods(str(file_path))
+            # Use AI to detect file format and process accordingly
+            ai_analyzer = self._get_ai_analyzer()
+            processed_data = self._process_file_with_format_detection(
+                str(file_path),
+                ai_analyzer,
+                progress_callback
+            )
 
             # Extract data for variance calculation
             handover_previous = processed_data['handover'].get('previous', {})
@@ -106,32 +182,29 @@ class GLAVarianceUseCase:
             summary.previous_period = prev_label
             summary.current_period = curr_label
 
-            # Generate AI notes if requested (before Excel so notes appear in Excel)
+            # Generate AI notes (always enabled - before Excel so notes appear in Excel)
             ai_result = None
-            if use_ai:
-                logger.info("Running AI analysis...")
+            logger.info("Running AI analysis...")
+            if progress_callback:
+                progress_callback(40, "Generating tenant-based explanations...")
+
+            try:
+                # Generate project notes based on tenant changes
+                logger.info("Generating project notes from tenant data...")
+                summary.results = ai_analyzer.generate_project_notes(
+                    summary.results,
+                    progress_callback
+                )
+
                 if progress_callback:
-                    progress_callback(40, "Generating tenant-based explanations...")
+                    progress_callback(60, "Running AI analysis...")
 
-                try:
-                    ai_analyzer = self._get_ai_analyzer()
+                # Generate overall analysis
+                ai_result = ai_analyzer.analyze_variance(summary, progress_callback)
 
-                    # Generate project notes based on tenant changes
-                    logger.info("Generating project notes from tenant data...")
-                    summary.results = ai_analyzer.generate_project_notes(
-                        summary.results,
-                        progress_callback
-                    )
-
-                    if progress_callback:
-                        progress_callback(60, "Running AI analysis...")
-
-                    # Generate overall analysis
-                    ai_result = ai_analyzer.analyze_variance(summary, progress_callback)
-
-                except Exception as e:
-                    logger.warning(f"AI analysis failed: {e}")
-                    ai_result = {"status": "error", "error": str(e)}
+            except Exception as e:
+                logger.warning(f"AI analysis failed: {e}")
+                ai_result = {"status": "error", "error": str(e)}
 
             # Generate output Excel file (now includes notes)
             excel_filename = f"gla_variance_{timestamp}.xlsx"
@@ -160,8 +233,8 @@ class GLAVarianceUseCase:
                 "results": [r.to_dict() for r in summary.results]
             }
 
-            # Generate PDF with AI analysis if AI was used
-            if use_ai and ai_result:
+            # Generate PDF with AI analysis
+            if ai_result:
                 try:
                     if progress_callback:
                         progress_callback(80, "Generating PDF report...")

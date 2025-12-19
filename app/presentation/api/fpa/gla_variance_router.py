@@ -31,42 +31,41 @@ async def health_check():
 
 @router.post("/analyze")
 async def analyze_gla_variance(
-    file: UploadFile = File(..., description="Excel file with 4 sheets (2 previous + 2 current periods)"),
+    file: UploadFile = File(..., description="Excel file with GLA data (standard 4-sheet or pivot table format)"),
     previous_label: Optional[str] = Query(None, description="Label for previous period (e.g., 'Oct 2025')"),
-    current_label: Optional[str] = Query(None, description="Label for current period (e.g., 'Nov 2025')"),
-    use_ai: bool = Query(False, description="Use AI to generate explanations for variances")
+    current_label: Optional[str] = Query(None, description="Label for current period (e.g., 'Nov 2025')")
 ):
     """
     Analyze GLA variance between two periods from a single Excel file.
+    AI-powered analysis is always enabled for generating explanations and insights.
 
     This endpoint:
-    1. Processes a single Excel file containing 4 sheets with GLA data
+    1. Auto-detects file format (standard 4-sheet or pivot table with monthly columns)
     2. Calculates Handover and Committed GLA per project
     3. Computes variance between periods
-    4. Generates output Excel with variance analysis
-    5. (Optional) Uses AI to generate business explanations and PDF report
+    4. Uses AI to generate business explanations
+    5. Generates output Excel with variance analysis and PDF report
 
-    **IMPORTANT: Input file MUST contain exactly these 4 sheets (exact names required):**
+    **Supported formats:**
+
+    **Standard format** - 4 sheets with exact names:
     - `Handover GLA - Previous`
     - `Handover GLA - Current`
     - `Committed GLA - Previous`
     - `Committed GLA - Current`
 
-    The sheets should have headers at row 5 with columns:
-    - Project Name
-    - CCS_Product Type (RBF/RBW)
-    - Region
-    - GLA for Lease
-    - Unit for Lease Status
-    - BWID Project.
+    **Pivot table format** - Monthly GLA columns:
+    - Dates in row 3, headers in row 4
+    - Columns like "Handover GLA" for each month
+    - Months auto-detected from filename (e.g., "Dec-Nov") or uses last 2 months
 
-    Set use_ai=true to get AI-powered analysis with:
+    AI-powered analysis includes:
     - Executive summary of portfolio performance
     - Tenant-based explanations for variances in Excel notes
     - Regional and product type trends
     - PDF report download
     """
-    logger.info(f"Analyzing GLA variance: {file.filename} (AI: {use_ai})")
+    logger.info(f"Analyzing GLA variance: {file.filename} (AI: always enabled)")
 
     # Validate file type
     if not file.filename.endswith(('.xlsx', '.xls')):
@@ -79,8 +78,7 @@ async def analyze_gla_variance(
         result = await gla_use_case.execute(
             file=file,
             previous_label=previous_label,
-            current_label=current_label,
-            use_ai=use_ai
+            current_label=current_label
         )
         logger.info(f"GLA variance analysis successful: {result['statistics']['total_projects']} projects")
         return result
