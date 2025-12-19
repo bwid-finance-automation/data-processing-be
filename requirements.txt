@@ -29,3 +29,6 @@ sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 alembic==1.14.0
 greenlet==3.1.1
+
+# Security
+passlib[bcrypt]>=1.7.4
