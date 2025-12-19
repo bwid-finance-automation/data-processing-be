@@ -2,7 +2,9 @@
 
 import os
 import tempfile
-from typing import List, Tuple, Optional
+import time
+from typing import List, Tuple, Optional, Dict, Any
+from dataclasses import dataclass, field
 from io import BytesIO
 
 import google.generativeai as genai
@@ -16,6 +18,59 @@ from app.shared.utils.logging_config import get_logger
 load_dotenv()
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class OCRUsageMetrics:
+    """Metrics for a single OCR operation."""
+    file_name: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    processing_time_ms: float = 0.0
+    model_name: str = ""
+    success: bool = True
+    error: Optional[str] = None
+
+
+@dataclass
+class OCRBatchMetrics:
+    """Aggregated metrics for batch OCR operations."""
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_tokens: int = 0
+    total_processing_time_ms: float = 0.0
+    files_processed: int = 0
+    files_successful: int = 0
+    files_failed: int = 0
+    model_name: str = ""
+    file_metrics: List[OCRUsageMetrics] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_tokens": self.total_tokens,
+            "total_processing_time_ms": round(self.total_processing_time_ms, 2),
+            "total_processing_time_seconds": round(self.total_processing_time_ms / 1000, 2),
+            "files_processed": self.files_processed,
+            "files_successful": self.files_successful,
+            "files_failed": self.files_failed,
+            "model_name": self.model_name,
+            "file_metrics": [
+                {
+                    "file_name": m.file_name,
+                    "input_tokens": m.input_tokens,
+                    "output_tokens": m.output_tokens,
+                    "total_tokens": m.total_tokens,
+                    "processing_time_ms": round(m.processing_time_ms, 2),
+                    "success": m.success,
+                    "error": m.error,
+                }
+                for m in self.file_metrics
+            ]
+        }
 
 
 class GeminiOCRService:
@@ -105,7 +160,9 @@ class GeminiOCRService:
         except Exception:
             return False  # Other error, assume not encrypted
 
-    def extract_text_from_pdf(self, pdf_bytes: bytes, file_name: str, password: Optional[str] = None) -> str:
+    def extract_text_from_pdf(
+        self, pdf_bytes: bytes, file_name: str, password: Optional[str] = None
+    ) -> Tuple[str, OCRUsageMetrics]:
         """
         Extract text from a PDF file using Gemini Flash.
 
@@ -115,12 +172,18 @@ class GeminiOCRService:
             password: Optional password for encrypted PDFs
 
         Returns:
-            Extracted text from the PDF
+            Tuple of (extracted_text, usage_metrics)
 
         Raises:
             ValueError: If PDF is encrypted and no/wrong password provided
         """
         logger.info(f"Extracting text from PDF: {file_name}")
+        start_time = time.time()
+
+        metrics = OCRUsageMetrics(
+            file_name=file_name,
+            model_name=self.model_name,
+        )
 
         try:
             # Check if PDF is encrypted and decrypt if needed
@@ -165,6 +228,13 @@ Output the extracted text:"""
                     request_options={"timeout": 120}
                 )
 
+                # Extract usage metadata from response
+                if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                    usage = response.usage_metadata
+                    metrics.input_tokens = getattr(usage, 'prompt_token_count', 0) or 0
+                    metrics.output_tokens = getattr(usage, 'candidates_token_count', 0) or 0
+                    metrics.total_tokens = getattr(usage, 'total_token_count', 0) or (metrics.input_tokens + metrics.output_tokens)
+
                 # Clean up uploaded file from Gemini
                 try:
                     genai.delete_file(uploaded_file.name)
@@ -172,9 +242,16 @@ Output the extracted text:"""
                     logger.warning(f"Failed to delete uploaded file from Gemini: {e}")
 
                 extracted_text = response.text
-                logger.info(f"Successfully extracted {len(extracted_text)} characters from {file_name}")
+                metrics.processing_time_ms = (time.time() - start_time) * 1000
+                metrics.success = True
 
-                return extracted_text
+                logger.info(
+                    f"Successfully extracted {len(extracted_text)} chars from {file_name} "
+                    f"(tokens: {metrics.input_tokens}+{metrics.output_tokens}={metrics.total_tokens}, "
+                    f"time: {metrics.processing_time_ms:.0f}ms)"
+                )
+
+                return extracted_text, metrics
 
             finally:
                 # Clean up temporary file
@@ -184,13 +261,16 @@ Output the extracted text:"""
                     logger.warning(f"Failed to delete temp file: {e}")
 
         except Exception as e:
+            metrics.processing_time_ms = (time.time() - start_time) * 1000
+            metrics.success = False
+            metrics.error = str(e)
             logger.error(f"Error extracting text from PDF {file_name}: {e}")
             raise
 
     def extract_text_from_pdf_batch(
         self,
         pdf_files: List[Tuple[str, bytes, Optional[str]]]
-    ) -> List[Tuple[str, str, Optional[str]]]:
+    ) -> Tuple[List[Tuple[str, str, Optional[str]]], OCRBatchMetrics]:
         """
         Extract text from multiple PDF files.
 
@@ -199,18 +279,41 @@ Output the extracted text:"""
                        password can be None for non-encrypted PDFs
 
         Returns:
-            List of (file_name, extracted_text, error) tuples
-            - error is None if successful
-            - extracted_text is empty string if failed
+            Tuple of:
+            - List of (file_name, extracted_text, error) tuples
+              - error is None if successful
+              - extracted_text is empty string if failed
+            - OCRBatchMetrics with aggregated usage statistics
         """
         results = []
+        batch_metrics = OCRBatchMetrics(model_name=self.model_name)
 
         for file_name, pdf_bytes, password in pdf_files:
+            batch_metrics.files_processed += 1
             try:
-                text = self.extract_text_from_pdf(pdf_bytes, file_name, password)
+                text, metrics = self.extract_text_from_pdf(pdf_bytes, file_name, password)
                 results.append((file_name, text, None))
+
+                # Aggregate metrics
+                batch_metrics.total_input_tokens += metrics.input_tokens
+                batch_metrics.total_output_tokens += metrics.output_tokens
+                batch_metrics.total_tokens += metrics.total_tokens
+                batch_metrics.total_processing_time_ms += metrics.processing_time_ms
+                batch_metrics.files_successful += 1
+                batch_metrics.file_metrics.append(metrics)
+
             except Exception as e:
                 logger.error(f"Failed to extract text from {file_name}: {e}")
                 results.append((file_name, "", str(e)))
 
-        return results
+                # Record failed file metrics
+                failed_metrics = OCRUsageMetrics(
+                    file_name=file_name,
+                    model_name=self.model_name,
+                    success=False,
+                    error=str(e)
+                )
+                batch_metrics.files_failed += 1
+                batch_metrics.file_metrics.append(failed_metrics)
+
+        return results, batch_metrics

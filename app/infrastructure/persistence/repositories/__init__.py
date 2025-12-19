@@ -23,6 +23,9 @@ from app.infrastructure.persistence.repositories.analysis_session_repository imp
 from app.infrastructure.persistence.repositories.file_upload_repository import (
     FileUploadRepository,
 )
+from app.infrastructure.persistence.repositories.ai_usage_repository import (
+    AIUsageRepository,
+)
 
 __all__ = [
     # Base
@@ -44,4 +47,6 @@ __all__ = [
     "AnalysisResultRepository",
     # File
     "FileUploadRepository",
+    # AI Usage
+    "AIUsageRepository",
 ]

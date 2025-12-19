@@ -94,6 +94,12 @@ def get_project_case_repository(db: AsyncSession = Depends(get_db)):
     return ProjectCaseRepository(db)
 
 
+def get_ai_usage_repository(db: AsyncSession = Depends(get_db)):
+    """Get AIUsageRepository instance."""
+    from app.infrastructure.persistence.repositories import AIUsageRepository
+    return AIUsageRepository(db)
+
+
 def get_analysis_service():
     """Get analysis service singleton."""
     # Lazy import to avoid circular dependency

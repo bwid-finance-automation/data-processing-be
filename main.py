@@ -41,6 +41,7 @@ from app.presentation.api.finance import contract_ocr_router
 from app.presentation.api.finance import bank_statement_parser_router
 from app.presentation.api.fpa import excel_comparison_router
 from app.presentation.api.fpa import gla_variance_router
+from app.presentation.api import ai_usage_router
 
 # Import FPA use cases for startup cleanup
 from app.application.fpa.excel_comparison.compare_excel_files import CompareExcelFilesUseCase
@@ -82,6 +83,9 @@ app.include_router(bank_statement_parser_router.router, prefix="/api/finance")
 # Include FP&A Department routers with /api prefix (already have /fpa prefix in routers)
 app.include_router(excel_comparison_router.router, prefix="/api")
 app.include_router(gla_variance_router.router, prefix="/api")
+
+# Include AI Usage tracking router
+app.include_router(ai_usage_router.router, prefix="/api", tags=["AI Usage"])
 
 # Get logger for main module
 import logging

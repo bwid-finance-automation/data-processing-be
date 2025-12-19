@@ -20,7 +20,8 @@ from app.presentation.schemas.bank_statement_schemas import (
 from app.application.finance.bank_statement_parser.parse_bank_statements import ParseBankStatementsUseCase
 from app.application.finance.bank_statement_parser.bank_parsers.parser_factory import ParserFactory
 from app.application.finance.bank_statement_parser.bank_statement_db_service import BankStatementDbService
-from app.core.dependencies import get_bank_statement_db_service
+from app.core.dependencies import get_bank_statement_db_service, get_ai_usage_repository
+from app.infrastructure.persistence.repositories import AIUsageRepository
 from app.shared.utils.logging_config import get_logger
 from uuid import UUID as PyUUID
 
@@ -248,6 +249,7 @@ async def parse_bank_statements_pdf(
     passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted PDF files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted PDFs."),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Parse multiple bank statement PDF files using Gemini Flash OCR.
@@ -413,11 +415,73 @@ async def parse_bank_statements_pdf(
                 transaction_count=len(stmt.transactions)
             ))
 
+        # Build AI usage metrics if available (PDF parsing only)
+        ai_usage = None
+        if "ai_usage" in result and result["ai_usage"]:
+            from app.presentation.schemas.bank_statement_schemas import AIUsageMetrics, AIUsageFileMetrics
+            from app.infrastructure.database.models.ai_usage import AIUsageModel
+            from datetime import datetime
+
+            ai_usage_data = result["ai_usage"]
+            ai_usage = AIUsageMetrics(
+                total_input_tokens=ai_usage_data.get("total_input_tokens", 0),
+                total_output_tokens=ai_usage_data.get("total_output_tokens", 0),
+                total_tokens=ai_usage_data.get("total_tokens", 0),
+                total_processing_time_ms=ai_usage_data.get("total_processing_time_ms", 0),
+                total_processing_time_seconds=ai_usage_data.get("total_processing_time_seconds", 0),
+                files_processed=ai_usage_data.get("files_processed", 0),
+                files_successful=ai_usage_data.get("files_successful", 0),
+                files_failed=ai_usage_data.get("files_failed", 0),
+                model_name=ai_usage_data.get("model_name", ""),
+                file_metrics=[
+                    AIUsageFileMetrics(**fm) for fm in ai_usage_data.get("file_metrics", [])
+                ]
+            )
+
+            # Save AI usage to database
+            try:
+                # Calculate estimated cost (Gemini Flash pricing)
+                input_cost = ai_usage_data.get("total_input_tokens", 0) * 0.000000075  # $0.075/1M tokens
+                output_cost = ai_usage_data.get("total_output_tokens", 0) * 0.0000003  # $0.30/1M tokens
+                estimated_cost = input_cost + output_cost
+
+                ai_usage_log = AIUsageModel(
+                    project_id=None,  # Will be set if we have project info
+                    case_id=None,
+                    session_id=session_id,
+                    provider="gemini",
+                    model_name=ai_usage_data.get("model_name", "gemini-2.0-flash"),
+                    task_type="ocr",
+                    task_description="Bank statement PDF OCR parsing",
+                    file_name=", ".join([f.filename for f in files]),
+                    file_count=ai_usage_data.get("files_processed", len(files)),
+                    input_tokens=ai_usage_data.get("total_input_tokens", 0),
+                    output_tokens=ai_usage_data.get("total_output_tokens", 0),
+                    total_tokens=ai_usage_data.get("total_tokens", 0),
+                    processing_time_ms=ai_usage_data.get("total_processing_time_ms", 0),
+                    estimated_cost_usd=estimated_cost,
+                    success=ai_usage_data.get("files_failed", 0) == 0,
+                    error_message=None,
+                    metadata_json={
+                        "files_successful": ai_usage_data.get("files_successful", 0),
+                        "files_failed": ai_usage_data.get("files_failed", 0),
+                        "file_metrics": ai_usage_data.get("file_metrics", []),
+                    },
+                    requested_at=datetime.utcnow(),
+                )
+                await ai_usage_repo.create(ai_usage_log)
+                await ai_usage_repo.session.commit()
+                logger.info(f"Saved AI usage log for session: {session_id}")
+            except Exception as ai_log_error:
+                logger.error(f"Failed to save AI usage log: {ai_log_error}")
+                # Don't fail the request
+
         return ParseBankStatementsResponse(
             statements=statements_response,
             summary=result["summary"],
             download_url=f"/api/finance/bank-statements/download/{session_id}",
-            session_id=session_id
+            session_id=session_id,
+            ai_usage=ai_usage
         )
 
     except HTTPException:

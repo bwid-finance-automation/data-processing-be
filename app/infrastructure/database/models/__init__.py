@@ -26,6 +26,11 @@ from app.infrastructure.database.models.analysis_session import (
     AnalysisResultModel,
 )
 from app.infrastructure.database.models.file_upload import FileUploadModel
+from app.infrastructure.database.models.ai_usage import (
+    AIUsageModel,
+    AIProvider,
+    AITaskType,
+)
 
 __all__ = [
     # Project models
@@ -50,4 +55,8 @@ __all__ = [
     "AnalysisResultModel",
     # File models
     "FileUploadModel",
+    # AI Usage models
+    "AIUsageModel",
+    "AIProvider",
+    "AITaskType",
 ]

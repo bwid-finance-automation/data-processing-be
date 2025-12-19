@@ -47,6 +47,31 @@ class BankStatementResponse(BaseModel):
     transaction_count: int = Field(0, description="Number of transactions parsed")
 
 
+class AIUsageFileMetrics(BaseModel):
+    """Usage metrics for a single file processed by AI."""
+    file_name: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    processing_time_ms: float = 0.0
+    success: bool = True
+    error: Optional[str] = None
+
+
+class AIUsageMetrics(BaseModel):
+    """Aggregated AI API usage metrics."""
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_tokens: int = 0
+    total_processing_time_ms: float = 0.0
+    total_processing_time_seconds: float = 0.0
+    files_processed: int = 0
+    files_successful: int = 0
+    files_failed: int = 0
+    model_name: str = ""
+    file_metrics: List[AIUsageFileMetrics] = Field(default_factory=list)
+
+
 class ParseBankStatementsResponse(BaseModel):
     """Response schema for batch bank statement parsing."""
 
@@ -80,7 +105,14 @@ class ParseBankStatementsResponse(BaseModel):
                     "total_balances": 4
                 },
                 "download_url": "/api/finance/bank-statements/download/abc123",
-                "session_id": "abc123"
+                "session_id": "abc123",
+                "ai_usage": {
+                    "total_input_tokens": 5000,
+                    "total_output_tokens": 2000,
+                    "total_tokens": 7000,
+                    "total_processing_time_seconds": 3.5,
+                    "model_name": "gemini-2.0-flash"
+                }
             }
         }
     )
@@ -89,6 +121,7 @@ class ParseBankStatementsResponse(BaseModel):
     summary: Dict[str, Any] = Field(default_factory=dict)
     download_url: Optional[str] = Field(None, description="URL to download Excel output")
     session_id: Optional[str] = Field(None, description="Session ID for retrieving uploaded files")
+    ai_usage: Optional[AIUsageMetrics] = Field(None, description="AI API usage metrics (only for PDF parsing)")
 
 
 class SupportedBanksResponse(BaseModel):

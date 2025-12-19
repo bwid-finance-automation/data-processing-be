@@ -333,13 +333,14 @@ class ParseBankStatementsUseCase:
             - all_transactions: Combined list of transactions
             - all_balances: Combined list of balances
             - summary: Processing summary (includes ocr_results for debugging)
+            - ai_usage: AI API usage metrics (tokens, processing time, etc.)
         """
         # Initialize Gemini OCR service
         gemini_service = GeminiOCRService()
 
         # Step 1: Extract text from all PDFs using Gemini (with password support)
         pdf_files = [(file_name, pdf_bytes, password) for file_name, pdf_bytes, _, password in pdf_inputs]
-        ocr_results = gemini_service.extract_text_from_pdf_batch(pdf_files)
+        ocr_results, ocr_metrics = gemini_service.extract_text_from_pdf_batch(pdf_files)
 
         # Step 2: Build text_inputs for execute_from_text
         text_inputs: List[Tuple[str, str, str]] = []
@@ -383,6 +384,9 @@ class ParseBankStatementsUseCase:
         result["summary"]["total_files"] = len(pdf_inputs)
         result["summary"]["failed"] += len(ocr_failed)
         result["summary"]["failed_files"].extend(ocr_failed)
+
+        # Step 5: Add AI usage metrics to result
+        result["ai_usage"] = ocr_metrics.to_dict()
 
         return result
 
