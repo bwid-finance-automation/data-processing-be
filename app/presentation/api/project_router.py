@@ -331,16 +331,22 @@ async def get_bank_statement_case(
 
     Returns sessions grouped by parse operation (not individual files).
     Each session contains all files that were processed together.
+    Returns empty data if case doesn't exist yet.
     """
     case, sessions, total = await service.get_bank_statement_sessions_by_project(
         project_uuid, skip, limit
     )
 
+    # Return empty data if case doesn't exist yet (not an error)
     if not case:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No bank statement case found for project: {project_uuid}",
-        )
+        return {
+            "uuid": None,
+            "case_type": "bank_statement",
+            "total_sessions": 0,
+            "last_processed_at": None,
+            "created_at": None,
+            "sessions": [],
+        }
 
     return {
         "uuid": str(case.uuid),
@@ -364,16 +370,22 @@ async def get_contract_case(
 
     Returns sessions grouped by processing operation.
     Each session contains all contracts that were processed together.
+    Returns empty data if case doesn't exist yet.
     """
     case, sessions, total = await service.get_contract_sessions_by_project(
         project_uuid, skip, limit
     )
 
+    # Return empty data if case doesn't exist yet (not an error)
     if not case:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No contract case found for project: {project_uuid}",
-        )
+        return {
+            "uuid": None,
+            "case_type": "contract",
+            "total_sessions": 0,
+            "last_processed_at": None,
+            "created_at": None,
+            "sessions": [],
+        }
 
     return {
         "uuid": str(case.uuid),

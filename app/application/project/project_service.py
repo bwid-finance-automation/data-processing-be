@@ -30,15 +30,22 @@ class ProjectService:
     # ============== Password Utilities ==============
 
     @staticmethod
+    def _truncate_password(password: str) -> bytes:
+        """Truncate password to 72 bytes (bcrypt limitation)."""
+        return password.encode("utf-8")[:72]
+
+    @staticmethod
     def hash_password(password: str) -> str:
         """Hash password using bcrypt."""
-        return bcrypt.hash(password)
+        truncated = ProjectService._truncate_password(password)
+        return bcrypt.hash(truncated)
 
     @staticmethod
     def verify_password(password: str, password_hash: str) -> bool:
         """Verify password against bcrypt hash."""
         try:
-            return bcrypt.verify(password, password_hash)
+            truncated = ProjectService._truncate_password(password)
+            return bcrypt.verify(truncated, password_hash)
         except ValueError:
             # Fallback for legacy SHA256 hashes (backward compatibility)
             import hashlib

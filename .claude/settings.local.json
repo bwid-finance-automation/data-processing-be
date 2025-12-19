@@ -11,7 +11,9 @@
       "Bash(pip show:*)",
       "Bash(pip install:*)",
       "Bash(cd:*)",
-      "Bash(alembic stamp:*)"
+      "Bash(alembic stamp:*)",
+      "Bash(del \"D:\\Project\\data-processing-be\\create_db_doc.py\")",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []
