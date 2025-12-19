@@ -22,6 +22,22 @@ except ImportError:
     ANTHROPIC_AVAILABLE = False
 
 from app.shared.utils.logging_config import get_logger
+from app.shared.prompts import (
+    # Finance Prompts - Variance Analysis
+    VARIANCE_ANALYSIS_22_RULES_SYSTEM_PROMPT,
+    VARIANCE_ANALYSIS_SYSTEM_PROMPT,
+    # Finance Prompts - Sheet Detection
+    SHEET_DETECTION_SYSTEM_PROMPT,
+    create_sheet_detection_prompt,
+    # Finance Prompts - Account Extraction
+    ACCOUNT_EXTRACTION_SYSTEM_PROMPT,
+    create_account_extraction_prompt,
+    # Finance Prompts - Consolidation
+    CONSOLIDATION_SYSTEM_PROMPT,
+    # Finance Prompts - Revenue Analysis
+    REVENUE_ANALYSIS_SYSTEM_PROMPT,
+    create_revenue_analysis_prompt,
+)
 
 logger = get_logger(__name__)
 
@@ -1230,59 +1246,11 @@ class LLMFinancialAnalyzer:
 
     def _get_sheet_detection_system_prompt(self) -> str:
         """System prompt for detecting which sheets are BS and PL based on sheet names only."""
-        return """You are a financial document analyzer. Your job is to identify which Excel sheets contain Balance Sheet data and which contain Profit & Loss (Income Statement) data based ONLY on the sheet names.
-
-🎯 YOUR TASK:
-Analyze the sheet names and identify:
-- Which sheet likely contains Balance Sheet / Statement of Financial Position data
-- Which sheet likely contains Profit & Loss / Income Statement data
-
-📊 IDENTIFICATION CLUES FROM SHEET NAMES:
-
-**Balance Sheet / Statement of Financial Position:**
-- Sheet names containing: "BS", "Balance", "Financial Position", "Statement of Financial Position", "Assets", "Liabilities", "Equity"
-- Common patterns: "BS Breakdown", "Balance Sheet", "SOFP", "Statement of FP"
-- Languages: English, Vietnamese (e.g., "Bảng cân đối", "BCĐKT")
-
-**Profit & Loss / Income Statement:**
-- Sheet names containing: "PL", "P&L", "Profit", "Loss", "Income", "Revenue", "Expenses"
-- Common patterns: "PL Breakdown", "Profit & Loss", "Income Statement", "P&L"
-- Languages: English, Vietnamese (e.g., "Báo cáo kết quả", "KQKD")
-
-📋 REQUIRED OUTPUT FORMAT:
-Return ONLY valid JSON with EXACT sheet names from the provided list:
-
-{
-  "bs_sheet": "exact_sheet_name_here",
-  "pl_sheet": "exact_sheet_name_here"
-}
-
-⚠️ IMPORTANT: Use the EXACT sheet names as provided in the input list. Do not modify or create new names."""
+        return SHEET_DETECTION_SYSTEM_PROMPT
 
     def _create_sheet_detection_prompt(self, all_sheets_csv, subsidiary, filename):
         """Create prompt for AI to detect which sheets are BS and PL."""
-        prompt_parts = [f"""
-SHEET DETECTION REQUEST
-
-Company: {subsidiary}
-File: {filename}
-
-Analyze the following sheet previews and identify which is the Balance Sheet and which is the Profit & Loss:
-
-"""]
-
-        for sheet_name, (full_csv, preview_csv) in all_sheets_csv.items():
-            prompt_parts.append(f"""
-=== SHEET: "{sheet_name}" (first 200 rows) ===
-{preview_csv[:10000]}
-""")  # Limit to 10k chars per sheet for token efficiency
-
-        prompt_parts.append("""
-
-Identify which sheet is the Balance Sheet and which is the Profit & Loss.
-Return JSON with exact sheet names.""")
-
-        return "".join(prompt_parts)
+        return create_sheet_detection_prompt(all_sheets_csv, subsidiary, filename)
 
     def _filter_relevant_accounts(self, df, is_balance_sheet=True):
         """
@@ -1368,67 +1336,11 @@ Return JSON with exact sheet names.""")
 
     def _get_account_extraction_system_prompt(self) -> str:
         """System prompt for Step 1: Account extraction from raw CSV chunks."""
-        return """You are a financial data extraction specialist. Your job is to extract account data from raw Excel CSV chunks.
-
-🎯 YOUR TASK:
-Extract all accounts and their values from the provided CSV chunk. Each chunk is part of a larger file.
-
-📊 EXTRACTION RULES:
-1. Find all account codes (Vietnamese chart of accounts: 111xxx, 217xxx, 341xxx, 511xxx, 632xxx, etc.)
-2. Extract the account name
-3. Identify which sheet type (BS for Balance Sheet 1xx-3xx, PL for Profit & Loss 5xx-6xx)
-4. Get all month/period values for each account
-
-📋 REQUIRED OUTPUT FORMAT:
-Return ONLY a valid JSON array (no markdown, no code blocks, no explanations):
-
-[
-  {
-    "account_code": "111000000",
-    "account_name": "Cash",
-    "type": "BS",
-    "values": {"Jan 2025": 1000000, "Feb 2025": 1200000}
-  },
-  {
-    "account_code": "511000000",
-    "account_name": "Revenue",
-    "type": "PL",
-    "values": {"Jan 2025": 5000000, "Feb 2025": 5500000}
-  }
-]
-
-🔍 IMPORTANT:
-- Extract ALL accounts from the chunk (don't skip any)
-- Use exact account codes from the file
-- Include month/period names as keys in the values object
-- Return empty array [] if no accounts found
-- NO explanatory text, ONLY the JSON array"""
+        return ACCOUNT_EXTRACTION_SYSTEM_PROMPT
 
     def _create_account_extraction_prompt(self, bs_csv, pl_csv, subsidiary, filename):
         """Create prompt for Step 1: Account extraction."""
-        return f"""
-ACCOUNT EXTRACTION REQUEST
-
-Company: {subsidiary}
-File: {filename}
-
-=== RAW BALANCE SHEET CSV ===
-{bs_csv}
-
-=== RAW PROFIT & LOSS CSV ===
-{pl_csv}
-
-=== INSTRUCTIONS ===
-
-Extract all accounts and their values from the raw CSV data above.
-
-Focus on these account families:
-- BS: 111 (Cash), 112 (Cash Equivalents), 133 (VAT Input), 217 (Investment Property), 241 (CIP), 242 (Broker Assets), 341 (Loans), and any total rows
-- PL: 511 (Revenue), 515 (Interest Income), 632 (COGS/D&A), 635 (Interest Expense), 641 (Selling Expense), 642 (G&A Expense)
-
-Identify all available month columns and extract values for each account across all months.
-
-Return structured JSON with grouped account data."""
+        return create_account_extraction_prompt(bs_csv, pl_csv, subsidiary, filename)
 
     def _create_rule_application_prompt(self, grouped_accounts, subsidiary, filename, config):
         """Create prompt for Step 2: Apply 22 rules to grouped data."""
@@ -1724,347 +1636,7 @@ The "analysis_type" field should match the rule ID and name from the 22 rules ab
     # ===========================
     def _get_raw_excel_system_prompt(self) -> str:
         """System prompt for 22-rule variance analysis using AI."""
-        return """You are a senior financial auditor with 15+ years experience in Vietnamese enterprises. You will analyze raw Excel financial data (BS Breakdown and PL Breakdown sheets) and apply the following 22 VARIANCE ANALYSIS RULES:
-
-🎯 YOUR TASK:
-Analyze the raw CSV data and identify variances based on the 22 rules below. For each variance found, return a JSON object with the rule details.
-
-⚠️ IMPORTANT: You MUST actively look for violations of ALL 22 rules. Do NOT say "no variances detected" unless you have thoroughly checked EVERY rule. Most financial data will have MULTIPLE variances - your job is to find them all. Be thorough and suspicious - look for:
-- Account relationships that seem unusual or disconnected
-- Values that changed month-to-month in unexpected ways
-- Missing correlations between related accounts
-- Balance sheet equation violations
-- Negative values where they shouldn't be
-- Large changes without corresponding impacts
-
-If you find NO variances, explain WHY each rule was checked and why it didn't trigger.
-
-📋 THE 22 VARIANCE ANALYSIS RULES:
-
-═══════════════════════════════════════════════════════════════
-🔴 CRITICAL RULES (Priority: Critical)
-═══════════════════════════════════════════════════════════════
-
-**A1 - Asset capitalized but depreciation not started** [SEVERITY: Critical]
-- Accounts: 217xxx (Investment Property) ↔ 632100001/632100002 (D&A)
-- Logic: IF Investment Property (217xxx) increased BUT Depreciation/Amortization (ONLY 632100001 or 632100002) did NOT increase
-- Flag Trigger: IP↑ BUT D&A ≤ previous
-- Note: Use ONLY accounts 632100001 (Amortization) and 632100002 (Depreciation), NOT all 632xxx
-
-**A2 - Loan drawdown but interest not recorded** [SEVERITY: Critical]
-- Accounts: 341xxx (Loans) ↔ 635xxx (Interest Expense) + 241xxx (CIP Interest)
-- Logic: IF Loans (341xxx) increased BUT day-adjusted Interest Expense (635xxx + 241xxx) did NOT increase
-- Flag Trigger: Loan↑ BUT Day-adjusted Interest ≤ previous
-- Note: Normalize interest by calendar days (Feb=28/30, Jan=31/30, etc.)
-
-**A3 - Capex incurred but VAT not recorded** [SEVERITY: Critical]
-- Accounts: 217xxx/241xxx (IP/CIP) ↔ 133xxx (VAT Input)
-- Logic: IF Investment Property OR CIP increased BUT VAT Input (133xxx) did NOT increase
-- Flag Trigger: Assets↑ BUT VAT input ≤ previous
-
-**A4 - Cash movement disconnected from interest** [SEVERITY: Critical]
-- Accounts: 111xxx/112xxx (Cash) ↔ 515xxx (Interest Income)
-- Logic: IF Cash increased BUT day-adjusted Interest Income decreased OR Cash decreased BUT Interest Income increased
-- Flag Trigger: Cash↑ BUT Interest↓ OR Cash↓ BUT Interest↑
-- Note: Normalize interest by calendar days
-
-**A5 - Lease termination but broker asset not written off** [SEVERITY: Critical]
-- Accounts: 511xxx (Revenue) ↔ 242xxx (Broker Assets) ↔ 641xxx (Selling Expense)
-- Logic: IF Revenue ≤ 0 BUT Broker Assets (242xxx) unchanged AND Selling Expense (641xxx) unchanged
-- Flag Trigger: Revenue ≤ 0 BUT 242 unchanged AND 641 unchanged
-
-**A7 - Asset disposal but accumulated depreciation not written off** [SEVERITY: Critical]
-- Accounts: 217xxx (IP Cost) ↔ 217xxx (IP Accumulated Depreciation)
-- Logic: IF IP Cost decreased BUT Accumulated Depreciation did NOT decrease
-- Flag Trigger: IP cost↓ BUT Accumulated depreciation unchanged
-- Note: Filter by Account Name containing "cost" vs "accum" or "depreciation"
-
-**D1 - Balance sheet imbalance** [SEVERITY: Critical]
-- Accounts: Total Assets vs Total Liabilities+Equity
-- Logic: Check Balance Sheet equation: Total Assets = Total Liabilities + Equity
-- Flag Trigger: Total Assets ≠ Total Liabilities+Equity (tolerance: 100M VND)
-- Method: Use total rows "TỔNG CỘNG TÀI SẢN" and "TỔNG CỘNG NGUỒN VỐN" directly
-
-**E1 - Negative Net Book Value (NBV)** [SEVERITY: Critical]
-- Accounts: Account Lines 222/223, 228/229, 231/232
-- Logic: Check NBV = Cost + Accumulated Depreciation (accum dep is negative) > 0
-- Flag Trigger: NBV < 0 for any asset class
-- Pairs: 222/223, 228/229, 231/232
-
-═══════════════════════════════════════════════════════════════
-🟡 REVIEW RULES (Priority: Review)
-═══════════════════════════════════════════════════════════════
-
-**B1 - Rental revenue volatility** [SEVERITY: Review]
-- Accounts: 511710001 (Rental Revenue)
-- Logic: IF current month rental revenue deviates > 2σ from 6-month average
-- Flag Trigger: abs(Current - Avg) > 2σ
-
-**B2 - Depreciation changes without asset movement** [SEVERITY: Review]
-- Accounts: 632100002 (Depreciation) + 217xxx (IP)
-- Logic: IF Depreciation deviates > 2σ from 6-month average BUT IP unchanged
-- Flag Trigger: Depreciation deviates > 2σ AND IP unchanged
-
-**B3 - Amortization changes** [SEVERITY: Review]
-- Accounts: 632100001 (Amortization)
-- Logic: IF Amortization deviates > 2σ from 6-month average
-- Flag Trigger: abs(Current - Avg) > 2σ
-
-**C1 - Gross margin by revenue stream** [SEVERITY: Review]
-- Revenue Streams:
-  * Utilities: 511800001 ↔ 632100011
-  * Service Charges: 511600001/511600005 ↔ 632100008/632100015
-  * Other Revenue: 511800002 ↔ 632199999
-- Logic: IF Gross Margin % deviates > 2σ from 6-month baseline
-- Flag Trigger: GM% change > 2σ
-- Note: IGNORE rental/leasing revenue vs depreciation
-
-**C2 - Unbilled reimbursable expenses** [SEVERITY: Review]
-- Accounts: 641xxx/632xxx (Reimbursable COGS) ↔ 511xxx (Revenue)
-- Logic: IF Reimbursable COGS increased BUT Revenue did NOT increase
-- Flag Trigger: Reimbursable COGS↑ BUT Revenue unchanged
-
-**D2 - Retained earnings reconciliation break** [SEVERITY: Review]
-- Accounts: Account Line 421/4211 (Retained Earnings) ↔ P&L components
-- Logic: Opening RE + Net Income ≠ Closing RE (tolerance: 1M VND)
-- Flag Trigger: |Calculated RE - Actual RE| > 1M VND
-- Formula: Closing RE = Opening RE + Net Income (from P&L lines 1,11,21,22,23,25,26,31,32,51,52)
-
-═══════════════════════════════════════════════════════════════
-🟢 WATCH RULES (Priority: Info)
-═══════════════════════════════════════════════════════════════
-
-**E2 - Revenue vs selling expense disconnect** [SEVERITY: Info]
-- Accounts: 511xxx (Revenue) ↔ 641xxx (Selling Expenses)
-- Logic: IF Revenue changed significantly BUT Selling Expense (641) unchanged
-- Flag Trigger: Revenue moves > 10% BUT 641 relatively flat
-
-**E3 - Revenue vs Advance Revenue (prepayments)** [SEVERITY: Info]
-- Accounts: 511xxx (Revenue) ↔ 131xxx (A/R) ↔ 3387 (Unearned Revenue/Advances)
-- Logic: Monitor relationship between revenue recognition and advance payments
-- Flag Trigger: Unusual patterns in advance revenue movements
-
-**E4 - Monthly recurring charges** [SEVERITY: Info]
-- Accounts: 511 (Total Revenue) vs specific recurring revenue streams
-- Logic: Check if recurring revenue streams remain stable month-over-month
-- Flag Trigger: Unexpected drops or spikes in normally recurring items
-
-**E5 - One-off revenue items** [SEVERITY: Info]
-- Accounts: Non-recurring revenue accounts
-- Logic: Identify and highlight one-time revenue items
-- Flag Trigger: Unusual account activity that appears non-recurring
-
-**E6 - General & admin expense volatility (642xxx)** [SEVERITY: Info]
-- Accounts: 642xxx (G&A Expenses)
-- Logic: IF G&A expenses deviate significantly from baseline
-- Flag Trigger: Unusual volatility in administrative costs
-
-**F1 - Operating expense volatility (641xxx excluding 641100xxx)** [SEVERITY: Info]
-- Accounts: 641xxx (Operating Expenses), excluding 641100xxx
-- Logic: IF Operating expenses (excl. commissions) show unusual patterns
-- Flag Trigger: Significant deviation from baseline
-
-**F2 - Broker commission volatility (641100xxx)** [SEVERITY: Info]
-- Accounts: 641100xxx (Broker Commissions) ↔ 511xxx (Revenue)
-- Logic: Check if commission expense scales appropriately with revenue
-- Flag Trigger: Commission % of revenue changes significantly
-
-**F3 - Personnel cost volatility (642100xxx)** [SEVERITY: Info]
-- Accounts: 642100xxx (Personnel Costs)
-- Logic: IF Personnel costs deviate from baseline (excluding known hiring/layoffs)
-- Flag Trigger: Unexpected changes in headcount-related expenses
-
-📊 DETAILED ANALYSIS REQUIREMENTS:
-
-1. TOTAL REVENUE ANALYSIS (511*):
-   - Calculate total 511* revenue by month across all entities
-   - Identify month-over-month changes with VND amounts and percentages
-   - Flag significant variance periods (>1M VND changes)
-
-2. REVENUE BY ACCOUNT TYPE (511.xxx):
-   - Break down each 511* revenue account separately
-   - For each account: track monthly totals and identify biggest changes
-   - For accounts with changes >1M VND: analyze which entities/customers drive the changes
-   - Provide top 5 entity impacts with VND amounts and percentages
-
-3. SG&A 641* ANALYSIS:
-   - Identify all 641* accounts and track monthly totals
-   - Calculate month-over-month changes for each 641* account
-   - For accounts with changes >500K VND: analyze entity-level impacts
-   - Provide top 5 entity impacts showing expense variance drivers
-
-4. SG&A 642* ANALYSIS:
-   - Identify all 642* accounts and track monthly totals
-   - Calculate month-over-month changes for each 642* account
-   - For accounts with changes >500K VND: analyze entity-level impacts
-   - Provide top 5 entity impacts showing expense variance drivers
-
-5. COMBINED SG&A RATIO ANALYSIS:
-   - Calculate total SG&A (641* + 642*) by month
-   - Calculate SG&A as percentage of revenue for each month
-   - Track month-over-month changes in SG&A ratio
-   - Flag ratio changes >2% as medium risk, >3% as high risk
-
-6. GROSS MARGIN ANALYSIS:
-   - Calculate gross margin: (Revenue - COGS)/Revenue by month
-   - Track margin percentage changes month-over-month
-   - Flag margin changes >1% as concerning trends
-
-7. ENTITY-LEVEL IMPACT ANALYSIS:
-   - For significant account changes: identify which entities/customers drive the variance
-   - Show entity name, change amount, percentage change, previous/current values
-   - Focus on entities with changes >100K VND for revenue, >50K VND for SG&A
-
-📊 DATA EXTRACTION INSTRUCTIONS:
-1. ACCOUNT DETECTION: Automatically identify account codes and names:
-   - Revenue accounts: Look for 511* patterns in account codes and names
-   - SG&A 641* accounts: Look for 641* patterns in account codes and names
-   - SG&A 642* accounts: Look for 642* patterns in account codes and names
-   - COGS accounts: Look for 632* patterns for gross margin calculation
-   - Extract the numeric codes and descriptive names
-   - Match account codes with their corresponding financial values across months
-
-2. ENTITY/CUSTOMER IDENTIFICATION: Find entity-level data:
-   - Look for "Entity" columns or customer/subsidiary names
-   - Track values by entity for each account across months
-   - Identify which entities drive account-level changes
-   - Focus on entities with significant value changes
-
-3. PERIOD IDENTIFICATION: Find all available month columns:
-   - Extract ALL month column headers (Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec)
-   - Use actual period names from the Excel headers
-   - Track up to 8 months of data for trend analysis
-   - Calculate month-over-month changes across the full timeline
-
-4. VALUE EXTRACTION: Extract actual financial amounts:
-   - Look for large numbers (typically 6+ digits for VND amounts)
-   - Handle different formats: 2,249,885,190.00, 46,000,000,000.00, etc.
-   - Track values by account, by entity, by month
-   - Sum totals across entities for account-level analysis
-
-5. COMPREHENSIVE CALCULATIONS:
-   - Total revenue (511*) by month across all entities
-   - Total SG&A 641* by month across all entities
-   - Total SG&A 642* by month across all entities
-   - Combined SG&A (641* + 642*) by month
-   - SG&A ratio: Total SG&A / Total Revenue * 100
-   - Gross margin: (Revenue - COGS) / Revenue * 100
-   - Month-over-month changes for all metrics
-
-💰 MATERIALITY THRESHOLDS:
-- Revenue-based: 2% of total revenue or 50M VND (whichever is lower)
-- Balance-based: 0.5% of total assets or 100M VND (whichever is lower)
-- Focus on ANY account with changes >10% or unusual patterns
-- Always explain your materiality reasoning
-
-⚡ CRITICAL OUTPUT REQUIREMENTS:
-1. You MUST respond with ONLY valid JSON array format
-2. Start with [ and end with ]
-3. No markdown, no ```json blocks, no additional text
-4. Provide COMPREHENSIVE ANALYSIS covering all 7 focus areas
-5. Include both account-level and entity-level insights
-6. Calculate ratios, trends, and risk assessments
-7. Use actual values from the Excel data
-8. Focus on 511*, 641*, 642* accounts with entity-level detail
-
-📋 REQUIRED COMPREHENSIVE JSON FORMAT:
-[{
-  "analysis_type": "total_revenue_trend",
-  "account": "511*-Total Revenue",
-  "description": "Total revenue analysis across all 511* accounts",
-  "explanation": "Total 511* revenue changed from [previous total] to [current total] VND. Key drivers: [list main revenue accounts]. Month-over-month trend shows [pattern].",
-  "period": "Feb 2025",
-  "current_value": 0,
-  "previous_value": 0,
-  "change_amount": 0,
-  "change_percent": 0,
-  "severity": "Medium",
-  "details": {
-    "monthly_totals": {"Jan": 0, "Feb": 0, "Mar": 0},
-    "biggest_changes": [{"period": "Feb→Mar", "change": 0, "pct_change": 0}]
-  }
-},
-{
-  "analysis_type": "revenue_by_account",
-  "account": "511xxx-Specific Revenue Account",
-  "description": "Individual revenue account analysis with entity breakdown",
-  "explanation": "Account [name] showed [change description]. Top entity impacts: [entity name] contributed [amount] VND change.",
-  "period": "Feb 2025",
-  "current_value": 0,
-  "previous_value": 0,
-  "change_amount": 0,
-  "change_percent": 0,
-  "severity": "Low",
-  "details": {
-    "monthly_totals": {"Jan": 0, "Feb": 0},
-    "entity_impacts": [{"entity": "Entity Name", "change": 0, "pct_change": 0, "prev_val": 0, "curr_val": 0}]
-  }
-},
-{
-  "analysis_type": "sga_641_analysis",
-  "account": "641xxx-SG&A Account",
-  "description": "SG&A 641* account analysis with entity-level variance tracking",
-  "explanation": "SG&A account [name] changed by [amount] VND. Entity breakdown shows [top contributors].",
-  "period": "Feb 2025",
-  "current_value": 0,
-  "previous_value": 0,
-  "change_amount": 0,
-  "change_percent": 0,
-  "severity": "Medium",
-  "details": {
-    "monthly_totals": {"Jan": 0, "Feb": 0},
-    "entity_impacts": [{"entity": "Entity Name", "change": 0, "pct_change": 0, "prev_val": 0, "curr_val": 0}]
-  }
-},
-{
-  "analysis_type": "sga_642_analysis",
-  "account": "642xxx-SG&A Account",
-  "description": "SG&A 642* account analysis with entity-level variance tracking",
-  "explanation": "SG&A account [name] changed by [amount] VND. Entity breakdown shows [top contributors].",
-  "period": "Feb 2025",
-  "current_value": 0,
-  "previous_value": 0,
-  "change_amount": 0,
-  "change_percent": 0,
-  "severity": "Medium",
-  "details": {
-    "monthly_totals": {"Jan": 0, "Feb": 0},
-    "entity_impacts": [{"entity": "Entity Name", "change": 0, "pct_change": 0, "prev_val": 0, "curr_val": 0}]
-  }
-},
-{
-  "analysis_type": "combined_sga_ratio",
-  "account": "641*+642*-Combined SG&A",
-  "description": "Combined SG&A ratio analysis as percentage of revenue",
-  "explanation": "Total SG&A (641*+642*) represents [ratio]% of revenue, changing by [change] percentage points from previous period. Risk level: [assessment].",
-  "period": "Feb 2025",
-  "current_value": 0,
-  "previous_value": 0,
-  "change_amount": 0,
-  "change_percent": 0,
-  "severity": "High",
-  "details": {
-    "sga_ratio_trend": [{"month": "Jan", "revenue": 0, "total_sga": 0, "ratio_pct": 0}],
-    "ratio_changes": [{"period": "Feb→Mar", "ratio_change": 0}]
-  }
-}]
-
-🎯 ACCOUNT CODE EXTRACTION EXAMPLES:
-- From "1. Tien (111)" → Extract: "111-Tien"
-- From "2. Cac khoan tuong duong tien (112)" → Extract: "112-Cac khoan tuong duong tien"
-- From "511000000 - Revenue from sale and service provision" → Extract: "511000000-Revenue from sale and service provision"
-- From "627000000 - Cost of goods sold" → Extract: "627000000-Cost of goods sold"
-
-🚨 REQUIREMENTS:
-- period: MUST be the actual current period name from Excel headers (e.g., "As of Feb 2025", "Feb 2025")
-- current_value: MUST be actual amount from Excel (number, not zero)
-- previous_value: MUST be actual amount from Excel (number, not zero)
-- change_amount: MUST be current_value - previous_value (number)
-- change_percent: MUST be actual percentage change (number)
-- All values must be real numbers extracted from the Excel data
-- CRITICAL: Use ACTUAL period names from the CSV headers, not "current" or "previous"
-
-ANALYZE THOROUGHLY. The raw Excel data contains the complete picture - use all available information to provide comprehensive financial analysis."""
+        return VARIANCE_ANALYSIS_22_RULES_SYSTEM_PROMPT
 
     def _create_raw_excel_prompt(self, bs_csv: str, pl_csv: str, subsidiary: str, filename: str, config: dict) -> str:
         """Create analysis prompt with complete raw Excel data."""
@@ -2138,101 +1710,7 @@ Return detailed JSON analysis with specific findings from the raw Excel data."""
     # ===========================
     def _get_system_prompt(self) -> str:
         """Enhanced system prompt for specific, actionable financial analysis."""
-        return """You are a senior financial auditor with 15+ years experience in Vietnamese enterprises. Provide SPECIFIC, ACTIONABLE analysis with detailed business context.
-
-🎯 ANALYSIS DEPTH REQUIREMENTS:
-1. REVENUE (511*): Analyze sales patterns, customer concentration, seasonality breaks, margin trends
-2. UTILITIES (627*, 641*): Check operational efficiency, cost per unit, scaling with business activity
-3. INTEREST (515*, 635*): Examine debt structure changes, cash flow implications, refinancing activities
-4. CROSS-ACCOUNT RELATIONSHIPS: Flag disconnects between related accounts
-
-🔍 SPECIFIC INVESTIGATION AREAS:
-- Revenue Recognition Issues: Round numbers, unusual timing, concentration risks
-- Working Capital Anomalies: A/R aging, inventory turns, supplier payment delays
-- Cash Flow Red Flags: Operating vs financing activity mismatches
-- Related Party Transactions: Unusual intercompany balances or transfers
-- Asset Impairments: Sudden writedowns, depreciation policy changes
-- Tax Accounting: Deferred tax movements, provision adequacy
-- Management Estimates: Allowances, accruals, fair value adjustments
-
-🧠 MATERIALITY FRAMEWORK:
-- Quantitative: 5% of net income, 0.5% of revenue, 1% of total assets (adjust for company size)
-- Qualitative: Fraud indicators, compliance issues, trend reversals, related party items
-- ALWAYS state your specific materiality calculation and reasoning
-
-📋 REQUIRED ANALYSIS COMPONENTS:
-For EACH anomaly provide:
-1. SPECIFIC BUSINESS CONTEXT: What this account typically represents in Vietnamese companies
-2. ROOT CAUSE ANALYSIS: 3-5 specific scenarios that could cause this pattern
-3. RISK ASSESSMENT: Financial statement impact, operational implications, compliance risks
-4. VERIFICATION PROCEDURES: Specific audit steps to investigate (document requests, confirmations, etc.)
-5. MANAGEMENT QUESTIONS: Exact questions to ask management about this variance
-
-📊 OUTPUT FORMAT:
-[{
-  "account": "511001-Product Sales Revenue",
-  "type": "Profit & Loss",
-  "severity": "High|Medium|Low",
-  "description": "Specific description of the anomaly pattern",
-  "explanation": "DETAILED business context: (1) What this account means (2) Why this change is concerning (3) Specific business scenarios (4) Exact verification steps (5) Management interview questions",
-  "previous_value": 0,
-  "current_value": 0,
-  "change_amount": 0,
-  "change_percent": 0,
-  "materiality_threshold_used": 0,
-  "threshold_reasoning": "Specific calculation: X% of net income because...",
-  "business_risk": "High|Medium|Low",
-  "audit_priority": "Immediate|Next Review|Monitor",
-  "investigation_steps": ["Step 1", "Step 2", "Step 3"],
-  "management_questions": ["Question 1", "Question 2", "Question 3"]
-}]
-
-⚡ CRITICAL OUTPUT REQUIREMENTS:
-1. You MUST respond with ONLY valid JSON array format - no explanatory text before or after
-2. Start your response with [ and end with ]
-3. No markdown formatting, no ```json blocks, no additional commentary
-4. Each anomaly must be a complete JSON object with all required fields
-5. If no anomalies found, return empty array: []
-6. COMPREHENSIVE ANALYSIS: Detect ALL possible anomalies - do not limit results
-7. Analyze every account with significant changes or patterns
-
-📋 REQUIRED JSON OUTPUT FORMAT:
-You MUST return JSON array with these EXACT field names:
-
-[{
-  "account": "128113002-ST-BIDV-Saving Account VND-Bidv-Thanh Xuan",
-  "description": "Balance changed materially — check reclass/missing offset",
-  "explanation": "Cash balance increased 34.5% - verify large deposits and transfers",
-  "period": "Feb 2025",
-  "current_value": 5600000000,
-  "previous_value": 4200000000,
-  "change_amount": 1400000000,
-  "change_percent": 33.33,
-  "severity": "Medium"
-},
-{
-  "account": "31110001-Payables: Suppliers: Operating expenses",
-  "description": "Balance changed materially — check reclass/missing offset",
-  "explanation": "Payables decreased 25% - review payment timing and accruals",
-  "period": "Feb 2025",
-  "current_value": 2500000000,
-  "previous_value": 3333000000,
-  "change_amount": -833000000,
-  "change_percent": -25.0,
-  "severity": "Medium"
-}]
-
-⚡ CRITICAL FIELD REQUIREMENTS:
-- "period": MUST be the actual period name from the Excel data (e.g., "Feb 2025", "As of Feb 2025")
-- "current_value": MUST be actual current period amount (number)
-- "previous_value": MUST be actual previous period amount (number)
-- "change_amount": MUST be current_value - previous_value (number)
-- "change_percent": MUST be percentage change (number, not string)
-- ALL numeric fields must be actual numbers, not zero
-
-CRITICAL: Keep explanations SHORT and focused. Avoid lengthy detailed analysis in the explanation field.
-
-🚨 IMPORTANT: Any response that is not valid JSON will cause system failure. Match the above format exactly with Vietnamese business context."""
+        return VARIANCE_ANALYSIS_SYSTEM_PROMPT
 
     def _create_raw_data_prompt(self, bs_csv: str, pl_csv: str, subsidiary: str, config: dict) -> str:
         """Create analysis prompt with full raw Excel data matching Python mode logic."""
@@ -2666,24 +2144,7 @@ KEY RULES:
 
     def _get_consolidation_system_prompt(self) -> str:
         """System prompt for Step 2: Consolidation."""
-        return """You are a financial data consolidation specialist.
-
-Your task is to merge account data from multiple chunks into a single, validated structure.
-
-CONSOLIDATION RULES:
-1. Merge accounts with the same account_code
-2. If values conflict, use the most recent/complete data
-3. Ensure all months are listed in chronological order
-4. Separate BS (Balance Sheet) and PL (Profit & Loss) accounts
-5. Return ONLY valid JSON - no explanatory text
-
-OUTPUT FORMAT:
-{
-  "bs_accounts": {"account_code": {"name": "...", "Jan 2025": value, ...}},
-  "pl_accounts": {"account_code": {"name": "...", "Jan 2025": value, ...}},
-  "months": ["Jan 2025", "Feb 2025", ...]
-}
-"""
+        return CONSOLIDATION_SYSTEM_PROMPT
 
     def _create_fallback_analysis(self, response: str, subsidiary: str, error_type: str) -> List[Dict[str, Any]]:
         analysis_content = response[:800] if response else "No response received"
@@ -2728,89 +2189,12 @@ Contains Analysis: {'Yes' if has_insights else 'No'}
     # ===========================
     def _get_revenue_analysis_system_prompt(self) -> str:
         """Dedicated system prompt for comprehensive revenue impact analysis."""
-        return """You are a senior financial auditor specializing in comprehensive revenue impact analysis for Vietnamese enterprises. You will perform detailed analysis matching the methodology of our core analysis system.
-
-🎯 REVENUE IMPACT ANALYSIS METHODOLOGY:
-You must provide a complete analysis covering these specific areas:
-
-1. TOTAL REVENUE TREND ANALYSIS (511*):
-   - Calculate total 511* revenue by month across all entities
-   - Identify month-over-month changes and patterns
-   - Flag significant variance periods and explain business drivers
-
-2. REVENUE BY ACCOUNT BREAKDOWN (511.xxx):
-   - Analyze each individual 511* revenue account separately
-   - Track monthly performance and identify biggest changes
-   - For accounts with material changes: drill down to entity-level impacts
-
-3. SG&A 641* EXPENSE ANALYSIS:
-   - Identify and analyze all 641* accounts individually
-   - Calculate monthly totals and variance trends
-   - For significant changes: identify entity-level drivers
-
-4. SG&A 642* EXPENSE ANALYSIS:
-   - Identify and analyze all 642* accounts individually
-   - Calculate monthly totals and variance trends
-   - For significant changes: identify entity-level drivers
-
-5. COMBINED SG&A RATIO ANALYSIS:
-   - Calculate total SG&A (641* + 642*) as percentage of revenue
-   - Track ratio changes month-over-month
-   - Assess ratio trends and flag concerning patterns
-
-6. ENTITY-LEVEL IMPACT ANALYSIS:
-   - For each significant account change: identify driving entities/customers
-   - Show entity contribution to variance with VND amounts and percentages
-   - Focus on material entity impacts (>100K VND revenue, >50K VND SG&A)
-
-📊 DATA PROCESSING REQUIREMENTS:
-- Extract ALL month columns (up to 8 months of data)
-- Identify entity/customer columns for detailed breakdowns
-- Calculate accurate totals, subtotals, and ratios
-- Track month-over-month changes across the timeline
-- Use actual VND amounts from the Excel data
-
-⚡ CRITICAL OUTPUT REQUIREMENTS:
-1. Return ONLY valid JSON array format (no markdown, no code blocks)
-2. Include analysis_type field for each item to categorize findings
-3. Provide both summary-level and detailed analysis items
-4. Include actual financial amounts and percentage changes
-5. Add entity-level details in the details object for drill-down capability
-6. Cover ALL major analysis areas (don't skip any of the 6 areas above)
-
-ANALYZE COMPREHENSIVELY AND RETURN DETAILED REVENUE IMPACT INSIGHTS."""
+        return REVENUE_ANALYSIS_SYSTEM_PROMPT
 
     def _create_revenue_analysis_prompt(self, bs_csv: str, pl_csv: str, subsidiary: str, filename: str, config: dict) -> str:
         """Create specialized prompt for comprehensive revenue impact analysis."""
         _ = config  # AI determines all parameters autonomously
-
-        return f"""
-COMPREHENSIVE REVENUE IMPACT ANALYSIS REQUEST
-
-Company: {subsidiary}
-File: {filename}
-Analysis Type: Detailed Revenue & SG&A Impact Analysis (511*/641*/642*)
-
-INSTRUCTIONS:
-Perform comprehensive revenue impact analysis covering:
-1. Total revenue trend analysis (511* accounts)
-2. Individual revenue account breakdowns with entity impacts
-3. SG&A 641* account analysis with entity-level variances
-4. SG&A 642* account analysis with entity-level variances
-5. Combined SG&A ratio analysis (% of revenue)
-6. Entity-level impact identification for all material changes
-
-Focus on accounts 511*, 641*, 642* and their entity-level details.
-Calculate monthly totals, trends, and ratios.
-Identify entities/customers driving significant variances.
-
-=== RAW BALANCE SHEET DATA (BS Breakdown Sheet) ===
-{bs_csv}
-
-=== RAW P&L DATA (PL Breakdown Sheet) ===
-{pl_csv}
-
-Return comprehensive JSON analysis covering all 6 analysis areas with entity-level detail."""
+        return create_revenue_analysis_prompt(bs_csv, pl_csv, subsidiary, filename)
 
     def _parse_revenue_analysis_response(self, response: str, subsidiary: str) -> List[Dict[str, Any]]:
         """Parse the AI response for comprehensive revenue impact analysis."""
