@@ -1,19 +1,17 @@
+# Environment
 .env
 venv/
-__pycache__/
-*.pyc
-.env
-venv/
-__pycache__/
-*.pyc
-__pycache__/
-*.py[cod]
-logs/
-outputs/
 
+# Python
 __pycache__/
 *.py[cod]
-logs/
-outputs/
+*.pyc
+
+# Temporary data (session files, uploads, outputs)
+data/
 uploads/
-sample_for_test
+outputs/
+logs/
+
+# Test files
+sample_for_test/
