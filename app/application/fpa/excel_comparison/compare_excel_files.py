@@ -34,6 +34,13 @@ class CompareExcelFilesUseCase:
         """
         Execute the Excel comparison workflow.
 
+        NEW UNIFIED OUTPUT (v2.0):
+        - Single merged file with highlighted data + comparison sheets
+        - Enhanced highlighting: light yellow row + orange cells for updates
+        - Project/Phase statistics in Summary sheet
+        - Document Number, Item, Type columns prioritized in new_rows sheet
+        - Smart filename: "Leasing SS_Comparison T9 – T11.xlsx"
+
         Args:
             old_file: Previous month Excel file
             new_file: Current month Excel file
@@ -57,44 +64,42 @@ class CompareExcelFilesUseCase:
             with open(new_path, "wb") as f:
                 shutil.copyfileobj(new_file.file, f)
 
-            # Generate output file with new_rows and update_rows sheets
-            logger.info("Generating comparison output file...")
-            output_path = self.comparator.generate_excel_output_files(
+            # Generate UNIFIED output file (v2.0) - single merged file with all improvements
+            logger.info("Generating unified comparison output (v2.0)...")
+            unified_output_path = self.comparator.generate_unified_comparison_output(
                 str(old_path),
                 str(new_path),
-                str(self.output_dir / f"comparison_{timestamp}.xlsx")
+                str(self.output_dir)
             )
 
-            # Create highlighted copy (does NOT modify original uploaded files)
-            logger.info("Generating highlighted file...")
-            highlighted_path = self.output_dir / f"highlighted_{timestamp}_{new_file.filename}"
-            highlighted_output = self.comparator.apply_highlighting_to_summary_with_90_day_rule(
-                str(old_path),
-                str(new_path),
-                str(highlighted_path)
-            )
-
-            # Get comparison statistics
+            # Get comparison statistics for response
             logger.info("Calculating comparison statistics...")
             comparison_results = self.comparator.compare_summary_files_by_document_item_key(
                 str(old_path),
                 str(new_path)
             )
 
-            # Build response
+            # Build response - now returns single unified file
             result = {
                 "status": "success",
                 "timestamp": timestamp,
                 "old_filename": old_file.filename,
                 "new_filename": new_file.filename,
-                "output_file": os.path.basename(output_path),
-                "highlighted_file": os.path.basename(highlighted_path),
-                "message": "Comparison and highlighting completed successfully",
+                "output_file": os.path.basename(unified_output_path),
+                "highlighted_file": os.path.basename(unified_output_path),  # Same file now
+                "message": "Unified comparison output generated successfully (v2.0)",
                 "statistics": {
                     "new_rows": len(comparison_results['new_rows_indices']),
                     "updated_rows": len(comparison_results['update_rows_indices']),
                     "unchanged_rows": len(comparison_results['unchanged_rows_indices'])
-                }
+                },
+                "improvements": [
+                    "Single merged file (highlighted data + comparison sheets)",
+                    "Enhanced highlighting (light yellow row + orange changed cells)",
+                    "Project/Phase statistics in Summary sheet",
+                    "Document Number, Item, Type columns in new_rows sheet",
+                    "Smart filename with month range"
+                ]
             }
 
             # Cleanup uploaded files (keep outputs)

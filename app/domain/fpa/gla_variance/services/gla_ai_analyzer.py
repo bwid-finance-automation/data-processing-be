@@ -522,3 +522,315 @@ Only include projects where you have meaningful tenant information."""
         except Exception as e:
             logger.warning(f"Failed to parse notes JSON: {e}")
             return []
+
+    def detect_file_structure(self, file_path: str, sheet_name: str = None) -> Dict[str, Any]:
+        """
+        Use AI to dynamically detect the structure of a GLA Excel file.
+
+        This is a FULLY AI-POWERED detection that sends all relevant Excel data
+        to the AI and receives complete structure analysis including all monthly
+        column mappings.
+
+        Args:
+            file_path: Path to the Excel file
+            sheet_name: Optional specific sheet to analyze
+
+        Returns:
+            Dict with detected structure including monthly_columns mapping
+        """
+        import pandas as pd
+
+        logger.info(f"AI detecting file structure for: {file_path}")
+
+        if not self.client:
+            logger.error("No AI client available - AI detection requires an API key")
+            raise ValueError("AI client required for file structure detection. Please configure OPENAI_API_KEY or ANTHROPIC_API_KEY.")
+
+        try:
+            xl = pd.ExcelFile(file_path)
+            sheets = xl.sheet_names if sheet_name is None else [sheet_name]
+
+            # Find target sheet
+            target_sheet = None
+            for s in sheets:
+                if 'handover' in s.lower() or 'committed' in s.lower():
+                    target_sheet = s
+                    break
+            if not target_sheet:
+                target_sheet = sheets[0]
+
+            # Read raw data for AI analysis
+            df_raw = pd.read_excel(file_path, sheet_name=target_sheet, header=None, nrows=10)
+
+            # Build comprehensive data for AI - include ALL date columns with headers
+            ai_data = self._extract_complete_file_data(df_raw, file_path, target_sheet)
+
+            # Send to AI for complete analysis
+            result = self._ai_analyze_file_structure(ai_data)
+
+            logger.info(f"AI detection complete: format={result.get('format')}, monthly_columns={len(result.get('monthly_columns', {}))}")
+            return result
+
+        except Exception as e:
+            logger.error(f"AI file structure detection failed: {e}")
+            raise
+
+    def _extract_complete_file_data(self, df_raw, file_path: str, sheet_name: str) -> Dict[str, Any]:
+        """Extract complete file data for AI analysis - includes ALL date columns."""
+        import pandas as pd
+        import os
+
+        data = {
+            'file_name': os.path.basename(file_path),
+            'sheet_name': sheet_name,
+            'total_columns': len(df_raw.columns),
+            'first_rows': [],
+            'date_columns': []
+        }
+
+        # Extract first 6 rows (first 15 columns each)
+        for row_idx in range(min(6, len(df_raw))):
+            row_data = []
+            for col_idx in range(min(15, len(df_raw.columns))):
+                val = df_raw.iloc[row_idx, col_idx]
+                if pd.notna(val):
+                    row_data.append({'col': col_idx, 'value': str(val)[:30]})
+            data['first_rows'].append({'row': row_idx, 'cells': row_data})
+
+        # Find ALL date columns with their headers
+        for row_idx in range(min(5, len(df_raw))):
+            row = df_raw.iloc[row_idx]
+            header_row = df_raw.iloc[row_idx + 1] if row_idx + 1 < len(df_raw) else None
+
+            for col_idx, val in enumerate(row):
+                if pd.notna(val) and hasattr(val, 'month'):
+                    header = ""
+                    if header_row is not None and col_idx < len(header_row):
+                        header = str(header_row.iloc[col_idx]).strip() if pd.notna(header_row.iloc[col_idx]) else ""
+
+                    data['date_columns'].append({
+                        'column_index': col_idx,
+                        'date_row': row_idx,
+                        'date_value': val.strftime('%Y-%m-%d') if hasattr(val, 'strftime') else str(val),
+                        'year': val.year if hasattr(val, 'year') else None,
+                        'month': val.month if hasattr(val, 'month') else None,
+                        'header': header
+                    })
+
+        return data
+
+    def _ai_analyze_file_structure(self, file_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Send file data to AI for complete structure analysis."""
+
+        system_prompt = """You are an expert Excel file analyzer for GLA (Gross Leasable Area) data.
+
+Analyze the provided Excel file structure and return a COMPLETE analysis including:
+1. File format: "standard" (single GLA column) or "pivot_table" (monthly GLA columns)
+2. Row positions: date_row, header_row, data_start_row
+3. For pivot_table format: the complete mapping of ALL monthly "Handover GLA" columns
+
+IMPORTANT: For pivot_table format, you MUST return the "monthly_columns" object with ALL months that have "Handover GLA" header.
+
+Return ONLY valid JSON in this exact format:
+{
+    "format": "standard" or "pivot_table",
+    "date_row": <row index with dates, or null>,
+    "header_row": <row index with headers>,
+    "data_start_row": <first data row>,
+    "monthly_gla_header": "Handover GLA",
+    "monthly_columns": {
+        "2024-01": <column_index>,
+        "2024-02": <column_index>,
+        ... (include ALL months with Handover GLA header)
+    },
+    "reasoning": "<brief explanation>"
+}
+
+For the monthly_columns, use format "YYYY-MM" as keys and column indices as values.
+Only include columns where the header is exactly "Handover GLA"."""
+
+        # Format file data for AI
+        prompt_lines = [
+            f"File: {file_data['file_name']}",
+            f"Sheet: {file_data['sheet_name']}",
+            f"Total columns: {file_data['total_columns']}",
+            "",
+            "First rows preview:"
+        ]
+
+        for row_info in file_data['first_rows']:
+            cells = [f"[{c['col']}]'{c['value']}'" for c in row_info['cells'][:8]]
+            prompt_lines.append(f"  Row {row_info['row']}: {', '.join(cells)}")
+
+        if file_data['date_columns']:
+            prompt_lines.append("")
+            prompt_lines.append(f"Found {len(file_data['date_columns'])} date columns:")
+            prompt_lines.append("")
+
+            # Group by header for clarity
+            by_header = {}
+            for dc in file_data['date_columns']:
+                header = dc['header'] or 'unknown'
+                if header not in by_header:
+                    by_header[header] = []
+                by_header[header].append(dc)
+
+            for header, cols in by_header.items():
+                prompt_lines.append(f"Header '{header}' ({len(cols)} columns):")
+                for dc in cols[:5]:  # Show first 5 of each type
+                    prompt_lines.append(f"  Column {dc['column_index']}: {dc['date_value']} (Year: {dc['year']}, Month: {dc['month']})")
+                if len(cols) > 5:
+                    prompt_lines.append(f"  ... and {len(cols) - 5} more")
+                prompt_lines.append("")
+
+            # Also provide complete list for Handover GLA columns
+            handover_cols = [dc for dc in file_data['date_columns'] if dc['header'] == 'Handover GLA']
+            if handover_cols:
+                prompt_lines.append("COMPLETE LIST of 'Handover GLA' columns:")
+                for dc in handover_cols:
+                    prompt_lines.append(f"  Column {dc['column_index']}: {dc['year']}-{dc['month']:02d}")
+
+        user_prompt = "\n".join(prompt_lines) + "\n\nAnalyze this structure and return the complete JSON response."
+
+        try:
+            if self.is_claude:
+                response = self._call_claude(system_prompt, user_prompt)
+            else:
+                response = self._call_openai(system_prompt, user_prompt)
+
+            content = response.get("content", "")
+            result = self._parse_structure_response(content)
+
+            # Convert monthly_columns from "YYYY-MM" string keys to (year, month) tuples
+            if result.get("monthly_columns"):
+                converted = {}
+                for key, col_idx in result["monthly_columns"].items():
+                    if isinstance(key, str) and '-' in key:
+                        parts = key.split('-')
+                        year = int(parts[0])
+                        month = int(parts[1])
+                        converted[(year, month)] = col_idx
+                result["monthly_columns"] = converted
+
+            # If AI didn't return monthly_columns but detected pivot_table,
+            # extract from the date_columns data we already have
+            if result.get("format") == "pivot_table" and not result.get("monthly_columns"):
+                gla_header = result.get("monthly_gla_header", "Handover GLA")
+                monthly_cols = {}
+                for dc in file_data['date_columns']:
+                    if dc['header'] == gla_header and dc['year'] and dc['month']:
+                        monthly_cols[(dc['year'], dc['month'])] = dc['column_index']
+                result["monthly_columns"] = monthly_cols
+                logger.info(f"Extracted {len(monthly_cols)} monthly columns from file data")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"AI analysis failed: {e}")
+            raise
+
+    def _parse_structure_response(self, content: str) -> Dict[str, Any]:
+        """Parse AI response for structure detection."""
+        try:
+            # Try to extract JSON from response
+            if "```json" in content:
+                start = content.find("```json") + 7
+                end = content.find("```", start)
+                content = content[start:end].strip()
+            elif "```" in content:
+                start = content.find("```") + 3
+                end = content.find("```", start)
+                content = content[start:end].strip()
+
+            # Find JSON object
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                content = content[start:end]
+
+            return json.loads(content)
+        except Exception as e:
+            logger.error(f"Failed to parse structure JSON: {e}")
+            raise ValueError(f"AI returned invalid JSON response: {e}")
+
+    def detect_comparison_months(self, file_path: str, sheet_names: List[str] = None) -> Dict[str, Any]:
+        """
+        Detect which months should be compared based on file name and sheet structure.
+
+        Args:
+            file_path: Path to the Excel file
+            sheet_names: Optional list of sheet names to analyze
+
+        Returns:
+            Dict with:
+            {
+                "previous_month": (year, month),
+                "current_month": (year, month),
+                "source": "filename" | "sheet_data" | "ai_detected"
+            }
+        """
+        import re
+        import os
+
+        filename = os.path.basename(file_path)
+
+        # Try to detect from filename (e.g., "Dec-Nov" or "T11-T12")
+        # Pattern: Dec-Nov, Nov-Dec, T11-T12, etc.
+        month_map = {
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+
+        # Try "Month1-Month2" pattern
+        pattern = r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[^\w]*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)'
+        match = re.search(pattern, filename.lower())
+
+        if match:
+            month1 = month_map[match.group(1)]
+            month2 = month_map[match.group(2)]
+            # Assume current year for now
+            from datetime import datetime
+            year = datetime.now().year
+
+            # Determine which is previous/current based on order
+            # "Dec-Nov" means comparing Dec (current) vs Nov (previous)
+            return {
+                "previous_month": (year, month1),
+                "current_month": (year, month2),
+                "source": "filename"
+            }
+
+        # Try "T##-T##" pattern (Vietnamese month notation)
+        t_pattern = r'[Tt](\d{1,2})[^\d]+[Tt](\d{1,2})'
+        match = re.search(t_pattern, filename)
+
+        if match:
+            month1 = int(match.group(1))
+            month2 = int(match.group(2))
+            from datetime import datetime
+            year = datetime.now().year
+
+            return {
+                "previous_month": (year, month1),
+                "current_month": (year, month2),
+                "source": "filename"
+            }
+
+        # Fallback: use the two most recent months from the data
+        structure = self.detect_file_structure(file_path)
+        if structure.get("format") == "pivot_table" and structure.get("monthly_columns"):
+            monthly_cols = structure["monthly_columns"]
+            if len(monthly_cols) >= 2:
+                sorted_months = sorted(monthly_cols.keys())
+                return {
+                    "previous_month": sorted_months[-2],
+                    "current_month": sorted_months[-1],
+                    "source": "sheet_data"
+                }
+
+        # Default to Nov-Dec 2024
+        return {
+            "previous_month": (2024, 11),
+            "current_month": (2024, 12),
+            "source": "default"
+        }
