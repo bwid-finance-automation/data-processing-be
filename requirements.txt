@@ -32,4 +32,8 @@ greenlet==3.1.1
 
 # Security
 passlib[bcrypt]>=1.7.4
-bcrypt>=4.0.0,<4.1.0  
+bcrypt>=4.0.0,<4.1.0
+
+# HTML Parsing (Required for Vietcombank statements)
+lxml>=5.0.0
+beautifulsoup4>=4.12.0
