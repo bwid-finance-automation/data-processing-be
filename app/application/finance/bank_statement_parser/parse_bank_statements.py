@@ -1054,3 +1054,228 @@ class ParseBankStatementsUseCase:
 
             # Freeze header row
             ws.freeze_panes = "A2"
+
+    def export_to_netsuite_excel(
+        self,
+        all_transactions: List[BankTransaction],
+        all_balances: List[BankBalance]
+    ) -> bytes:
+        """
+        Export to NetSuite Excel format with 2 sheets.
+
+        Creates Excel file with:
+        - Sheet 1: Balance (account balance summary)
+        - Sheet 2: Details (all transactions)
+
+        Args:
+            all_transactions: List of all transactions
+            all_balances: List of all balances
+
+        Returns:
+            Excel file as bytes
+        """
+        output = BytesIO()
+
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Get current date for External ID
+            now = datetime.now()
+            date_suffix = now.strftime("%m%d%y")  # MMDDYY format
+
+            # ========== Aggregate transactions by bank_name + acc_no ==========
+            tx_aggregates = defaultdict(lambda: {
+                "total_debit": 0,
+                "total_credit": 0,
+                "max_date": None,
+            })
+
+            for tx in all_transactions:
+                key = f"{tx.bank_name}_{tx.acc_no}"
+                tx_aggregates[key]["total_debit"] += _safe_int(tx.debit)
+                tx_aggregates[key]["total_credit"] += _safe_int(tx.credit)
+                if tx.date:
+                    if tx_aggregates[key]["max_date"] is None or tx.date > tx_aggregates[key]["max_date"]:
+                        tx_aggregates[key]["max_date"] = tx.date
+
+            # Map to store balance external IDs for linking with details
+            balance_external_ids = {}
+
+            # ========== Sheet 1: Balance ==========
+            balance_data = []
+            seq = 0
+
+            for bal in all_balances:
+                seq += 1
+                key = f"{bal.bank_name}_{bal.acc_no}"
+
+                # External ID format: External ID{MMDDYY}_{SEQ:04d}
+                external_id = f"External ID{date_suffix}_{seq:04d}"
+                balance_external_ids[key] = external_id
+
+                # Get aggregated totals
+                agg = tx_aggregates.get(key, {"total_debit": 0, "total_credit": 0, "max_date": None})
+
+                # Get date from transactions or use current date
+                if agg["max_date"]:
+                    tx_date = agg["max_date"]
+                    date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
+                    # Format: M/D/YYYY (no leading zeros)
+                    formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
+                else:
+                    tx_date = now
+                    date_str_yyyymmdd = now.strftime("%Y%m%d")
+                    formatted_date = f"{now.month}/{now.day}/{now.year}"
+
+                # Currency default
+                currency = bal.currency if bal.currency else "VND"
+
+                # Name format: BS/{BankCode}/{Currency}-{AccNo}/{YYYYMMDD}
+                name = f"BS/{bal.bank_name}/{currency}-{bal.acc_no}/{date_str_yyyymmdd}"
+
+                # For USD, keep decimals. For VND, use integers
+                if currency == "USD":
+                    opening_val = round(_safe_float(bal.opening_balance), 2)
+                    closing_val = round(_safe_float(bal.closing_balance), 2)
+                    debit_val = round(agg["total_debit"], 2)
+                    credit_val = round(agg["total_credit"], 2)
+                else:
+                    opening_val = _safe_int(bal.opening_balance)
+                    closing_val = _safe_int(bal.closing_balance)
+                    debit_val = _safe_int(agg["total_debit"])
+                    credit_val = _safe_int(agg["total_credit"])
+
+                balance_data.append({
+                    "External ID": external_id,
+                    "Name (*)": name,
+                    "Bank Account Number (*)": bal.acc_no,
+                    "Bank code (*)": bal.bank_name,
+                    "Openning Balance (*)": opening_val,
+                    "Closing Balance (*)": closing_val,
+                    "Total Debit (*)": debit_val,
+                    "Total Credit (*)": credit_val,
+                    "Currency (*)": currency,
+                    "Date (*)": formatted_date
+                })
+
+            if balance_data:
+                df_balance = pd.DataFrame(balance_data, columns=[
+                    "External ID",
+                    "Name (*)",
+                    "Bank Account Number (*)",
+                    "Bank code (*)",
+                    "Openning Balance (*)",
+                    "Closing Balance (*)",
+                    "Total Debit (*)",
+                    "Total Credit (*)",
+                    "Currency (*)",
+                    "Date (*)"
+                ])
+                df_balance.to_excel(writer, sheet_name="Balance", index=False)
+
+            # ========== Sheet 2: Details ==========
+            details_data = []
+            seq = 0
+
+            for tx in all_transactions:
+                seq += 1
+
+                # External ID format: External Idline_{MMDDYY}_{SEQ:04d}
+                external_id = f"External Idline_{date_suffix}_{seq:04d}"
+
+                # Link to parent Balance
+                key = f"{tx.bank_name}_{tx.acc_no}"
+                external_id_bsm_daily = balance_external_ids.get(key, "")
+
+                # Currency default
+                currency = tx.currency if tx.currency else "VND"
+
+                # Date handling
+                if tx.date:
+                    tx_date = tx.date
+                    date_str_yyyymmdd = tx.date.strftime("%Y%m%d")
+                    # Format: M/D/YYYY (no leading zeros)
+                    formatted_date = f"{tx.date.month}/{tx.date.day}/{tx.date.year}"
+                else:
+                    tx_date = now
+                    date_str_yyyymmdd = now.strftime("%Y%m%d")
+                    formatted_date = f"{now.month}/{now.day}/{now.year}"
+
+                # Bank Statement Daily format: BS/{Bank}/{Currency}-{AccNo}{TxID}/{YYYYMMDD}
+                trans_id = tx.transaction_id or ""
+                bank_statement_daily = f"BS/{tx.bank_name}/{currency}-{tx.acc_no}{trans_id}/{date_str_yyyymmdd}"
+
+                # Name format: same as Bank Statement Daily with trailing /
+                name = f"{bank_statement_daily}/"
+
+                # Debit/Credit - keep decimals for USD, integers for VND
+                if currency == "USD":
+                    debit_val = round(_safe_float(tx.debit), 2)
+                    credit_val = round(_safe_float(tx.credit), 2)
+                else:
+                    debit_val = _safe_int(tx.debit)
+                    credit_val = _safe_int(tx.credit)
+
+                # Amount and Type
+                if debit_val > 0:
+                    amount = debit_val
+                    tx_type = "D"
+                else:
+                    amount = credit_val
+                    tx_type = "C"
+
+                details_data.append({
+                    "External ID": external_id,
+                    "External ID BSM Daily": external_id_bsm_daily,
+                    "Bank Statement Daily": bank_statement_daily,
+                    "Name (*)": name,
+                    "Bank Code (*)": tx.bank_name,
+                    "Bank Account Number (*)": tx.acc_no,
+                    "TRANS ID": trans_id,
+                    "Trans Date (*)": formatted_date,
+                    "Description (*)": tx.description or "",
+                    "Currency(*)": currency,
+                    "DEBIT (*)": debit_val,
+                    "CREDIT (*)": credit_val,
+                    "Amount": amount,
+                    "Type": tx_type,
+                    "Balance": "",
+                    "PARTNER": tx.beneficiary_acc_name or "",
+                    "PARTNER ACCOUNT": tx.beneficiary_acc_no or "",
+                    "PARTNER BANK ID": tx.beneficiary_bank or ""
+                })
+
+            if details_data:
+                df_details = pd.DataFrame(details_data, columns=[
+                    "External ID",
+                    "External ID BSM Daily",
+                    "Bank Statement Daily",
+                    "Name (*)",
+                    "Bank Code (*)",
+                    "Bank Account Number (*)",
+                    "TRANS ID",
+                    "Trans Date (*)",
+                    "Description (*)",
+                    "Currency(*)",
+                    "DEBIT (*)",
+                    "CREDIT (*)",
+                    "Amount",
+                    "Type",
+                    "Balance",
+                    "PARTNER",
+                    "PARTNER ACCOUNT",
+                    "PARTNER BANK ID"
+                ])
+                df_details.to_excel(writer, sheet_name="Details", index=False)
+
+            # Handle empty case
+            if not balance_data and not details_data:
+                df_info = pd.DataFrame([{
+                    "Message": "No transactions or balances found",
+                    "Possible Reasons": "Bank not recognized or parser doesn't support this format"
+                }])
+                df_info.to_excel(writer, sheet_name="Info", index=False)
+
+            # ========== Apply Styling ==========
+            self._apply_excel_styling(writer)
+
+        output.seek(0)
+        return output.read()

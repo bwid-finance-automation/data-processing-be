@@ -840,113 +840,21 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
         # Generate session ID
         session_id = str(uuid.uuid4())
 
-        # Initialize output variables
-        excel_base64 = None
-        excel_filename = None
-        csv_balance_base64 = None
-        csv_balance_filename = None
-        csv_details_base64 = None
-        csv_details_filename = None
-        excel_bytes = None
-
-        # Get output_format (default: "excel")
-        output_format = request.output_format
-
-        # Generate Excel if requested (ERP Template format)
-        if output_format in ("excel", "both"):
-            excel_bytes = use_case.export_to_erp_template_excel(
-                result["all_transactions"],
-                result["all_balances"]
-            )
-            excel_filename = f"bank_statements_erp_{session_id}.xlsx"
-            if request.return_excel_base64:
-                excel_base64 = base64.b64encode(excel_bytes).decode('utf-8')
-
-        # Generate NetSuite CSVs if requested
-        if output_format in ("netsuite_csv", "both"):
-            # Generate Balance CSV (returns bytes and external_ids mapping)
-            balance_bytes, balance_external_ids = use_case.export_to_netsuite_balance_csv(
-                result["all_transactions"],
-                result["all_balances"]
-            )
-            csv_balance_filename = f"netsuite_balance_{session_id}.csv"
-            csv_balance_base64 = base64.b64encode(balance_bytes).decode('utf-8')
-
-            # Generate Details CSV (uses balance_external_ids for linking)
-            details_bytes = use_case.export_to_netsuite_details_csv(
-                result["all_transactions"],
-                balance_external_ids
-            )
-            csv_details_filename = f"netsuite_details_{session_id}.csv"
-            csv_details_base64 = base64.b64encode(details_bytes).decode('utf-8')
-
-        # Store Excel for download (for backward compatibility)
-        if excel_bytes:
-            _file_storage[session_id] = {
-                "content": excel_bytes,
-                "filename": excel_filename
-            }
-
-        # Convert to response schema
-        statements_response = []
-        for stmt in result["statements"]:
-            # Convert balance
-            balance_response = None
-            if stmt.balance:
-                opening_bal = stmt.balance.opening_balance
-                closing_bal = stmt.balance.closing_balance
-                if isinstance(opening_bal, float) and math.isnan(opening_bal):
-                    opening_bal = 0.0
-                if isinstance(closing_bal, float) and math.isnan(closing_bal):
-                    closing_bal = 0.0
-
-                balance_response = BankBalanceResponse(
-                    bank_name=stmt.balance.bank_name,
-                    acc_no=stmt.balance.acc_no,
-                    currency=stmt.balance.currency,
-                    opening_balance=opening_bal,
-                    closing_balance=closing_bal
-                )
-
-            # Convert transactions
-            transactions_response = [
-                BankTransactionResponse(
-                    bank_name=tx.bank_name,
-                    acc_no=tx.acc_no,
-                    debit=None if (tx.debit is None or (isinstance(tx.debit, float) and math.isnan(tx.debit))) else tx.debit,
-                    credit=None if (tx.credit is None or (isinstance(tx.credit, float) and math.isnan(tx.credit))) else tx.credit,
-                    date=tx.date.isoformat() if tx.date else None,
-                    description=tx.description,
-                    currency=tx.currency,
-                    transaction_id=tx.transaction_id,
-                    beneficiary_bank=tx.beneficiary_bank,
-                    beneficiary_acc_no=tx.beneficiary_acc_no,
-                    beneficiary_acc_name=tx.beneficiary_acc_name
-                )
-                for tx in stmt.transactions
-            ]
-
-            statements_response.append(BankStatementResponse(
-                bank_name=stmt.bank_name,
-                file_name=stmt.file_name,
-                balance=balance_response,
-                transactions=transactions_response,
-                transaction_count=len(stmt.transactions)
-            ))
+        # Generate Excel file with 2 sheets (Balance + Details)
+        excel_bytes = use_case.export_to_netsuite_excel(
+            result["all_transactions"],
+            result["all_balances"]
+        )
+        excel_filename = f"NetSuite_Export_{session_id}.xlsx"
+        excel_base64 = base64.b64encode(excel_bytes).decode('utf-8')
 
         # Prepare response
         response = PowerAutomateParseResponse(
             success=result["summary"]["successful"] > 0,
             message=f"Processed {result['summary']['successful']} of {result['summary']['total_files']} files successfully",
             summary=result["summary"],
-            statements=statements_response,
             excel_base64=excel_base64,
-            excel_filename=excel_filename,
-            csv_balance_base64=csv_balance_base64,
-            csv_balance_filename=csv_balance_filename,
-            csv_details_base64=csv_details_base64,
-            csv_details_filename=csv_details_filename,
-            download_url=f"/api/finance/bank-statements/download/{session_id}" if excel_bytes else None
+            excel_filename=excel_filename
         )
 
         return response

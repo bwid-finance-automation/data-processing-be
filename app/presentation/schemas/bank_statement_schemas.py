@@ -1,6 +1,6 @@
 """Pydantic schemas for bank statement parsing API."""
 
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 from datetime import date, datetime
 
@@ -194,8 +194,7 @@ class PowerAutomateParseRequest(BaseModel):
                         "name": "ACB_Jan2025.xlsx",
                         "contentBytes": "UEsDBBQAAAAI..."
                     }
-                ],
-                "return_excel_base64": True
+                ]
             }
         }
     )
@@ -203,14 +202,6 @@ class PowerAutomateParseRequest(BaseModel):
     files: List[PowerAutomateFileInput] = Field(
         ...,
         description="List of files to parse. Can be .xlsx, .xls, .pdf"
-    )
-    return_excel_base64: bool = Field(
-        default=True,
-        description="If true, return Excel output as base64 in response"
-    )
-    output_format: Literal["excel", "netsuite_csv", "both"] = Field(
-        default="excel",
-        description="Output format: 'excel' for Excel only, 'netsuite_csv' for NetSuite CSV files (Balance + Details), 'both' for all formats"
     )
 
 
@@ -222,6 +213,7 @@ class PowerAutomateParseResponse(BaseModel):
         json_schema_extra={
             "example": {
                 "success": True,
+                "message": "Processed successfully",
                 "summary": {
                     "total_files": 2,
                     "successful": 2,
@@ -229,10 +221,8 @@ class PowerAutomateParseResponse(BaseModel):
                     "total_transactions": 50,
                     "total_balances": 2
                 },
-                "statements": [],
                 "excel_base64": "UEsDBBQAAAAI...",
-                "excel_filename": "bank_statements_output.xlsx",
-                "download_url": "/api/finance/bank-statements/download/abc123"
+                "excel_filename": "NetSuite_Export_abc123.xlsx"
             }
         }
     )
@@ -240,11 +230,5 @@ class PowerAutomateParseResponse(BaseModel):
     success: bool = Field(default=True)
     message: str = Field(default="")
     summary: Dict[str, Any] = Field(default_factory=dict)
-    statements: List[BankStatementResponse] = Field(default_factory=list)
-    excel_base64: Optional[str] = Field(None, description="Base64 encoded Excel output file")
-    excel_filename: Optional[str] = Field(default="bank_statements_output.xlsx")
-    csv_balance_base64: Optional[str] = Field(None, description="Base64 encoded NetSuite Balance CSV file")
-    csv_balance_filename: Optional[str] = Field(None, description="NetSuite Balance CSV filename")
-    csv_details_base64: Optional[str] = Field(None, description="Base64 encoded NetSuite Details CSV file")
-    csv_details_filename: Optional[str] = Field(None, description="NetSuite Details CSV filename")
-    download_url: Optional[str] = Field(None, description="URL to download Excel output")
+    excel_base64: Optional[str] = Field(None, description="Base64 encoded Excel file with 2 sheets (Balance + Details)")
+    excel_filename: Optional[str] = Field(default=None, description="Excel filename")
