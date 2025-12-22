@@ -735,26 +735,35 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
                 file_bytes = base64.b64decode(content_base64)
 
                 # =========================================================
-                # FIX: Handle "Fake Excel" (HTML) files from Vietcombank
+                # FIX: Handle "Fake Excel" (HTML) files
+                # VCB parser already handles HTML natively, so don't convert VCB HTML files
                 # =========================================================
                 try:
                     # Check signature for HTML content
                     prefix = file_bytes[:100].lower()
                     if b"<html" in prefix or b"<!doctype html" in prefix:
-                        logger.info(f"Detected HTML-based Excel file: {file_name}. Attempting conversion...")
-                        
-                        # Read HTML tables using pandas
-                        dfs = pd.read_html(BytesIO(file_bytes))
-                        
-                        if dfs:
-                            # Convert the first table found to a clean Excel binary
-                            output = BytesIO()
-                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                                # Write without header/index to preserve exact layout for parser
-                                dfs[0].to_excel(writer, index=False, header=False)
-                            
-                            file_bytes = output.getvalue()
-                            logger.info(f"Successfully converted {file_name} from HTML to Excel binary.")
+                        # Check if this is a VCB HTML file (VCB parser handles HTML natively)
+                        content_preview = file_bytes.decode('utf-8', errors='ignore')
+                        is_vcb_html = "SAO KÊ TÀI KHOẢN" in content_preview and "VIETCOMBANK" in content_preview.upper()
+
+                        if is_vcb_html:
+                            logger.info(f"Detected VCB HTML file: {file_name}. Passing directly to VCB parser (no conversion needed).")
+                            # Don't convert - VCB parser handles HTML natively
+                        else:
+                            logger.info(f"Detected HTML-based Excel file: {file_name}. Attempting conversion...")
+
+                            # Read HTML tables using pandas
+                            dfs = pd.read_html(BytesIO(file_bytes))
+
+                            if dfs:
+                                # Convert the first table found to a clean Excel binary
+                                output = BytesIO()
+                                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                    # Write without header/index to preserve exact layout for parser
+                                    dfs[0].to_excel(writer, index=False, header=False)
+
+                                file_bytes = output.getvalue()
+                                logger.info(f"Successfully converted {file_name} from HTML to Excel binary.")
                 except Exception as html_err:
                     logger.warning(f"Failed to convert HTML-Excel for {file_name}, using original bytes. Error: {html_err}")
                 # =========================================================
