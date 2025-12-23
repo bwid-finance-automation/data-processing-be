@@ -216,6 +216,16 @@ class GLAProcessor:
         # Check for status column
         status_col = 'Unit for Lease Status' if 'Unit for Lease Status' in filtered_df.columns else None
 
+        # Check for new attribute columns (Handover sheet)
+        handover_gla_col = 'Handover GLA' if 'Handover GLA' in filtered_df.columns else None
+        monthly_gross_rent_col = 'Monthly Gross rent' if 'Monthly Gross rent' in filtered_df.columns else None
+        monthly_rate_col = 'Monthly rate' if 'Monthly rate' in filtered_df.columns else None
+
+        # Check for new attribute columns (Committed sheet) - note typos in Excel
+        committed_gla_col = 'Commited GLA' if 'Commited GLA' in filtered_df.columns else None
+        months_to_expire_col = 'Months to expire' if 'Months to expire' in filtered_df.columns else None
+        months_to_expire_x_gla_col = 'Month to exprire x commited GLA' if 'Month to exprire x commited GLA' in filtered_df.columns else None
+
         summaries: Dict[Tuple[str, str], ProjectGLASummary] = {}
         # Track tenant GLA per project-type
         tenant_data: Dict[Tuple[str, str], Dict[str, TenantGLA]] = {}
@@ -239,6 +249,32 @@ class GLAProcessor:
                 status = "Unknown"
                 if status_col and pd.notna(row.get(status_col)):
                     status = str(row.get(status_col)).strip()
+
+                # Get new attributes - Handover sheet
+                handover_gla = 0.0
+                if handover_gla_col and pd.notna(row.get(handover_gla_col)):
+                    handover_gla = float(row.get(handover_gla_col) or 0)
+
+                monthly_gross_rent = 0.0
+                if monthly_gross_rent_col and pd.notna(row.get(monthly_gross_rent_col)):
+                    monthly_gross_rent = float(row.get(monthly_gross_rent_col) or 0)
+
+                monthly_rate = 0.0
+                if monthly_rate_col and pd.notna(row.get(monthly_rate_col)):
+                    monthly_rate = float(row.get(monthly_rate_col) or 0)
+
+                # Get new attributes - Committed sheet
+                committed_gla = 0.0
+                if committed_gla_col and pd.notna(row.get(committed_gla_col)):
+                    committed_gla = float(row.get(committed_gla_col) or 0)
+
+                months_to_expire = 0.0
+                if months_to_expire_col and pd.notna(row.get(months_to_expire_col)):
+                    months_to_expire = float(row.get(months_to_expire_col) or 0)
+
+                months_to_expire_x_gla = 0.0
+                if months_to_expire_x_gla_col and pd.notna(row.get(months_to_expire_x_gla_col)):
+                    months_to_expire_x_gla = float(row.get(months_to_expire_x_gla_col) or 0)
 
                 # Skip invalid records
                 if not project_code or not product_type or pd.isna(gla):
@@ -265,6 +301,16 @@ class GLAProcessor:
 
                 summaries[key].gla_sqm += gla
 
+                # Aggregate new attributes - Handover sheet (sum for rent, weighted avg for rate)
+                summaries[key].handover_gla += handover_gla
+                summaries[key].monthly_gross_rent += monthly_gross_rent
+                # For monthly_rate, we'll calculate weighted average at the end
+
+                # Aggregate new attributes - Committed sheet
+                summaries[key].committed_gla += committed_gla
+                summaries[key].months_to_expire_x_committed_gla += months_to_expire_x_gla
+                # For months_to_expire, we'll calculate weighted average at the end
+
                 # Track tenant GLA (aggregate by tenant within project)
                 if tenant_name not in tenant_data[key]:
                     tenant_data[key][tenant_name] = TenantGLA(
@@ -273,14 +319,26 @@ class GLAProcessor:
                         status=status
                     )
                 tenant_data[key][tenant_name].gla_sqm += gla
+                tenant_data[key][tenant_name].handover_gla += handover_gla
+                tenant_data[key][tenant_name].monthly_gross_rent += monthly_gross_rent
+                tenant_data[key][tenant_name].committed_gla += committed_gla
+                tenant_data[key][tenant_name].months_to_expire_x_committed_gla += months_to_expire_x_gla
 
             except Exception as e:
                 logger.warning(f"Error processing row: {str(e)}")
                 continue
 
-        # Convert tenant dicts to lists
+        # Convert tenant dicts to lists and calculate weighted averages
         for key, tenant_dict in tenant_data.items():
             summaries[key].tenants = list(tenant_dict.values())
+
+            # Calculate weighted average monthly rate (weighted by handover GLA)
+            if summaries[key].handover_gla > 0:
+                summaries[key].monthly_rate = summaries[key].monthly_gross_rent / summaries[key].handover_gla
+
+            # Calculate weighted average months to expire (weighted by committed GLA)
+            if summaries[key].committed_gla > 0:
+                summaries[key].months_to_expire = summaries[key].months_to_expire_x_committed_gla / summaries[key].committed_gla
 
         logger.info(f"Aggregated {len(summaries)} project-type combinations for {data_type}")
         return summaries

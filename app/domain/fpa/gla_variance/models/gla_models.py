@@ -62,6 +62,14 @@ class TenantGLA:
     tenant_name: str
     gla_sqm: float
     status: str  # 'Open' or 'Handed Over'
+    # Handover sheet attributes
+    handover_gla: float = 0.0
+    monthly_gross_rent: float = 0.0
+    monthly_rate: float = 0.0
+    # Committed sheet attributes
+    committed_gla: float = 0.0
+    months_to_expire: float = 0.0
+    months_to_expire_x_committed_gla: float = 0.0
 
 
 @dataclass
@@ -74,6 +82,16 @@ class ProjectGLASummary:
     region: str
     gla_sqm: float = 0.0
     tenants: List['TenantGLA'] = field(default_factory=list)  # List of tenants with GLA
+
+    # Handover sheet aggregated attributes
+    handover_gla: float = 0.0  # Sum of Handover GLA
+    monthly_gross_rent: float = 0.0  # Sum of Monthly Gross rent
+    monthly_rate: float = 0.0  # Average Monthly rate (weighted by GLA)
+
+    # Committed sheet aggregated attributes
+    committed_gla: float = 0.0  # Sum of Committed GLA
+    months_to_expire: float = 0.0  # Average months to expire (weighted)
+    months_to_expire_x_committed_gla: float = 0.0  # Sum of Month to expire x committed GLA
 
     def __hash__(self):
         return hash((self.project_name, self.product_type))
@@ -116,6 +134,26 @@ class GLAVarianceResult:
     handover_variance: float = 0.0
     handover_note: str = ""
 
+    # Handover sheet attributes - Monthly Gross rent
+    monthly_gross_rent_previous: float = 0.0
+    monthly_gross_rent_current: float = 0.0
+    monthly_gross_rent_variance: float = 0.0
+
+    # Handover sheet attributes - Monthly rate
+    monthly_rate_previous: float = 0.0
+    monthly_rate_current: float = 0.0
+    monthly_rate_variance: float = 0.0
+
+    # Committed sheet attributes - Months to expire
+    months_to_expire_previous: float = 0.0
+    months_to_expire_current: float = 0.0
+    months_to_expire_variance: float = 0.0
+
+    # Committed sheet attributes - Month to expire x committed GLA
+    months_to_expire_x_gla_previous: float = 0.0
+    months_to_expire_x_gla_current: float = 0.0
+    months_to_expire_x_gla_variance: float = 0.0
+
     # Tenant-level changes for explanation
     committed_tenant_changes: List[TenantChange] = field(default_factory=list)
     handover_tenant_changes: List[TenantChange] = field(default_factory=list)
@@ -124,6 +162,10 @@ class GLAVarianceResult:
         """Calculate variance values"""
         self.committed_variance = self.committed_current - self.committed_previous
         self.handover_variance = self.handover_current - self.handover_previous
+        self.monthly_gross_rent_variance = self.monthly_gross_rent_current - self.monthly_gross_rent_previous
+        self.monthly_rate_variance = self.monthly_rate_current - self.monthly_rate_previous
+        self.months_to_expire_variance = self.months_to_expire_current - self.months_to_expire_previous
+        self.months_to_expire_x_gla_variance = self.months_to_expire_x_gla_current - self.months_to_expire_x_gla_previous
 
     def to_dict(self) -> dict:
         """Convert to dictionary for output"""
@@ -138,7 +180,20 @@ class GLAVarianceResult:
             'handover_previous': self.handover_previous,
             'handover_current': self.handover_current,
             'handover_variance': self.handover_variance,
-            'handover_note': self.handover_note
+            'handover_note': self.handover_note,
+            # New attributes
+            'monthly_gross_rent_previous': self.monthly_gross_rent_previous,
+            'monthly_gross_rent_current': self.monthly_gross_rent_current,
+            'monthly_gross_rent_variance': self.monthly_gross_rent_variance,
+            'monthly_rate_previous': self.monthly_rate_previous,
+            'monthly_rate_current': self.monthly_rate_current,
+            'monthly_rate_variance': self.monthly_rate_variance,
+            'months_to_expire_previous': self.months_to_expire_previous,
+            'months_to_expire_current': self.months_to_expire_current,
+            'months_to_expire_variance': self.months_to_expire_variance,
+            'months_to_expire_x_gla_previous': self.months_to_expire_x_gla_previous,
+            'months_to_expire_x_gla_current': self.months_to_expire_x_gla_current,
+            'months_to_expire_x_gla_variance': self.months_to_expire_x_gla_variance,
         }
 
 

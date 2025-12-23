@@ -145,7 +145,17 @@ class GLAVarianceCalculator:
                 handover_previous=hp.gla_sqm if hp else 0.0,
                 handover_current=hc.gla_sqm if hc else 0.0,
                 committed_previous=cp.gla_sqm if cp else 0.0,
-                committed_current=cc.gla_sqm if cc else 0.0
+                committed_current=cc.gla_sqm if cc else 0.0,
+                # New attributes - Handover sheet
+                monthly_gross_rent_previous=hp.monthly_gross_rent if hp else 0.0,
+                monthly_gross_rent_current=hc.monthly_gross_rent if hc else 0.0,
+                monthly_rate_previous=hp.monthly_rate if hp else 0.0,
+                monthly_rate_current=hc.monthly_rate if hc else 0.0,
+                # New attributes - Committed sheet
+                months_to_expire_previous=cp.months_to_expire if cp else 0.0,
+                months_to_expire_current=cc.months_to_expire if cc else 0.0,
+                months_to_expire_x_gla_previous=cp.months_to_expire_x_committed_gla if cp else 0.0,
+                months_to_expire_x_gla_current=cc.months_to_expire_x_committed_gla if cc else 0.0,
             )
 
             result.calculate_variances()
@@ -222,14 +232,28 @@ class GLAVarianceCalculator:
             "Project Name",
             "Product Type",
             "Region",
-            f"Committed GLA\n{previous_period}",
-            f"Committed GLA\n{current_period}",
-            "Committed Var",
-            "Committed Note",
+            # Handover attributes
             f"Handover GLA\n{previous_period}",
             f"Handover GLA\n{current_period}",
             "Handover Var",
-            "Handover Note"
+            f"Monthly Gross Rent\n{previous_period}",
+            f"Monthly Gross Rent\n{current_period}",
+            "Gross Rent Var",
+            f"Monthly Rate\n{previous_period}",
+            f"Monthly Rate\n{current_period}",
+            "Rate Var",
+            "Handover Note",
+            # Committed attributes
+            f"Committed GLA\n{previous_period}",
+            f"Committed GLA\n{current_period}",
+            "Committed Var",
+            f"Months to Expire\n{previous_period}",
+            f"Months to Expire\n{current_period}",
+            "Months Expire Var",
+            f"Month x GLA\n{previous_period}",
+            f"Month x GLA\n{current_period}",
+            "Month x GLA Var",
+            "Committed Note",
         ]
 
         # Write headers
@@ -247,24 +271,51 @@ class GLAVarianceCalculator:
                 result.project_name,
                 result.product_type,
                 result.region,
-                result.committed_previous,
-                result.committed_current,
-                result.committed_variance,
-                result.committed_note,
+                # Handover attributes
                 result.handover_previous,
                 result.handover_current,
                 result.handover_variance,
-                result.handover_note
+                result.monthly_gross_rent_previous,
+                result.monthly_gross_rent_current,
+                result.monthly_gross_rent_variance,
+                result.monthly_rate_previous,
+                result.monthly_rate_current,
+                result.monthly_rate_variance,
+                result.handover_note,
+                # Committed attributes
+                result.committed_previous,
+                result.committed_current,
+                result.committed_variance,
+                result.months_to_expire_previous,
+                result.months_to_expire_current,
+                result.months_to_expire_variance,
+                result.months_to_expire_x_gla_previous,
+                result.months_to_expire_x_gla_current,
+                result.months_to_expire_x_gla_variance,
+                result.committed_note,
             ]
 
             for col, value in enumerate(values, 1):
                 cell = ws.cell(row=row_num, column=col, value=value)
                 cell.border = border
 
-                # Format numbers
-                if col in [4, 5, 8, 9]:  # GLA columns
+                # Format numbers - GLA columns
+                if col in [4, 5, 14, 15]:  # Handover GLA, Committed GLA
                     cell.number_format = '#,##0.00'
-                elif col in [6, 10]:  # Variance columns
+                # Format numbers - Rent columns
+                elif col in [7, 8]:  # Monthly Gross Rent
+                    cell.number_format = '#,##0.00'
+                # Format numbers - Rate columns
+                elif col in [10, 11]:  # Monthly Rate
+                    cell.number_format = '#,##0.00'
+                # Format numbers - Months columns
+                elif col in [17, 18]:  # Months to Expire
+                    cell.number_format = '#,##0.00'
+                # Format numbers - Month x GLA columns
+                elif col in [20, 21]:  # Month x GLA
+                    cell.number_format = '#,##0.00'
+                # Variance columns with color
+                elif col in [6, 9, 12, 16, 19, 22]:  # All variance columns
                     cell.number_format = '#,##0.00'
                     if isinstance(value, (int, float)):
                         if value > 0:
@@ -276,17 +327,20 @@ class GLAVarianceCalculator:
 
         # Add totals section
         row_num += 1  # Empty row
+        num_cols = len(headers)
 
         # Total RBF
         total_rbf_row = row_num
         ws.cell(row=row_num, column=1, value="Total RBF").font = Font(bold=True)
-        ws.cell(row=row_num, column=4, value=summary.total_rbf_committed_previous).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=5, value=summary.total_rbf_committed_current).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=6, value=summary.total_rbf_committed_variance).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=8, value=summary.total_rbf_handover_previous).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=9, value=summary.total_rbf_handover_current).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=10, value=summary.total_rbf_handover_variance).number_format = '#,##0.00'
-        for col in range(1, 12):
+        # Handover GLA totals (cols 4-6)
+        ws.cell(row=row_num, column=4, value=summary.total_rbf_handover_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=5, value=summary.total_rbf_handover_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=6, value=summary.total_rbf_handover_variance).number_format = '#,##0.00'
+        # Committed GLA totals (cols 14-16)
+        ws.cell(row=row_num, column=14, value=summary.total_rbf_committed_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=15, value=summary.total_rbf_committed_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=16, value=summary.total_rbf_committed_variance).number_format = '#,##0.00'
+        for col in range(1, num_cols + 1):
             ws.cell(row=row_num, column=col).fill = total_fill
             ws.cell(row=row_num, column=col).border = border
 
@@ -294,13 +348,15 @@ class GLAVarianceCalculator:
 
         # Total RBW
         ws.cell(row=row_num, column=1, value="Total RBW").font = Font(bold=True)
-        ws.cell(row=row_num, column=4, value=summary.total_rbw_committed_previous).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=5, value=summary.total_rbw_committed_current).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=6, value=summary.total_rbw_committed_variance).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=8, value=summary.total_rbw_handover_previous).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=9, value=summary.total_rbw_handover_current).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=10, value=summary.total_rbw_handover_variance).number_format = '#,##0.00'
-        for col in range(1, 12):
+        # Handover GLA totals
+        ws.cell(row=row_num, column=4, value=summary.total_rbw_handover_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=5, value=summary.total_rbw_handover_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=6, value=summary.total_rbw_handover_variance).number_format = '#,##0.00'
+        # Committed GLA totals
+        ws.cell(row=row_num, column=14, value=summary.total_rbw_committed_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=15, value=summary.total_rbw_committed_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=16, value=summary.total_rbw_committed_variance).number_format = '#,##0.00'
+        for col in range(1, num_cols + 1):
             ws.cell(row=row_num, column=col).fill = total_fill
             ws.cell(row=row_num, column=col).border = border
 
@@ -308,20 +364,48 @@ class GLAVarianceCalculator:
 
         # Total Portfolio
         ws.cell(row=row_num, column=1, value="Total Portfolio").font = Font(bold=True)
-        ws.cell(row=row_num, column=4, value=summary.total_portfolio_committed_previous).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=5, value=summary.total_portfolio_committed_current).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=6, value=summary.total_portfolio_committed_variance).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=8, value=summary.total_portfolio_handover_previous).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=9, value=summary.total_portfolio_handover_current).number_format = '#,##0.00'
-        ws.cell(row=row_num, column=10, value=summary.total_portfolio_handover_variance).number_format = '#,##0.00'
-        for col in range(1, 12):
+        # Handover GLA totals
+        ws.cell(row=row_num, column=4, value=summary.total_portfolio_handover_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=5, value=summary.total_portfolio_handover_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=6, value=summary.total_portfolio_handover_variance).number_format = '#,##0.00'
+        # Committed GLA totals
+        ws.cell(row=row_num, column=14, value=summary.total_portfolio_committed_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=15, value=summary.total_portfolio_committed_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=16, value=summary.total_portfolio_committed_variance).number_format = '#,##0.00'
+        for col in range(1, num_cols + 1):
             cell = ws.cell(row=row_num, column=col)
             cell.fill = PatternFill(start_color="B4C6E7", end_color="B4C6E7", fill_type="solid")
             cell.border = border
             cell.font = Font(bold=True)
 
         # Adjust column widths
-        column_widths = [25, 12, 10, 18, 18, 15, 40, 18, 18, 15, 40]
+        column_widths = [
+            25,  # Project Name
+            12,  # Product Type
+            10,  # Region
+            # Handover attributes
+            15,  # Handover GLA Previous
+            15,  # Handover GLA Current
+            12,  # Handover Var
+            15,  # Monthly Gross Rent Previous
+            15,  # Monthly Gross Rent Current
+            12,  # Gross Rent Var
+            12,  # Monthly Rate Previous
+            12,  # Monthly Rate Current
+            10,  # Rate Var
+            35,  # Handover Note
+            # Committed attributes
+            15,  # Committed GLA Previous
+            15,  # Committed GLA Current
+            12,  # Committed Var
+            12,  # Months to Expire Previous
+            12,  # Months to Expire Current
+            12,  # Months Expire Var
+            15,  # Month x GLA Previous
+            15,  # Month x GLA Current
+            12,  # Month x GLA Var
+            35,  # Committed Note
+        ]
         for col, width in enumerate(column_widths, 1):
             ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
 
