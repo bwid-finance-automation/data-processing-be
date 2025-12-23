@@ -299,10 +299,11 @@ class GLAAIAnalyzer:
         """
         callback = progress_callback or self.progress_callback
 
-        # Filter to only projects with variance
+        # Filter to only projects with variance (any of the 4 attributes)
         projects_with_variance = [
             r for r in results
             if r.committed_variance != 0 or r.handover_variance != 0
+            or r.months_to_expire_variance != 0 or r.monthly_gross_rent_variance != 0
         ]
 
         if not projects_with_variance:
@@ -343,8 +344,12 @@ class GLAAIAnalyzer:
                         note = notes_map[key]
                         if note.get("committed_note"):
                             r.committed_note = note["committed_note"]
+                        if note.get("wale_note"):
+                            r.wale_note = note["wale_note"]
                         if note.get("handover_note"):
                             r.handover_note = note["handover_note"]
+                        if note.get("gross_rent_note"):
+                            r.gross_rent_note = note["gross_rent_note"]
 
                 if callback:
                     callback(70, "Notes generated successfully")

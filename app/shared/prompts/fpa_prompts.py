@@ -55,7 +55,9 @@ Return a JSON array with objects containing:
 - project_name: string
 - product_type: string
 - committed_note: string (brief explanation of committed GLA change)
+- wale_note: string (brief explanation of WALE/Weighted Average Lease Expiry change)
 - handover_note: string (brief explanation of handover GLA change)
+- gross_rent_note: string (brief explanation of gross rent change)
 
 Only include projects where you have meaningful tenant information."""
 
@@ -196,7 +198,7 @@ def get_notes_user_prompt(results: List) -> str:
 
     for r in results:
         lines.append(f"Project: {r.project_name} ({r.product_type}, {r.region})")
-        lines.append(f"  Committed: {r.committed_previous:,.0f} -> {r.committed_current:,.0f} ({r.committed_variance:+,.0f} sqm)")
+        lines.append(f"  Committed GLA: {r.committed_previous:,.0f} -> {r.committed_current:,.0f} ({r.committed_variance:+,.0f} sqm)")
 
         # Include committed tenant changes
         if r.committed_tenant_changes:
@@ -204,7 +206,8 @@ def get_notes_user_prompt(results: List) -> str:
             for tc in r.committed_tenant_changes[:5]:
                 lines.append(f"    - {tc.tenant_name}: {tc.previous_gla:,.0f} -> {tc.current_gla:,.0f} ({tc.change_type})")
 
-        lines.append(f"  Handover: {r.handover_previous:,.0f} -> {r.handover_current:,.0f} ({r.handover_variance:+,.0f} sqm)")
+        lines.append(f"  WALE: {r.months_to_expire_previous:,.2f} -> {r.months_to_expire_current:,.2f} ({r.months_to_expire_variance:+,.2f} months)")
+        lines.append(f"  Handover GLA: {r.handover_previous:,.0f} -> {r.handover_current:,.0f} ({r.handover_variance:+,.0f} sqm)")
 
         # Include handover tenant changes
         if r.handover_tenant_changes:
@@ -212,6 +215,7 @@ def get_notes_user_prompt(results: List) -> str:
             for tc in r.handover_tenant_changes[:5]:
                 lines.append(f"    - {tc.tenant_name}: {tc.previous_gla:,.0f} -> {tc.current_gla:,.0f} ({tc.change_type})")
 
+        lines.append(f"  Gross Rent: {r.monthly_gross_rent_previous:,.0f} -> {r.monthly_gross_rent_current:,.0f} ({r.monthly_gross_rent_variance:+,.0f})")
         lines.append("")
 
     return "\n".join(lines)

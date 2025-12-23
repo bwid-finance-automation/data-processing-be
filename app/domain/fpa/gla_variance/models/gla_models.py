@@ -144,15 +144,19 @@ class GLAVarianceResult:
     monthly_rate_current: float = 0.0
     monthly_rate_variance: float = 0.0
 
-    # Committed sheet attributes - Months to expire
+    # Committed sheet attributes - Months to expire (WALE)
     months_to_expire_previous: float = 0.0
     months_to_expire_current: float = 0.0
     months_to_expire_variance: float = 0.0
+    wale_note: str = ""  # AI-generated note for WALE variance
 
     # Committed sheet attributes - Month to expire x committed GLA
     months_to_expire_x_gla_previous: float = 0.0
     months_to_expire_x_gla_current: float = 0.0
     months_to_expire_x_gla_variance: float = 0.0
+
+    # Gross rent note
+    gross_rent_note: str = ""  # AI-generated note for gross rent variance
 
     # Tenant-level changes for explanation
     committed_tenant_changes: List[TenantChange] = field(default_factory=list)
@@ -181,16 +185,20 @@ class GLAVarianceResult:
             'handover_current': self.handover_current,
             'handover_variance': self.handover_variance,
             'handover_note': self.handover_note,
-            # New attributes
-            'monthly_gross_rent_previous': self.monthly_gross_rent_previous,
-            'monthly_gross_rent_current': self.monthly_gross_rent_current,
-            'monthly_gross_rent_variance': self.monthly_gross_rent_variance,
-            'monthly_rate_previous': self.monthly_rate_previous,
-            'monthly_rate_current': self.monthly_rate_current,
-            'monthly_rate_variance': self.monthly_rate_variance,
+            # WALE attributes
             'months_to_expire_previous': self.months_to_expire_previous,
             'months_to_expire_current': self.months_to_expire_current,
             'months_to_expire_variance': self.months_to_expire_variance,
+            'wale_note': self.wale_note,
+            # Gross rent attributes
+            'monthly_gross_rent_previous': self.monthly_gross_rent_previous,
+            'monthly_gross_rent_current': self.monthly_gross_rent_current,
+            'monthly_gross_rent_variance': self.monthly_gross_rent_variance,
+            'gross_rent_note': self.gross_rent_note,
+            # Other attributes
+            'monthly_rate_previous': self.monthly_rate_previous,
+            'monthly_rate_current': self.monthly_rate_current,
+            'monthly_rate_variance': self.monthly_rate_variance,
             'months_to_expire_x_gla_previous': self.months_to_expire_x_gla_previous,
             'months_to_expire_x_gla_current': self.months_to_expire_x_gla_current,
             'months_to_expire_x_gla_variance': self.months_to_expire_x_gla_variance,
