@@ -68,7 +68,7 @@ class OCBParser(BaseBankParser):
         Logic from fxParse_OCB_Transactions:
         - Find header row with flexible bilingual detection
         - Vietnamese column headers
-        - CORRECT Map: Debit = "PS GIẢM (NỢ)" (tiền RA), Credit = "PS TĂNG (CÓ)" (tiền VÀO)
+        - ERP Convention: Debit = tiền VÀO (PS TĂNG), Credit = tiền RA (PS GIẢM)
         - Extract account number from "SỐ TÀI KHOẢN" line with sophisticated tokenization
         """
         try:
@@ -89,12 +89,12 @@ class OCBParser(BaseBankParser):
             data = data[1:].reset_index(drop=True)
 
             # ========== Find Columns (Bilingual) ==========
-            # CORRECT MAPPING:
-            # - "PS GIẢM (NỢ)" = Debit = tiền RA
-            # - "PS TĂNG (CÓ)" = Credit = tiền VÀO
+            # ERP Convention (SWAPPED):
+            # - "PS GIẢM (NỢ)" = tiền RA = Credit in ERP
+            # - "PS TĂNG (CÓ)" = tiền VÀO = Debit in ERP
             date_col = self._find_any_column(data, ["NGÀY THỰC HIỆN", "TRANSACTION DATE", "NGÀY", "DATE"])
-            debit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Debit
-            credit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Credit
+            credit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Credit (ERP)
+            debit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Debit (ERP)
             balance_col = self._find_any_column(data, ["SỐ DƯ", "BALANCE"])
             desc_col = self._find_any_column(data, ["NỘI DUNG", "DESCRIPTION", "DIỄN GIẢI", "CONTENT"])
             transaction_id_col = self._find_any_column(data, ["SỐ GD", "TRANSACTION NUMBER"])
@@ -199,12 +199,12 @@ class OCBParser(BaseBankParser):
             data = data[1:].reset_index(drop=True)
 
             # ========== Find Columns ==========
-            # CORRECT MAPPING:
-            # - "PS GIẢM (NỢ)" = Debit = tiền RA
-            # - "PS TĂNG (CÓ)" = Credit = tiền VÀO
+            # ERP Convention (SWAPPED):
+            # - "PS GIẢM (NỢ)" = tiền RA = Credit in ERP
+            # - "PS TĂNG (CÓ)" = tiền VÀO = Debit in ERP
             date_col = self._find_any_column(data, ["NGÀY", "DATE"])
-            debit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Debit
-            credit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Credit
+            credit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Credit (ERP)
+            debit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Debit (ERP)
             balance_col = self._find_any_column(data, ["SỐ DƯ", "BALANCE"])
 
             # Keep columns
@@ -302,8 +302,8 @@ class OCBParser(BaseBankParser):
 
         Flexible detection:
         1. Look for rows with account keywords (SỐ TÀI KHOẢN, ACCOUNT NO, TK, STK, etc.)
-        2. Look for cells containing only 6-15 digit numbers (likely account numbers)
-        3. Vietnamese bank accounts typically have 6-15 digits.
+        2. Look for cells containing only 6-20 digit numbers (likely account numbers)
+        3. Vietnamese bank accounts typically have 6-20 digits (OCB can have 16 digits).
         """
         # Keywords to search for account number context
         account_keywords = [
@@ -321,20 +321,25 @@ class OCBParser(BaseBankParser):
                 tokens = re.split(r'[ ,.;:|(){}\\[\\]<>\\-_/]+', row_text)
                 tokens = [t for t in tokens if t]
 
-                # Find first token with 6-15 digits (Vietnamese banks use 6-15 digits typically)
+                # Find the LONGEST digit sequence (OCB can have 16 digit account numbers)
+                # This ensures we pick 0010100013992005 over shorter numbers like 2330640
+                best_digits = ""
                 for token in tokens:
                     digits = ''.join(c for c in token if c.isdigit())
-                    if 6 <= len(digits) <= 15:
-                        return digits
+                    if 6 <= len(digits) <= 20:
+                        if len(digits) > len(best_digits):
+                            best_digits = digits
+                if best_digits:
+                    return best_digits
 
-        # Second pass: Look for standalone cells with 6-15 digit numbers
+        # Second pass: Look for standalone cells with 6-20 digit numbers
         # These are likely account numbers in header area
         for _, row in top_df.iterrows():
             for cell in row:
                 cell_text = self.to_text(cell).strip()
                 # Check if cell is purely numeric (or with minor separators)
                 cleaned = cell_text.replace(" ", "").replace("-", "").replace(".", "")
-                if cleaned.isdigit() and 6 <= len(cleaned) <= 15:
+                if cleaned.isdigit() and 6 <= len(cleaned) <= 20:
                     # Exclude dates (format like 20241105) and amounts (too long or with decimals)
                     if not re.match(r'^\d{8}$', cleaned):  # Exclude YYYYMMDD dates
                         return cleaned

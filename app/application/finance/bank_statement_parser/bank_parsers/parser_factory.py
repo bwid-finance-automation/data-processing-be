@@ -15,6 +15,7 @@ from .vcb_parser import VCBParser
 from .woori_parser import WooriParser
 from .scb_parser import SCBParser
 from .tcb_parser import TCBParser
+from .uob_parser import UOBParser
 
 
 class ParserFactory:
@@ -39,6 +40,7 @@ class ParserFactory:
         MBBParser(),      # Has broader detection patterns
         BIDVParser(),
         VTBParser(),
+        UOBParser(),
         # Add more parsers here as they are implemented
     ]
 

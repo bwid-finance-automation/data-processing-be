@@ -14,7 +14,8 @@
       "Bash(alembic stamp:*)",
       "Bash(del \"D:\\Project\\data-processing-be\\create_db_doc.py\")",
       "Bash(find:*)",
-      "Bash(alembic revision:*)"
+      "Bash(alembic revision:*)",
+      "Bash(chcp:*)"
     ],
     "deny": [],
     "ask": []
