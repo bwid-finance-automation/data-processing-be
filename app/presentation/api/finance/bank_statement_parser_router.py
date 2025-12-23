@@ -723,16 +723,34 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
                 continue
 
             # Validate file extension for binary files
-            if not file_name.lower().endswith(('.xlsx', '.xls', '.pdf')):
+            if not file_name.lower().endswith(('.xlsx', '.xls', '.pdf', '.txt')):
                 decode_errors.append({
                     "file_name": file_name,
-                    "error": "Unsupported file type. Only .xlsx, .xls, .pdf are supported."
+                    "error": "Unsupported file type. Only .xlsx, .xls, .pdf, .txt are supported."
                 })
                 continue
 
             try:
                 # Decode base64 content
                 file_bytes = base64.b64decode(content_base64)
+
+                # Handle .txt files as OCR text input
+                if file_name.lower().endswith('.txt'):
+                    try:
+                        ocr_text_content = file_bytes.decode('utf-8')
+                        text_data.append((
+                            file_name,
+                            ocr_text_content,
+                            file_input.bank_code  # Can be None for auto-detection
+                        ))
+                        logger.info(f"Processing {file_name} as OCR text input ({len(ocr_text_content)} characters)")
+                        continue  # Skip file_data processing
+                    except UnicodeDecodeError:
+                        decode_errors.append({
+                            "file_name": file_name,
+                            "error": "Failed to decode .txt file as UTF-8 text"
+                        })
+                        continue
 
                 # =========================================================
                 # FIX: Handle "Fake Excel" (HTML) files

@@ -369,3 +369,100 @@ class ProjectCaseRepository(BaseRepository[ProjectCaseModel]):
             .where(ContractModel.case_id == case_id)
         )
         return result.scalar_one() or 0
+
+    # ============== GLA Case Operations ==============
+
+    async def get_gla_projects_by_case(
+        self,
+        case_id: int,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[dict]:
+        """Get GLA projects for a case."""
+        result = await self.session.execute(
+            select(GLAProjectModel)
+            .where(GLAProjectModel.case_id == case_id)
+            .order_by(GLAProjectModel.processed_at.desc().nullslast())
+            .offset(skip)
+            .limit(limit)
+        )
+        projects = list(result.scalars().all())
+
+        return [
+            {
+                "uuid": str(p.uuid),
+                "file_name": p.file_name,
+                "processed_at": p.processed_at,
+                "project_code": p.project_code,
+                "project_name": p.project_name,
+                "product_type": p.product_type,
+                "region": p.region,
+                "total_gla_sqm": float(p.total_gla_sqm) if p.total_gla_sqm else 0,
+                "period_label": p.period_label,
+            }
+            for p in projects
+        ]
+
+    async def count_gla_projects_by_case(self, case_id: int) -> int:
+        """Count GLA projects in a case."""
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(GLAProjectModel)
+            .where(GLAProjectModel.case_id == case_id)
+        )
+        return result.scalar_one() or 0
+
+    # ============== Analysis Session Operations (Variance, Utility Billing, Excel Comparison) ==============
+
+    async def get_analysis_sessions_by_case(
+        self,
+        case_id: int,
+        skip: int = 0,
+        limit: int = 50,
+        analysis_type: str = None,
+    ) -> List[dict]:
+        """Get analysis sessions for a case, optionally filtered by type."""
+        query = (
+            select(AnalysisSessionModel)
+            .where(AnalysisSessionModel.case_id == case_id)
+        )
+
+        if analysis_type:
+            query = query.where(AnalysisSessionModel.analysis_type == analysis_type)
+
+        query = query.order_by(AnalysisSessionModel.created_at.desc()).offset(skip).limit(limit)
+
+        result = await self.session.execute(query)
+        sessions = list(result.scalars().all())
+
+        return [
+            {
+                "session_id": s.session_id,
+                "analysis_type": s.analysis_type,
+                "status": s.status,
+                "files_count": s.files_count,
+                "started_at": s.started_at,
+                "completed_at": s.completed_at,
+                "processing_details": s.processing_details,
+                "created_at": s.created_at,
+            }
+            for s in sessions
+        ]
+
+    async def count_analysis_sessions_by_case(
+        self,
+        case_id: int,
+        analysis_type: str = None,
+    ) -> int:
+        """Count analysis sessions in a case, optionally filtered by type."""
+        query = (
+            select(func.count())
+            .select_from(AnalysisSessionModel)
+            .where(AnalysisSessionModel.case_id == case_id)
+        )
+
+        if analysis_type:
+            query = query.where(AnalysisSessionModel.analysis_type == analysis_type)
+
+        result = await self.session.execute(query)
+        return result.scalar_one() or 0

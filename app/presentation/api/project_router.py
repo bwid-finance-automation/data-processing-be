@@ -395,3 +395,155 @@ async def get_contract_case(
         "created_at": case.created_at,
         "sessions": sessions,
     }
+
+
+@router.get("/{project_uuid}/cases/gla")
+async def get_gla_case(
+    project_uuid: UUID,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    service: ProjectService = Depends(get_project_service),
+):
+    """
+    Get GLA variance analysis sessions for a project.
+
+    Returns GLA projects grouped by processing date.
+    Returns empty data if case doesn't exist yet.
+    """
+    case, sessions, total = await service.get_gla_sessions_by_project(
+        project_uuid, skip, limit
+    )
+
+    # Return empty data if case doesn't exist yet (not an error)
+    if not case:
+        return {
+            "uuid": None,
+            "case_type": "gla",
+            "total_sessions": 0,
+            "last_processed_at": None,
+            "created_at": None,
+            "sessions": [],
+        }
+
+    return {
+        "uuid": str(case.uuid),
+        "case_type": case.case_type,
+        "total_sessions": total,
+        "last_processed_at": case.last_processed_at,
+        "created_at": case.created_at,
+        "sessions": sessions,
+    }
+
+
+@router.get("/{project_uuid}/cases/variance")
+async def get_variance_case(
+    project_uuid: UUID,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    service: ProjectService = Depends(get_project_service),
+):
+    """
+    Get variance analysis sessions for a project.
+
+    Returns analysis sessions grouped by type.
+    Returns empty data if case doesn't exist yet.
+    """
+    case, sessions, total = await service.get_variance_sessions_by_project(
+        project_uuid, skip, limit
+    )
+
+    # Return empty data if case doesn't exist yet (not an error)
+    if not case:
+        return {
+            "uuid": None,
+            "case_type": "variance",
+            "total_sessions": 0,
+            "last_processed_at": None,
+            "created_at": None,
+            "sessions": [],
+        }
+
+    return {
+        "uuid": str(case.uuid),
+        "case_type": case.case_type,
+        "total_sessions": total,
+        "last_processed_at": case.last_processed_at,
+        "created_at": case.created_at,
+        "sessions": sessions,
+    }
+
+
+@router.get("/{project_uuid}/cases/utility-billing")
+async def get_utility_billing_case(
+    project_uuid: UUID,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    service: ProjectService = Depends(get_project_service),
+):
+    """
+    Get utility billing sessions for a project.
+
+    Returns billing sessions grouped by processing date.
+    Returns empty data if case doesn't exist yet.
+    """
+    case, sessions, total = await service.get_utility_billing_sessions_by_project(
+        project_uuid, skip, limit
+    )
+
+    # Return empty data if case doesn't exist yet (not an error)
+    if not case:
+        return {
+            "uuid": None,
+            "case_type": "utility_billing",
+            "total_sessions": 0,
+            "last_processed_at": None,
+            "created_at": None,
+            "sessions": [],
+        }
+
+    return {
+        "uuid": str(case.uuid),
+        "case_type": case.case_type,
+        "total_sessions": total,
+        "last_processed_at": case.last_processed_at,
+        "created_at": case.created_at,
+        "sessions": sessions,
+    }
+
+
+@router.get("/{project_uuid}/cases/excel-comparison")
+async def get_excel_comparison_case(
+    project_uuid: UUID,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    service: ProjectService = Depends(get_project_service),
+):
+    """
+    Get excel comparison sessions for a project.
+
+    Returns comparison sessions grouped by processing date.
+    Returns empty data if case doesn't exist yet.
+    """
+    case, sessions, total = await service.get_excel_comparison_sessions_by_project(
+        project_uuid, skip, limit
+    )
+
+    # Return empty data if case doesn't exist yet (not an error)
+    if not case:
+        return {
+            "uuid": None,
+            "case_type": "excel_comparison",
+            "total_sessions": 0,
+            "last_processed_at": None,
+            "created_at": None,
+            "sessions": [],
+        }
+
+    return {
+        "uuid": str(case.uuid),
+        "case_type": case.case_type,
+        "total_sessions": total,
+        "last_processed_at": case.last_processed_at,
+        "created_at": case.created_at,
+        "sessions": sessions,
+    }

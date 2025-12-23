@@ -2,12 +2,19 @@
 GLA Variance Analysis API Router
 Provides REST API endpoints for comparing GLA data between periods.
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Form, Depends
 from fastapi.responses import FileResponse
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
+from uuid import UUID
+from decimal import Decimal
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.fpa.gla_variance.gla_variance_use_case import GLAVarianceUseCase
+from app.application.project.project_service import ProjectService
+from app.core.dependencies import get_db, get_project_service
+from app.infrastructure.database.models.gla import GLAProjectModel
 from app.shared.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -16,6 +23,54 @@ router = APIRouter(prefix="/fpa/gla-variance", tags=["FP&A - GLA Variance Analys
 
 # Initialize use case
 gla_use_case = GLAVarianceUseCase()
+
+
+async def save_gla_to_project(
+    db: AsyncSession,
+    project_uuid: str,
+    result: Dict[str, Any],
+    filename: str
+) -> None:
+    """
+    Save GLA analysis result to project.
+
+    Args:
+        db: Database session
+        project_uuid: Project UUID string
+        result: Analysis result from GLAVarianceUseCase
+        filename: Original filename
+    """
+    try:
+        project_service = ProjectService(db)
+        case = await project_service.get_or_create_case(UUID(project_uuid), "gla")
+
+        if case:
+            # Get statistics from result
+            statistics = result.get('statistics', {})
+
+            # Create GLAProjectModel record
+            gla_project = GLAProjectModel(
+                case_id=case.id,
+                file_name=filename,
+                processed_at=datetime.utcnow(),
+                project_code=f"GLA_{result.get('timestamp', '')}",
+                project_name=f"GLA Variance Analysis - {result.get('previous_period', '')} vs {result.get('current_period', '')}",
+                product_type="MIXED",
+                region="ALL",
+                total_gla_sqm=Decimal(str(statistics.get('total_handover_gla', {}).get('current', 0) or 0)),
+                period_label=result.get('current_period'),
+            )
+            db.add(gla_project)
+
+            # Update case file count
+            await project_service.increment_case_file_count(case.id)
+            await db.commit()
+
+            logger.info(f"Saved GLA analysis to project {project_uuid}, case {case.id}")
+    except Exception as e:
+        logger.error(f"Failed to save GLA to project: {e}")
+        # Don't fail the request if saving to project fails
+        await db.rollback()
 
 
 @router.get("/health")
@@ -33,7 +88,9 @@ async def health_check():
 async def analyze_gla_variance(
     file: UploadFile = File(..., description="Excel file with GLA data (standard 4-sheet or pivot table format)"),
     previous_label: Optional[str] = Query(None, description="Label for previous period (e.g., 'Oct 2025')"),
-    current_label: Optional[str] = Query(None, description="Label for current period (e.g., 'Nov 2025')")
+    current_label: Optional[str] = Query(None, description="Label for current period (e.g., 'Nov 2025')"),
+    project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Analyze GLA variance between two periods from a single Excel file.
@@ -45,6 +102,7 @@ async def analyze_gla_variance(
     3. Computes variance between periods
     4. Uses AI to generate business explanations
     5. Generates output Excel with variance analysis and PDF report
+    6. Optionally saves to project if project_uuid is provided
 
     **Supported formats:**
 
@@ -81,6 +139,11 @@ async def analyze_gla_variance(
             current_label=current_label
         )
         logger.info(f"GLA variance analysis successful: {result['statistics']['total_projects']} projects")
+
+        # Save to project if project_uuid provided
+        if project_uuid:
+            await save_gla_to_project(db, project_uuid, result, file.filename)
+
         return result
     except ValueError as e:
         # Sheet validation errors - return 400 Bad Request

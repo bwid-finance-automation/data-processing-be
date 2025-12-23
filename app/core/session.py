@@ -18,6 +18,9 @@ class SessionManager:
     # Store session last activity time
     _sessions = {}
 
+    # Store session to project_uuid mapping
+    _session_projects = {}
+
     # Session timeout (in minutes)
     SESSION_TIMEOUT = 60  # 1 hour
 
@@ -98,6 +101,10 @@ class SessionManager:
             # Remove from active sessions
             if session_id in SessionManager._sessions:
                 del SessionManager._sessions[session_id]
+
+            # Remove project mapping
+            if session_id in SessionManager._session_projects:
+                del SessionManager._session_projects[session_id]
         except Exception as e:
             logger.error(f"Error cleaning up session {session_id}: {e}")
 
@@ -124,6 +131,17 @@ class SessionManager:
         for session_id in session_ids:
             SessionManager.cleanup_session(session_id)
         logger.info("Cleaned up all sessions")
+
+    @classmethod
+    def set_project_uuid(cls, session_id: str, project_uuid: str) -> None:
+        """Associate a session with a project UUID."""
+        cls._session_projects[session_id] = project_uuid
+        logger.info(f"Associated session {session_id} with project {project_uuid}")
+
+    @classmethod
+    def get_project_uuid(cls, session_id: str) -> Optional[str]:
+        """Get the project UUID associated with a session."""
+        return cls._session_projects.get(session_id)
 
 
 # Ensure sessions directory exists on import

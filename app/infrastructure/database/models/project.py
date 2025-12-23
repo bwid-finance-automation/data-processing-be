@@ -24,6 +24,8 @@ class CaseType(str, enum.Enum):
     CONTRACT = "contract"
     GLA = "gla"
     VARIANCE = "variance"
+    UTILITY_BILLING = "utility_billing"
+    EXCEL_COMPARISON = "excel_comparison"
 
 
 class ProjectModel(Base, TimestampMixin):

@@ -304,3 +304,103 @@ class ProjectService:
         total = await self.case_repo.count_contract_sessions_by_case(case.id)
 
         return case, sessions, total
+
+    # ============== GLA Case Operations ==============
+
+    async def get_gla_sessions_by_project(
+        self,
+        project_uuid: UUID,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> tuple[Optional[ProjectCaseModel], List[dict], int]:
+        """Get GLA variance analysis sessions for a project."""
+        project = await self.project_repo.get_by_uuid(project_uuid)
+        if not project:
+            return None, [], 0
+
+        case = await self.case_repo.get_by_project_and_type(project.id, "gla")
+        if not case:
+            return None, [], 0
+
+        sessions = await self.case_repo.get_gla_projects_by_case(
+            case.id, skip, limit
+        )
+        total = await self.case_repo.count_gla_projects_by_case(case.id)
+
+        return case, sessions, total
+
+    # ============== Variance Analysis Case Operations ==============
+
+    async def get_variance_sessions_by_project(
+        self,
+        project_uuid: UUID,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> tuple[Optional[ProjectCaseModel], List[dict], int]:
+        """Get variance analysis sessions for a project."""
+        project = await self.project_repo.get_by_uuid(project_uuid)
+        if not project:
+            return None, [], 0
+
+        case = await self.case_repo.get_by_project_and_type(project.id, "variance")
+        if not case:
+            return None, [], 0
+
+        sessions = await self.case_repo.get_analysis_sessions_by_case(
+            case.id, skip, limit
+        )
+        total = await self.case_repo.count_analysis_sessions_by_case(case.id)
+
+        return case, sessions, total
+
+    # ============== Utility Billing Case Operations ==============
+
+    async def get_utility_billing_sessions_by_project(
+        self,
+        project_uuid: UUID,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> tuple[Optional[ProjectCaseModel], List[dict], int]:
+        """Get utility billing sessions for a project."""
+        project = await self.project_repo.get_by_uuid(project_uuid)
+        if not project:
+            return None, [], 0
+
+        case = await self.case_repo.get_by_project_and_type(project.id, "utility_billing")
+        if not case:
+            return None, [], 0
+
+        sessions = await self.case_repo.get_analysis_sessions_by_case(
+            case.id, skip, limit, analysis_type="UTILITY_BILLING"
+        )
+        total = await self.case_repo.count_analysis_sessions_by_case(
+            case.id, analysis_type="UTILITY_BILLING"
+        )
+
+        return case, sessions, total
+
+    # ============== Excel Comparison Case Operations ==============
+
+    async def get_excel_comparison_sessions_by_project(
+        self,
+        project_uuid: UUID,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> tuple[Optional[ProjectCaseModel], List[dict], int]:
+        """Get excel comparison sessions for a project."""
+        project = await self.project_repo.get_by_uuid(project_uuid)
+        if not project:
+            return None, [], 0
+
+        case = await self.case_repo.get_by_project_and_type(project.id, "excel_comparison")
+        if not case:
+            return None, [], 0
+
+        sessions = await self.case_repo.get_analysis_sessions_by_case(
+            case.id, skip, limit, analysis_type="EXCEL_COMPARISON"
+        )
+        total = await self.case_repo.count_analysis_sessions_by_case(
+            case.id, analysis_type="EXCEL_COMPARISON"
+        )
+
+        return case, sessions, total
