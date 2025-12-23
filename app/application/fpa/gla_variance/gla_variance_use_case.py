@@ -41,23 +41,22 @@ class GLAVarianceUseCase:
             self.ai_analyzer = GLAAIAnalyzer()
         return self.ai_analyzer
 
-    def _process_file_with_format_detection(
+    def _process_file(
         self,
         file_path: str,
-        ai_analyzer: GLAAIAnalyzer,
         progress_callback=None
     ) -> Dict[str, Any]:
         """
-        Detect file format using AI and process accordingly.
+        Process GLA file using standard 4-sheet format.
 
-        Supports multiple formats:
-        - standard: 4 sheets (Handover/Committed x Previous/Current)
-        - pivot_table: Monthly GLA columns with dates in header rows
-        - Other formats: AI will attempt to understand and process
+        Expected sheets:
+        - Handover GLA - Previous
+        - Handover GLA - Current
+        - Committed GLA - Previous
+        - Committed GLA - Current
 
         Args:
             file_path: Path to the Excel file
-            ai_analyzer: AI analyzer instance for structure detection
             progress_callback: Optional callback for progress updates
 
         Returns:
@@ -66,53 +65,11 @@ class GLAVarianceUseCase:
                 'committed': {'previous': {...}, 'current': {...}}
             }
         """
-        try:
-            logger.info("Detecting file structure with AI...")
-            if progress_callback:
-                progress_callback(10, "Analyzing file structure...")
+        logger.info("Processing as standard 4-sheet format...")
+        if progress_callback:
+            progress_callback(20, "Processing GLA data...")
 
-            structure = ai_analyzer.detect_file_structure(file_path)
-            file_format = structure.get('format', 'standard')
-            logger.info(f"AI detected file format: {file_format}")
-
-            if file_format == 'pivot_table':
-                # Pivot table format: monthly GLA columns
-                logger.info("Processing as pivot table format...")
-                if progress_callback:
-                    progress_callback(20, "Processing pivot table format...")
-
-                # Detect which months to compare
-                months = ai_analyzer.detect_comparison_months(file_path)
-                previous_month = months.get('previous_month')
-                current_month = months.get('current_month')
-                month_source = months.get('source', 'unknown')
-
-                logger.info(f"Comparison months (source: {month_source}): {previous_month} -> {current_month}")
-
-                return self.processor.process_pivot_table_file(
-                    file_path,
-                    previous_month=previous_month,
-                    current_month=current_month,
-                    ai_analyzer=ai_analyzer
-                )
-
-            else:
-                # Standard or unknown format - try 4-sheet processing
-                logger.info("Processing as standard 4-sheet format...")
-                if progress_callback:
-                    progress_callback(20, "Processing standard format...")
-
-                return self.processor.process_single_file_with_periods(file_path)
-
-        except Exception as e:
-            logger.warning(f"AI-based format detection failed: {e}")
-            logger.info("Falling back to standard 4-sheet processing...")
-
-            # Fallback to standard processing
-            if progress_callback:
-                progress_callback(20, "Processing file (fallback mode)...")
-
-            return self.processor.process_single_file_with_periods(file_path)
+        return self.processor.process_single_file_with_periods(file_path)
 
     async def execute(
         self,
@@ -146,13 +103,14 @@ class GLAVarianceUseCase:
             with open(file_path, "wb") as f:
                 shutil.copyfileobj(file.file, f)
 
-            # Use AI to detect file format and process accordingly
-            ai_analyzer = self._get_ai_analyzer()
-            processed_data = self._process_file_with_format_detection(
+            # Process file using standard 4-sheet format
+            processed_data = self._process_file(
                 str(file_path),
-                ai_analyzer,
                 progress_callback
             )
+
+            # Initialize AI analyzer for notes generation
+            ai_analyzer = self._get_ai_analyzer()
 
             # Extract data for variance calculation
             handover_previous = processed_data['handover'].get('previous', {})
