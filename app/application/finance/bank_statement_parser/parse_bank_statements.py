@@ -5,6 +5,8 @@ from datetime import datetime
 import pandas as pd
 import csv
 import math
+import json
+import re
 from io import BytesIO, StringIO
 from collections import defaultdict
 
@@ -307,6 +309,179 @@ class ParseBankStatementsUseCase:
             "all_balances": reconciled_balances,
             "summary": {
                 "total_files": len(text_inputs),
+                "successful": successful,
+                "failed": failed,
+                "failed_files": failed_files,
+                "total_transactions": len(all_transactions),
+                "total_balances": len(reconciled_balances)
+            }
+        }
+
+    def execute_from_json(
+        self,
+        json_inputs: List[Tuple[str, str, Optional[str]]]
+    ) -> Dict[str, Any]:
+        """
+        Parse bank statements from structured JSON (Gemini AI output).
+
+        This is more accurate than text parsing because Gemini can visually
+        understand table structures and align data correctly.
+
+        Args:
+            json_inputs: List of (file_name, json_content, bank_code) tuples
+                        json_content can be raw JSON or markdown-wrapped (```json...```)
+                        bank_code can be None (will be extracted from JSON if available)
+
+        Expected JSON structure from Gemini:
+        {
+            "bank_name": "KBANK",
+            "account_number": "102001530257",
+            "currency": "VND",
+            "opening_balance": 91419267.00,
+            "closing_balance": 305348290.00,
+            "transactions": [
+                {
+                    "date": "04/11/2025",
+                    "time": "11:47 AM",
+                    "description": "DDA Withdrawal by Transfer...",
+                    "debit": 33000.00,
+                    "credit": null,
+                    "balance": 91386267.00,
+                    "transaction_id": "TF50"
+                }
+            ]
+        }
+
+        Returns:
+            Dictionary with same structure as execute():
+            - statements: List of parsed statements
+            - all_transactions: Combined list of transactions
+            - all_balances: Combined list of balances
+            - summary: Processing summary
+        """
+        statements: List[BankStatement] = []
+        all_transactions: List[BankTransaction] = []
+        all_balances: List[BankBalance] = []
+
+        successful = 0
+        failed = 0
+        failed_files = []
+
+        for file_name, json_content, bank_code in json_inputs:
+            try:
+                # Clean markdown code blocks if present
+                clean_content = json_content.strip()
+                if clean_content.startswith("```"):
+                    # Remove ```json or ``` at start
+                    clean_content = re.sub(r'^```(?:json)?\s*', '', clean_content)
+                    # Remove ``` at end
+                    clean_content = re.sub(r'\s*```$', '', clean_content)
+
+                # Parse JSON
+                data = json.loads(clean_content)
+
+                # Extract bank info
+                extracted_bank_name = data.get("bank_name") or data.get("bank") or bank_code or "UNKNOWN"
+                acc_no = str(data.get("account_number") or data.get("acc_no") or "")
+                currency = data.get("currency") or "VND"
+
+                # Extract balance info
+                opening_balance = _safe_float(data.get("opening_balance") or data.get("openning_balance") or 0)
+                closing_balance = _safe_float(data.get("closing_balance") or 0)
+
+                # Create balance object
+                balance = BankBalance(
+                    bank_name=extracted_bank_name,
+                    acc_no=acc_no,
+                    currency=currency,
+                    opening_balance=opening_balance,
+                    closing_balance=closing_balance
+                )
+                all_balances.append(balance)
+
+                # Parse transactions
+                transactions = []
+                tx_list = data.get("transactions") or data.get("details") or []
+
+                for tx_data in tx_list:
+                    # Parse date
+                    date_str = tx_data.get("date") or tx_data.get("trans_date") or ""
+                    tx_date = None
+                    if date_str:
+                        # Try multiple date formats
+                        for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"]:
+                            try:
+                                tx_date = datetime.strptime(date_str, fmt).date()
+                                break
+                            except ValueError:
+                                continue
+
+                    # Parse amounts
+                    debit = _safe_float(tx_data.get("debit"))
+                    credit = _safe_float(tx_data.get("credit"))
+
+                    # Handle case where amount is in single field with type indicator
+                    if "amount" in tx_data and "type" in tx_data:
+                        amount = _safe_float(tx_data.get("amount"))
+                        tx_type = tx_data.get("type", "").upper()
+                        if tx_type in ["D", "DEBIT", "DR"]:
+                            debit = amount
+                            credit = 0
+                        elif tx_type in ["C", "CREDIT", "CR"]:
+                            credit = amount
+                            debit = 0
+
+                    tx = BankTransaction(
+                        bank_name=extracted_bank_name,
+                        acc_no=acc_no,
+                        debit=debit if debit else None,
+                        credit=credit if credit else None,
+                        date=tx_date,
+                        description=tx_data.get("description") or tx_data.get("desc") or "",
+                        currency=currency,
+                        transaction_id=str(tx_data.get("transaction_id") or tx_data.get("trans_id") or ""),
+                        beneficiary_bank=tx_data.get("beneficiary_bank") or "",
+                        beneficiary_acc_no=tx_data.get("beneficiary_acc_no") or tx_data.get("partner_account") or "",
+                        beneficiary_acc_name=tx_data.get("beneficiary_acc_name") or tx_data.get("partner") or ""
+                    )
+                    transactions.append(tx)
+
+                all_transactions.extend(transactions)
+
+                # Create statement
+                statement = BankStatement(
+                    bank_name=extracted_bank_name,
+                    file_name=file_name,
+                    balance=balance,
+                    transactions=transactions
+                )
+                statements.append(statement)
+                successful += 1
+
+                logger.info(f"Parsed JSON from {file_name}: {len(transactions)} transactions, bank={extracted_bank_name}")
+
+            except json.JSONDecodeError as e:
+                failed += 1
+                failed_files.append({
+                    "file_name": file_name,
+                    "error": f"Invalid JSON format: {str(e)}"
+                })
+            except Exception as e:
+                failed += 1
+                failed_files.append({
+                    "file_name": file_name,
+                    "error": f"Failed to parse JSON: {str(e)}"
+                })
+
+        reconciled_balances = self._reconcile_balances_with_transactions(all_balances, all_transactions)
+        self._update_statement_balances(statements, reconciled_balances)
+
+        return {
+            "statements": statements,
+            "all_transactions": all_transactions,
+            "all_balances": reconciled_balances,
+            "summary": {
+                "total_files": len(json_inputs),
                 "successful": successful,
                 "failed": failed,
                 "failed_files": failed_files,

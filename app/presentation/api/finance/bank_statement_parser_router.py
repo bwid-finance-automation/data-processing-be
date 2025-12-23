@@ -6,6 +6,7 @@ from fastapi.responses import Response
 import uuid
 import math
 import base64
+import re
 from io import BytesIO
 import pandas as pd  # Added pandas for HTML handling
 
@@ -696,6 +697,7 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
         # Initialize lists for different input types
         file_data: List[Tuple[str, bytes]] = []  # For Excel/PDF files
         text_data: List[Tuple[str, str, str]] = []  # For OCR text (file_name, ocr_text, bank_code)
+        json_data: List[Tuple[str, str, str]] = []  # For JSON from Gemini (file_name, json_content, bank_code)
         decode_errors = []
 
         for file_input in request.files:
@@ -734,16 +736,38 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
                 # Decode base64 content
                 file_bytes = base64.b64decode(content_base64)
 
-                # Handle .txt files as OCR text input
+                # Handle .txt files - try JSON first, then fallback to OCR text
                 if file_name.lower().endswith('.txt'):
                     try:
-                        ocr_text_content = file_bytes.decode('utf-8')
-                        text_data.append((
-                            file_name,
-                            ocr_text_content,
-                            file_input.bank_code  # Can be None for auto-detection
-                        ))
-                        logger.info(f"Processing {file_name} as OCR text input ({len(ocr_text_content)} characters)")
+                        txt_content = file_bytes.decode('utf-8')
+
+                        # Try to detect if content is JSON (from Gemini structured output)
+                        clean_content = txt_content.strip()
+                        # Remove markdown code blocks if present
+                        if clean_content.startswith("```"):
+                            clean_content = re.sub(r'^```(?:json)?\s*', '', clean_content)
+                            clean_content = re.sub(r'\s*```$', '', clean_content)
+
+                        # Check if it looks like JSON
+                        is_json = clean_content.startswith('{') or clean_content.startswith('[')
+
+                        if is_json:
+                            # Will be processed by execute_from_json
+                            json_data.append((
+                                file_name,
+                                txt_content,
+                                file_input.bank_code
+                            ))
+                            logger.info(f"Processing {file_name} as JSON input from Gemini ({len(txt_content)} characters)")
+                        else:
+                            # Fallback to OCR text parsing
+                            text_data.append((
+                                file_name,
+                                txt_content,
+                                file_input.bank_code
+                            ))
+                            logger.info(f"Processing {file_name} as OCR text input ({len(txt_content)} characters)")
+
                         continue  # Skip file_data processing
                     except UnicodeDecodeError:
                         decode_errors.append({
@@ -794,7 +818,7 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
                 })
 
         # Check if we have any data to process
-        if not file_data and not text_data:
+        if not file_data and not text_data and not json_data:
             return PowerAutomateParseResponse(
                 success=False,
                 message="No valid files to process",
@@ -824,7 +848,18 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
             }
         }
 
-        # Process OCR text inputs
+        # Process JSON inputs from Gemini (highest accuracy - visual table understanding)
+        if json_data:
+            json_result = use_case.execute_from_json(json_data)
+            result["statements"].extend(json_result["statements"])
+            result["all_transactions"].extend(json_result["all_transactions"])
+            result["all_balances"].extend(json_result["all_balances"])
+            result["summary"]["total_files"] += json_result["summary"]["total_files"]
+            result["summary"]["successful"] += json_result["summary"]["successful"]
+            result["summary"]["failed"] += json_result["summary"]["failed"]
+            result["summary"]["failed_files"].extend(json_result["summary"]["failed_files"])
+
+        # Process OCR text inputs (fallback for non-JSON text)
         if text_data:
             text_result = use_case.execute_from_text(text_data)
             result["statements"].extend(text_result["statements"])
