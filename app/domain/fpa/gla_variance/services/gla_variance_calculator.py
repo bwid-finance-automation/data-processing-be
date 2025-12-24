@@ -138,14 +138,15 @@ class GLAVarianceCalculator:
                     break
 
             # Create variance result
+            # Use handover_gla from Handover sheets and committed_gla from Committed sheets
             result = GLAVarianceResult(
                 project_name=project_name,
                 product_type=product_type,
                 region=region,
-                handover_previous=hp.gla_sqm if hp else 0.0,
-                handover_current=hc.gla_sqm if hc else 0.0,
-                committed_previous=cp.gla_sqm if cp else 0.0,
-                committed_current=cc.gla_sqm if cc else 0.0,
+                handover_previous=hp.handover_gla if hp else 0.0,
+                handover_current=hc.handover_gla if hc else 0.0,
+                committed_previous=cp.committed_gla if cp else 0.0,
+                committed_current=cc.committed_gla if cc else 0.0,
                 # New attributes - Handover sheet
                 monthly_gross_rent_previous=hp.monthly_gross_rent if hp else 0.0,
                 monthly_gross_rent_current=hc.monthly_gross_rent if hc else 0.0,

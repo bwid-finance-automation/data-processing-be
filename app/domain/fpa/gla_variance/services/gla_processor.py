@@ -172,16 +172,29 @@ class GLAProcessor:
         """
         Extract readable project name from BWID Project field or project code.
 
-        BWID Project format: 'PBBA: Bau Bang'
+        BWID Project format: 'PBBA: Bau Bang' or just 'Bau Bang'
         """
-        if pd.notna(bwid_project) and ':' in str(bwid_project):
-            return str(bwid_project).split(':', 1)[1].strip()
+        if pd.notna(bwid_project):
+            bwid_str = str(bwid_project).strip()
+            if ':' in bwid_str:
+                # Format: 'PBBA: Bau Bang' -> 'Bau Bang'
+                return bwid_str.split(':', 1)[1].strip()
+            elif bwid_str:
+                # Format: just 'Amata' or 'Bau Bang' without code prefix
+                return bwid_str
 
         # Fall back to mapping
         if project_code in self.project_mapping:
             return self.project_mapping[project_code]
 
         return project_code
+
+    def _find_column(self, df: pd.DataFrame, possible_names: list) -> str:
+        """Find a column by checking multiple possible names."""
+        for name in possible_names:
+            if name in df.columns:
+                return name
+        return None
 
     def aggregate_by_project_type(
         self,
@@ -197,24 +210,33 @@ class GLAProcessor:
         # Filter by status first
         filtered_df = self.filter_by_status(df, data_type)
 
-        # Check required columns exist
-        required = ['Project Name', 'CCS_Product Type', 'Region', 'GLA for Lease', 'BWID Project.']
-        missing = [col for col in required if col not in filtered_df.columns]
-        if missing:
-            logger.warning(f"Missing columns: {missing}")
-            # Try to work with available columns
-            if 'Project Name' not in filtered_df.columns:
-                return {}
+        # Find columns with flexible naming (supports multiple Excel formats)
+        project_code_col = self._find_column(filtered_df, ['Project Name', 'Prj code'])
+        project_name_col = self._find_column(filtered_df, ['BWID Project.', 'Project name\n(Reporting)', 'Project name (Reporting)'])
+        product_type_col = self._find_column(filtered_df, ['CCS_Product Type', 'Product type', 'Product'])
+        region_col = self._find_column(filtered_df, ['Region'])
+        gla_col = self._find_column(filtered_df, ['GLA for Lease'])
+
+        # Log found columns
+        logger.info(f"Column mapping: project_code={project_code_col}, project_name={project_name_col}, product_type={product_type_col}, region={region_col}, gla={gla_col}")
+
+        if not project_code_col and not project_name_col:
+            logger.warning("No project column found")
+            return {}
+
+        if not product_type_col:
+            logger.warning("No product type column found")
+            return {}
+
+        if not gla_col:
+            logger.warning("No GLA column found")
+            return {}
 
         # Check for tenant column (may have different names)
-        tenant_col = None
-        for col_name in ['Tenant Name', 'Tenant', 'Customer Name', 'Customer', 'Account Name']:
-            if col_name in filtered_df.columns:
-                tenant_col = col_name
-                break
+        tenant_col = self._find_column(filtered_df, ['Tenant Name', 'Tenant', 'Customer Name', 'Customer', 'Account Name'])
 
         # Check for status column
-        status_col = 'Unit for Lease Status' if 'Unit for Lease Status' in filtered_df.columns else None
+        status_col = self._find_column(filtered_df, ['Unit for Lease Status'])
 
         # Check for new attribute columns (Handover sheet)
         handover_gla_col = 'Handover GLA' if 'Handover GLA' in filtered_df.columns else None
@@ -232,11 +254,12 @@ class GLAProcessor:
 
         for _, row in filtered_df.iterrows():
             try:
-                project_code = str(row.get('Project Name', '')).strip()
-                bwid_project = row.get('BWID Project.', '')
-                product_type = str(row.get('CCS_Product Type', '')).strip()
-                region = str(row.get('Region', '')).strip()
-                gla = float(row.get('GLA for Lease', 0) or 0)
+                # Use flexible column names
+                project_code = str(row.get(project_code_col, '') if project_code_col else '').strip()
+                bwid_project = row.get(project_name_col, '') if project_name_col else ''
+                product_type = str(row.get(product_type_col, '') if product_type_col else '').strip()
+                region = str(row.get(region_col, '') if region_col else '').strip()
+                gla = float(row.get(gla_col, 0) if gla_col else 0) or 0
 
                 # Get tenant name
                 tenant_name = "Unknown"
@@ -276,16 +299,17 @@ class GLAProcessor:
                 if months_to_expire_x_gla_col and pd.notna(row.get(months_to_expire_x_gla_col)):
                     months_to_expire_x_gla = float(row.get(months_to_expire_x_gla_col) or 0)
 
-                # Skip invalid records
-                if not project_code or not product_type or pd.isna(gla):
+                # Skip invalid records - need at least project name and product type
+                readable_name_candidate = self.extract_readable_project_name(bwid_project, project_code)
+                if not readable_name_candidate or not product_type or pd.isna(gla):
                     continue
 
                 # Only process RBF and RBW
                 if product_type not in [ProductType.RBF.value, ProductType.RBW.value]:
                     continue
 
-                # Get readable project name
-                readable_name = self.extract_readable_project_name(bwid_project, project_code)
+                # Use the already-computed readable name
+                readable_name = readable_name_candidate
 
                 key = (readable_name, product_type)
 
