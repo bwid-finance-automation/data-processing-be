@@ -33,27 +33,48 @@ class GLAVarianceCalculator:
     def _calculate_tenant_changes(
         self,
         previous_summary: Optional[ProjectGLASummary],
-        current_summary: Optional[ProjectGLASummary]
+        current_summary: Optional[ProjectGLASummary],
+        gla_type: str = "gla_sqm"
     ) -> List[TenantChange]:
         """
         Calculate tenant-level changes between two periods.
+
+        Args:
+            previous_summary: Previous period project summary
+            current_summary: Current period project summary
+            gla_type: Which GLA field to use for comparison:
+                - "gla_sqm": Use GLA for Lease (default, legacy)
+                - "handover_gla": Use Handover GLA column
+                - "committed_gla": Use Committed GLA column
 
         Returns:
             List of TenantChange objects describing what changed
         """
         changes = []
 
-        # Build tenant dicts for comparison
+        # Build tenant dicts for comparison using the specified GLA type
         prev_tenants = {}
         curr_tenants = {}
 
         if previous_summary and previous_summary.tenants:
             for t in previous_summary.tenants:
-                prev_tenants[t.tenant_name] = t.gla_sqm
+                # Use the specified GLA field
+                if gla_type == "handover_gla":
+                    prev_tenants[t.tenant_name] = t.handover_gla
+                elif gla_type == "committed_gla":
+                    prev_tenants[t.tenant_name] = t.committed_gla
+                else:
+                    prev_tenants[t.tenant_name] = t.gla_sqm
 
         if current_summary and current_summary.tenants:
             for t in current_summary.tenants:
-                curr_tenants[t.tenant_name] = t.gla_sqm
+                # Use the specified GLA field
+                if gla_type == "handover_gla":
+                    curr_tenants[t.tenant_name] = t.handover_gla
+                elif gla_type == "committed_gla":
+                    curr_tenants[t.tenant_name] = t.committed_gla
+                else:
+                    curr_tenants[t.tenant_name] = t.gla_sqm
 
         # Find all unique tenants
         all_tenants = set(prev_tenants.keys()) | set(curr_tenants.keys())
@@ -161,9 +182,11 @@ class GLAVarianceCalculator:
 
             result.calculate_variances()
 
-            # Calculate tenant-level changes
-            result.handover_tenant_changes = self._calculate_tenant_changes(hp, hc)
-            result.committed_tenant_changes = self._calculate_tenant_changes(cp, cc)
+            # Calculate tenant-level changes using the correct GLA columns
+            # Handover changes use handover_gla (from Handover GLA column)
+            # Committed changes use committed_gla (from Commited GLA column)
+            result.handover_tenant_changes = self._calculate_tenant_changes(hp, hc, gla_type="handover_gla")
+            result.committed_tenant_changes = self._calculate_tenant_changes(cp, cc, gla_type="committed_gla")
 
             # Generate notes for significant variances (placeholder - will be populated by AI)
             result.handover_note = self._generate_variance_note(

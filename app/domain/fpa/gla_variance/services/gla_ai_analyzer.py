@@ -312,12 +312,20 @@ class GLAAIAnalyzer:
         # First, generate notes from tenant data directly (no AI needed for basic info)
         for r in projects_with_variance:
             # Generate committed note from tenant changes
-            if r.committed_variance != 0 and r.committed_tenant_changes:
+            if r.committed_tenant_changes:
                 r.committed_note = self._format_tenant_changes(r.committed_tenant_changes)
 
             # Generate handover note from tenant changes
-            if r.handover_variance != 0 and r.handover_tenant_changes:
+            if r.handover_tenant_changes:
                 r.handover_note = self._format_tenant_changes(r.handover_tenant_changes)
+
+            # Generate WALE note - explain what caused the WALE change
+            if abs(r.months_to_expire_variance) > 0.001:
+                r.wale_note = self._generate_wale_note(r)
+
+            # Generate Gross Rent note - explain what caused the rent change
+            if abs(r.monthly_rate_variance) > 0.01:
+                r.gross_rent_note = self._generate_gross_rent_note(r)
 
         # If AI client available, enhance notes with context
         if self.client:
@@ -364,22 +372,147 @@ class GLAAIAnalyzer:
         if not changes:
             return ""
 
-        parts = []
-        for change in changes[:3]:  # Limit to top 3 tenants
+        # Group changes by type for cleaner output
+        new_tenants = []
+        terminated = []
+        expanded = []
+        reduced = []
+
+        for change in changes:
             tenant = change.tenant_name
-            if len(tenant) > 20:
-                tenant = tenant[:18] + ".."
+            # Remove C0000xxxx prefix if present
+            if tenant.startswith('C0000'):
+                tenant = tenant[10:].strip() if len(tenant) > 10 else tenant
+            # Truncate long names
+            if len(tenant) > 15:
+                tenant = tenant[:13] + ".."
 
             if change.change_type == "new":
-                parts.append(f"{tenant} (new +{change.variance:,.0f})")
+                new_tenants.append((tenant, change.variance))
             elif change.change_type == "terminated":
-                parts.append(f"{tenant} (term {change.variance:,.0f})")
+                terminated.append((tenant, change.variance))
             elif change.change_type == "expanded":
-                parts.append(f"{tenant} (+{change.variance:,.0f})")
+                expanded.append((tenant, change.variance))
             elif change.change_type == "reduced":
-                parts.append(f"{tenant} ({change.variance:,.0f})")
+                reduced.append((tenant, change.variance))
+
+        parts = []
+
+        # Format each group (limit to top 2 per group for brevity)
+        if expanded:
+            names = ", ".join([t[0] for t in expanded[:2]])
+            total = sum([t[1] for t in expanded])
+            parts.append(f"{names} expanded (+{total:,.0f})")
+
+        if new_tenants:
+            names = ", ".join([t[0] for t in new_tenants[:2]])
+            total = sum([t[1] for t in new_tenants])
+            if len(new_tenants) > 2:
+                names += f" +{len(new_tenants)-2} more"
+            parts.append(f"{names} new (+{total:,.0f})")
+
+        if terminated:
+            names = ", ".join([t[0] for t in terminated[:2]])
+            total = sum([t[1] for t in terminated])  # This will be negative
+            if len(terminated) > 2:
+                names += f" +{len(terminated)-2} more"
+            parts.append(f"{names} terminated ({total:,.0f})")
+
+        if reduced:
+            names = ", ".join([t[0] for t in reduced[:2]])
+            total = sum([t[1] for t in reduced])  # This will be negative
+            parts.append(f"{names} reduced ({total:,.0f})")
 
         return "; ".join(parts)
+
+    def _generate_wale_note(self, r) -> str:
+        """
+        Generate a note explaining WALE (Weighted Average Lease Expiry) variance.
+
+        WALE changes are primarily caused by:
+        1. Time passing (all leases get 1 month closer to expiry each month)
+        2. New tenants with different lease terms
+        3. Tenants leaving (their lease terms no longer count)
+        4. Lease renewals/extensions
+        """
+        # Convert months to years for display
+        wale_var_years = r.months_to_expire_variance / 12
+
+        # Standard monthly decay is about -0.0833 years (-1 month / 12)
+        expected_decay = -1 / 12  # -0.0833 years
+
+        parts = []
+
+        # Check if WALE change is mostly due to time passing
+        if abs(wale_var_years - expected_decay) < 0.01:
+            parts.append("Monthly decay")
+        elif wale_var_years < expected_decay - 0.01:
+            # WALE decreased more than expected - shorter term tenants or terminations
+            if r.committed_tenant_changes:
+                # Look for terminated tenants (they may have had long leases)
+                terminated = [tc for tc in r.committed_tenant_changes if tc.change_type == "terminated"]
+                new_tenants = [tc for tc in r.committed_tenant_changes if tc.change_type == "new"]
+                if terminated:
+                    parts.append(f"Lease terminations")
+                if new_tenants:
+                    parts.append(f"New shorter-term leases")
+            if not parts:
+                parts.append("Shorter lease terms")
+        elif wale_var_years > expected_decay + 0.01:
+            # WALE increased or decreased less than expected - new long-term tenants or renewals
+            if r.committed_tenant_changes:
+                new_tenants = [tc for tc in r.committed_tenant_changes if tc.change_type == "new"]
+                if new_tenants:
+                    parts.append(f"New longer-term leases")
+            if not parts:
+                parts.append("Lease renewals/extensions")
+
+        return "; ".join(parts) if parts else ""
+
+    def _generate_gross_rent_note(self, r) -> str:
+        """
+        Generate a note explaining Gross Rent per sqm variance.
+
+        Gross rent changes are caused by:
+        1. New tenants at different rates
+        2. Tenants leaving (their rates no longer count)
+        3. Rate increases/decreases in existing contracts
+        4. Mix shift (more/less premium space leased)
+        """
+        if abs(r.monthly_rate_variance) < 0.01:
+            return ""
+
+        parts = []
+
+        # Check if there are tenant changes that explain the rent change
+        if r.handover_tenant_changes:
+            new_tenants = [tc for tc in r.handover_tenant_changes if tc.change_type == "new"]
+            terminated = [tc for tc in r.handover_tenant_changes if tc.change_type == "terminated"]
+
+            if r.monthly_rate_variance > 0:
+                # Rent increased
+                if new_tenants:
+                    parts.append("Higher rate new tenants")
+                elif terminated:
+                    parts.append("Lower rate tenants left")
+                else:
+                    parts.append("Rate adjustments")
+            else:
+                # Rent decreased
+                if new_tenants:
+                    parts.append("Lower rate new tenants")
+                elif terminated:
+                    parts.append("Higher rate tenants left")
+                else:
+                    parts.append("Rate adjustments")
+        else:
+            # No tenant changes - must be rate adjustments or mix shift
+            if r.monthly_rate_variance > 0:
+                parts.append("Rate increase")
+            else:
+                parts.append("Rate decrease")
+
+        return "; ".join(parts) if parts else ""
 
     def _create_notes_prompt(self, results: List[GLAVarianceResult]) -> str:
         """Create prompt for generating project notes with tenant details."""
