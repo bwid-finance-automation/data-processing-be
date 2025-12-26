@@ -229,27 +229,95 @@ class GLAAnalysisSummary:
     total_rbw_handover_current: float = 0.0
     total_rbw_handover_variance: float = 0.0
 
+    # WALE totals (weighted average by committed GLA)
+    total_rbf_wale_previous: float = 0.0
+    total_rbf_wale_current: float = 0.0
+    total_rbf_wale_variance: float = 0.0
+
+    total_rbw_wale_previous: float = 0.0
+    total_rbw_wale_current: float = 0.0
+    total_rbw_wale_variance: float = 0.0
+
+    # Gross Rent totals (weighted average by handover GLA)
+    total_rbf_gross_rent_previous: float = 0.0
+    total_rbf_gross_rent_current: float = 0.0
+    total_rbf_gross_rent_variance: float = 0.0
+
+    total_rbw_gross_rent_previous: float = 0.0
+    total_rbw_gross_rent_current: float = 0.0
+    total_rbw_gross_rent_variance: float = 0.0
+
     previous_period: str = ""
     current_period: str = ""
 
     def calculate_totals(self):
         """Calculate totals from results"""
+        # Accumulators for weighted averages
+        rbf_wale_x_gla_prev = 0.0
+        rbf_wale_x_gla_curr = 0.0
+        rbw_wale_x_gla_prev = 0.0
+        rbw_wale_x_gla_curr = 0.0
+
+        rbf_rent_x_gla_prev = 0.0
+        rbf_rent_x_gla_curr = 0.0
+        rbw_rent_x_gla_prev = 0.0
+        rbw_rent_x_gla_curr = 0.0
+
         for result in self.results:
             if result.product_type == ProductType.RBF.value:
                 self.total_rbf_committed_previous += result.committed_previous
                 self.total_rbf_committed_current += result.committed_current
                 self.total_rbf_handover_previous += result.handover_previous
                 self.total_rbf_handover_current += result.handover_current
+                # WALE weighted by committed GLA
+                rbf_wale_x_gla_prev += result.months_to_expire_previous * result.committed_previous
+                rbf_wale_x_gla_curr += result.months_to_expire_current * result.committed_current
+                # Gross Rent weighted by handover GLA
+                rbf_rent_x_gla_prev += result.monthly_rate_previous * result.handover_previous
+                rbf_rent_x_gla_curr += result.monthly_rate_current * result.handover_current
             elif result.product_type == ProductType.RBW.value:
                 self.total_rbw_committed_previous += result.committed_previous
                 self.total_rbw_committed_current += result.committed_current
                 self.total_rbw_handover_previous += result.handover_previous
                 self.total_rbw_handover_current += result.handover_current
+                # WALE weighted by committed GLA
+                rbw_wale_x_gla_prev += result.months_to_expire_previous * result.committed_previous
+                rbw_wale_x_gla_curr += result.months_to_expire_current * result.committed_current
+                # Gross Rent weighted by handover GLA
+                rbw_rent_x_gla_prev += result.monthly_rate_previous * result.handover_previous
+                rbw_rent_x_gla_curr += result.monthly_rate_current * result.handover_current
 
+        # GLA variances
         self.total_rbf_committed_variance = self.total_rbf_committed_current - self.total_rbf_committed_previous
         self.total_rbw_committed_variance = self.total_rbw_committed_current - self.total_rbw_committed_previous
         self.total_rbf_handover_variance = self.total_rbf_handover_current - self.total_rbf_handover_previous
         self.total_rbw_handover_variance = self.total_rbw_handover_current - self.total_rbw_handover_previous
+
+        # WALE weighted averages (in months, will convert to years in Excel output)
+        if self.total_rbf_committed_previous > 0:
+            self.total_rbf_wale_previous = rbf_wale_x_gla_prev / self.total_rbf_committed_previous
+        if self.total_rbf_committed_current > 0:
+            self.total_rbf_wale_current = rbf_wale_x_gla_curr / self.total_rbf_committed_current
+        self.total_rbf_wale_variance = self.total_rbf_wale_current - self.total_rbf_wale_previous
+
+        if self.total_rbw_committed_previous > 0:
+            self.total_rbw_wale_previous = rbw_wale_x_gla_prev / self.total_rbw_committed_previous
+        if self.total_rbw_committed_current > 0:
+            self.total_rbw_wale_current = rbw_wale_x_gla_curr / self.total_rbw_committed_current
+        self.total_rbw_wale_variance = self.total_rbw_wale_current - self.total_rbw_wale_previous
+
+        # Gross Rent weighted averages
+        if self.total_rbf_handover_previous > 0:
+            self.total_rbf_gross_rent_previous = rbf_rent_x_gla_prev / self.total_rbf_handover_previous
+        if self.total_rbf_handover_current > 0:
+            self.total_rbf_gross_rent_current = rbf_rent_x_gla_curr / self.total_rbf_handover_current
+        self.total_rbf_gross_rent_variance = self.total_rbf_gross_rent_current - self.total_rbf_gross_rent_previous
+
+        if self.total_rbw_handover_previous > 0:
+            self.total_rbw_gross_rent_previous = rbw_rent_x_gla_prev / self.total_rbw_handover_previous
+        if self.total_rbw_handover_current > 0:
+            self.total_rbw_gross_rent_current = rbw_rent_x_gla_curr / self.total_rbw_handover_current
+        self.total_rbw_gross_rent_variance = self.total_rbw_gross_rent_current - self.total_rbw_gross_rent_previous
 
     @property
     def total_portfolio_committed_previous(self) -> float:
@@ -274,3 +342,51 @@ class GLAAnalysisSummary:
     @property
     def total_portfolio_handover_variance(self) -> float:
         return self.total_rbf_handover_variance + self.total_rbw_handover_variance
+
+    @property
+    def total_portfolio_wale_previous(self) -> float:
+        """Portfolio WALE weighted by committed GLA"""
+        total_gla = self.total_portfolio_committed_previous
+        if total_gla <= 0:
+            return 0.0
+        weighted = (self.total_rbf_wale_previous * self.total_rbf_committed_previous +
+                    self.total_rbw_wale_previous * self.total_rbw_committed_previous)
+        return weighted / total_gla
+
+    @property
+    def total_portfolio_wale_current(self) -> float:
+        """Portfolio WALE weighted by committed GLA"""
+        total_gla = self.total_portfolio_committed_current
+        if total_gla <= 0:
+            return 0.0
+        weighted = (self.total_rbf_wale_current * self.total_rbf_committed_current +
+                    self.total_rbw_wale_current * self.total_rbw_committed_current)
+        return weighted / total_gla
+
+    @property
+    def total_portfolio_wale_variance(self) -> float:
+        return self.total_portfolio_wale_current - self.total_portfolio_wale_previous
+
+    @property
+    def total_portfolio_gross_rent_previous(self) -> float:
+        """Portfolio Gross Rent weighted by handover GLA"""
+        total_gla = self.total_portfolio_handover_previous
+        if total_gla <= 0:
+            return 0.0
+        weighted = (self.total_rbf_gross_rent_previous * self.total_rbf_handover_previous +
+                    self.total_rbw_gross_rent_previous * self.total_rbw_handover_previous)
+        return weighted / total_gla
+
+    @property
+    def total_portfolio_gross_rent_current(self) -> float:
+        """Portfolio Gross Rent weighted by handover GLA"""
+        total_gla = self.total_portfolio_handover_current
+        if total_gla <= 0:
+            return 0.0
+        weighted = (self.total_rbf_gross_rent_current * self.total_rbf_handover_current +
+                    self.total_rbw_gross_rent_current * self.total_rbw_handover_current)
+        return weighted / total_gla
+
+    @property
+    def total_portfolio_gross_rent_variance(self) -> float:
+        return self.total_portfolio_gross_rent_current - self.total_portfolio_gross_rent_previous

@@ -353,10 +353,18 @@ class GLAVarianceCalculator:
         ws.cell(row=row_num, column=4, value=summary.total_rbf_committed_previous).number_format = '#,##0.00'
         ws.cell(row=row_num, column=5, value=summary.total_rbf_committed_current).number_format = '#,##0.00'
         ws.cell(row=row_num, column=6, value=summary.total_rbf_committed_variance).number_format = '#,##0.00'
+        # WALE totals in years (cols 8-10)
+        ws.cell(row=row_num, column=8, value=summary.total_rbf_wale_previous / 12).number_format = '#,##0.000000'
+        ws.cell(row=row_num, column=9, value=summary.total_rbf_wale_current / 12).number_format = '#,##0.000000'
+        ws.cell(row=row_num, column=10, value=summary.total_rbf_wale_variance / 12).number_format = '#,##0.000000'
         # Handover GLA totals (cols 12-14)
         ws.cell(row=row_num, column=12, value=summary.total_rbf_handover_previous).number_format = '#,##0.00'
         ws.cell(row=row_num, column=13, value=summary.total_rbf_handover_current).number_format = '#,##0.00'
         ws.cell(row=row_num, column=14, value=summary.total_rbf_handover_variance).number_format = '#,##0.00'
+        # Gross Rent totals (cols 16-18)
+        ws.cell(row=row_num, column=16, value=summary.total_rbf_gross_rent_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=17, value=summary.total_rbf_gross_rent_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=18, value=summary.total_rbf_gross_rent_variance).number_format = '#,##0.00'
         for col in range(1, num_cols + 1):
             ws.cell(row=row_num, column=col).fill = total_fill
             ws.cell(row=row_num, column=col).border = border
@@ -369,10 +377,18 @@ class GLAVarianceCalculator:
         ws.cell(row=row_num, column=4, value=summary.total_rbw_committed_previous).number_format = '#,##0.00'
         ws.cell(row=row_num, column=5, value=summary.total_rbw_committed_current).number_format = '#,##0.00'
         ws.cell(row=row_num, column=6, value=summary.total_rbw_committed_variance).number_format = '#,##0.00'
+        # WALE totals in years (cols 8-10)
+        ws.cell(row=row_num, column=8, value=summary.total_rbw_wale_previous / 12).number_format = '#,##0.000000'
+        ws.cell(row=row_num, column=9, value=summary.total_rbw_wale_current / 12).number_format = '#,##0.000000'
+        ws.cell(row=row_num, column=10, value=summary.total_rbw_wale_variance / 12).number_format = '#,##0.000000'
         # Handover GLA totals (cols 12-14)
         ws.cell(row=row_num, column=12, value=summary.total_rbw_handover_previous).number_format = '#,##0.00'
         ws.cell(row=row_num, column=13, value=summary.total_rbw_handover_current).number_format = '#,##0.00'
         ws.cell(row=row_num, column=14, value=summary.total_rbw_handover_variance).number_format = '#,##0.00'
+        # Gross Rent totals (cols 16-18)
+        ws.cell(row=row_num, column=16, value=summary.total_rbw_gross_rent_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=17, value=summary.total_rbw_gross_rent_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=18, value=summary.total_rbw_gross_rent_variance).number_format = '#,##0.00'
         for col in range(1, num_cols + 1):
             ws.cell(row=row_num, column=col).fill = total_fill
             ws.cell(row=row_num, column=col).border = border
@@ -385,10 +401,18 @@ class GLAVarianceCalculator:
         ws.cell(row=row_num, column=4, value=summary.total_portfolio_committed_previous).number_format = '#,##0.00'
         ws.cell(row=row_num, column=5, value=summary.total_portfolio_committed_current).number_format = '#,##0.00'
         ws.cell(row=row_num, column=6, value=summary.total_portfolio_committed_variance).number_format = '#,##0.00'
+        # WALE totals in years (cols 8-10)
+        ws.cell(row=row_num, column=8, value=summary.total_portfolio_wale_previous / 12).number_format = '#,##0.000000'
+        ws.cell(row=row_num, column=9, value=summary.total_portfolio_wale_current / 12).number_format = '#,##0.000000'
+        ws.cell(row=row_num, column=10, value=summary.total_portfolio_wale_variance / 12).number_format = '#,##0.000000'
         # Handover GLA totals (cols 12-14)
         ws.cell(row=row_num, column=12, value=summary.total_portfolio_handover_previous).number_format = '#,##0.00'
         ws.cell(row=row_num, column=13, value=summary.total_portfolio_handover_current).number_format = '#,##0.00'
         ws.cell(row=row_num, column=14, value=summary.total_portfolio_handover_variance).number_format = '#,##0.00'
+        # Gross Rent totals (cols 16-18)
+        ws.cell(row=row_num, column=16, value=summary.total_portfolio_gross_rent_previous).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=17, value=summary.total_portfolio_gross_rent_current).number_format = '#,##0.00'
+        ws.cell(row=row_num, column=18, value=summary.total_portfolio_gross_rent_variance).number_format = '#,##0.00'
         for col in range(1, num_cols + 1):
             cell = ws.cell(row=row_num, column=col)
             cell.fill = PatternFill(start_color="B4C6E7", end_color="B4C6E7", fill_type="solid")
