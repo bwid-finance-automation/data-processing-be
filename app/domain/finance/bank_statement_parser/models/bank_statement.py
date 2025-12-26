@@ -1,5 +1,6 @@
 """Domain model for bank statement."""
 
+from datetime import date
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -14,6 +15,7 @@ class BankBalance(BaseModel):
     currency: str = Field("VND", description="Currency")
     opening_balance: float = Field(0.0, description="Opening balance")
     closing_balance: float = Field(0.0, description="Closing balance")
+    statement_date: Optional[date] = Field(None, description="Statement period end date (from file)")
 
     class Config:
         json_schema_extra = {

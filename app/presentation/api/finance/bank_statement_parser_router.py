@@ -184,7 +184,8 @@ async def parse_bank_statements(
                     acc_no=stmt.balance.acc_no,
                     currency=stmt.balance.currency,
                     opening_balance=opening_bal,
-                    closing_balance=closing_bal
+                    closing_balance=closing_bal,
+                    statement_date=stmt.balance.statement_date
                 )
 
             # Convert transactions
@@ -344,7 +345,8 @@ async def parse_bank_statements_pdf(
                     acc_no=stmt.balance.acc_no,
                     currency=stmt.balance.currency,
                     opening_balance=opening_bal,
-                    closing_balance=closing_bal
+                    closing_balance=closing_bal,
+                    statement_date=stmt.balance.statement_date
                 )
 
             # Convert transactions
@@ -884,6 +886,7 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
         # Update totals
         result["summary"]["total_transactions"] = len(result["all_transactions"])
         result["summary"]["total_balances"] = len(result["all_balances"])
+        result["summary"]["total_accounts"] = len(result["all_balances"])  # Alias for UI display
 
         # Add decode errors to failed files
         if decode_errors:

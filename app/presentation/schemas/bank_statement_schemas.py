@@ -33,6 +33,7 @@ class BankBalanceResponse(BaseModel):
     currency: str = "VND"
     opening_balance: float = 0.0
     closing_balance: float = 0.0
+    statement_date: Optional[date] = Field(None, description="Statement period end date (from file)")
 
 
 class BankStatementResponse(BaseModel):
@@ -88,7 +89,8 @@ class ParseBankStatementsResponse(BaseModel):
                             "acc_no": "123456789",
                             "currency": "VND",
                             "opening_balance": 10000000.0,
-                            "closing_balance": 15000000.0
+                            "closing_balance": 15000000.0,
+                            "statement_date": "2025-01-31"
                         },
                         "transactions": [],
                         "transaction_count": 25

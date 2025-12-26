@@ -109,7 +109,8 @@ class ParseBankStatementsUseCase:
                 acc_no=bal.acc_no,
                 currency=bal.currency,
                 opening_balance=opening,
-                closing_balance=closing
+                closing_balance=closing,
+                statement_date=bal.statement_date  # Preserve statement period end date
             ))
 
         return reconciled
@@ -209,7 +210,8 @@ class ParseBankStatementsUseCase:
                 "failed": failed,
                 "failed_files": failed_files,
                 "total_transactions": len(all_transactions),
-                "total_balances": len(reconciled_balances)
+                "total_balances": len(reconciled_balances),
+                "total_accounts": len(reconciled_balances)  # Alias for UI display
             }
         }
 
@@ -313,7 +315,8 @@ class ParseBankStatementsUseCase:
                 "failed": failed,
                 "failed_files": failed_files,
                 "total_transactions": len(all_transactions),
-                "total_balances": len(reconciled_balances)
+                "total_balances": len(reconciled_balances),
+                "total_accounts": len(reconciled_balances)  # Alias for UI display
             }
         }
 
@@ -486,7 +489,8 @@ class ParseBankStatementsUseCase:
                 "failed": failed,
                 "failed_files": failed_files,
                 "total_transactions": len(all_transactions),
-                "total_balances": len(reconciled_balances)
+                "total_balances": len(reconciled_balances),
+                "total_accounts": len(reconciled_balances)  # Alias for UI display
             }
         }
 
@@ -798,11 +802,16 @@ class ParseBankStatementsUseCase:
             # Get aggregated totals
             agg = tx_aggregates.get(key, {"total_debit": 0, "total_credit": 0, "max_date": None})
 
-            # Get date from transactions or use current date
+            # Get date from transactions, or statement_date from balance, or use current date
             if agg["max_date"]:
                 tx_date = agg["max_date"]
                 date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
                 # Format: M/D/YYYY (no leading zeros)
+                formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
+            elif bal.statement_date:
+                # Use statement period end date from parsed file
+                tx_date = bal.statement_date
+                date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
                 formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
             else:
                 date_str_yyyymmdd = now.strftime("%Y%m%d")
@@ -1016,9 +1025,13 @@ class ParseBankStatementsUseCase:
                 # Get aggregated totals
                 agg = tx_aggregates.get(key, {"total_debit": 0, "total_credit": 0, "max_date": None})
 
-                # Get date from transactions or use current date
+                # Get date from transactions, or statement_date from balance, or use current date
                 if agg["max_date"]:
                     tx_date = agg["max_date"]
+                    date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
+                elif bal.statement_date:
+                    # Use statement period end date from parsed file
+                    tx_date = bal.statement_date
                     date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
                 else:
                     tx_date = now
@@ -1289,11 +1302,16 @@ class ParseBankStatementsUseCase:
                 # Get aggregated totals
                 agg = tx_aggregates.get(key, {"total_debit": 0, "total_credit": 0, "max_date": None})
 
-                # Get date from transactions or use current date
+                # Get date from transactions, or statement_date from balance, or use current date
                 if agg["max_date"]:
                     tx_date = agg["max_date"]
                     date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
                     # Format: M/D/YYYY (no leading zeros)
+                    formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
+                elif bal.statement_date:
+                    # Use statement period end date from parsed file
+                    tx_date = bal.statement_date
+                    date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
                     formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
                 else:
                     tx_date = now

@@ -2,6 +2,7 @@
 
 import io
 import re
+from datetime import date, datetime
 from typing import List, Optional
 import pandas as pd
 
@@ -20,10 +21,10 @@ class OCBParser(BaseBankParser):
         """
         Detect if file is OCB bank statement.
 
-        Improved detection:
-        - Check for "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" (bilingual header)
-        - OR check for OCB-specific structure: PS GIẢM/PS TĂNG + Starting Balance/Ending Balance
-        - Structure-based detector (no bank-name keyword needed)
+        Improved detection for TWO OCB formats:
+        - Format 1: "SAO KÊ TÀI KHOẢN" (simple header) with PS giảm (Nợ)/Debit columns
+        - Format 2: "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" (bilingual header)
+        - Structure-based detector with OCB-specific column patterns
         """
         try:
             xls = self.get_excel_file(file_bytes)
@@ -39,22 +40,28 @@ class OCBParser(BaseBankParser):
 
             txt = " ".join(all_text)
 
-            # Method 1: Check for OCB bilingual header pattern
-            # "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" is unique to OCB
-            has_ocb_header = "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" in txt
+            # Method 1: Check for OCB header patterns (both formats)
+            # Format 2: "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" (bilingual)
+            has_ocb_bilingual_header = "SAO KÊ TÀI KHOẢN/ ACCOUNT STATEMENT" in txt
+            # Format 1: "SAO KÊ TÀI KHOẢN" (simple) - but exclude if contains other bank names
+            has_ocb_simple_header = "SAO KÊ TÀI KHOẢN" in txt and not any(
+                bank in txt for bank in ["VIETCOMBANK", "TECHCOMBANK", "BIDV", "VIETINBANK", "ACB", "MB BANK", "TPB"]
+            )
 
             # Method 2: Check for OCB-specific column markers
+            # OCB uses specific bilingual column format: "PS GIẢM (NỢ)/DEBIT" and "PS TĂNG (CÓ)/CREDIT"
             has_ps_giam = "PS GIẢM" in txt or "PS NỢ" in txt
             has_ps_tang = "PS TĂNG" in txt or "PS CÓ" in txt
-            has_starting_balance = "STARTING BALANCE" in txt or "SỐ DƯ ĐẦU KỲ/ STARTING BALANCE" in txt
-            has_ending_balance = "ENDING BALANCE" in txt or "SỐ DƯ CUỐI KỲ/ ENDING BALANCE" in txt
+            has_starting_balance = "STARTING BALANCE" in txt or "SỐ DƯ ĐẦU KỲ" in txt or "SỐ DƯ ĐẦU" in txt
+            has_ending_balance = "ENDING BALANCE" in txt or "SỐ DƯ CUỐI KỲ" in txt
             has_ocb_structure = (has_ps_giam and has_ps_tang) or (has_starting_balance and has_ending_balance)
 
             # Method 3: Check for specific OCB markers not in other banks
             has_debit_total = "DEBIT TOTAL" in txt or "TỔNG PS NỢ" in txt
             has_credit_total = "CREDIT TOTAL" in txt or "TỔNG PS CÓ" in txt
 
-            is_ocb = has_ocb_header or (has_ocb_structure and (has_debit_total or has_credit_total))
+            is_ocb = has_ocb_bilingual_header or (has_ocb_simple_header and has_ocb_structure) or \
+                     (has_ocb_structure and (has_debit_total or has_credit_total))
 
             return is_ocb
 
@@ -92,12 +99,19 @@ class OCBParser(BaseBankParser):
             # ERP Convention (SWAPPED):
             # - "PS GIẢM (NỢ)" = tiền RA = Credit in ERP
             # - "PS TĂNG (CÓ)" = tiền VÀO = Debit in ERP
-            date_col = self._find_any_column(data, ["NGÀY THỰC HIỆN", "TRANSACTION DATE", "NGÀY", "DATE"])
+            # Format 1: Ngày thực hiện/Transaction Date
+            # Format 2: Ngày tạo/Transaction date (use Ngày thực hiện/Bank date for actual date)
+            date_col = self._find_any_column(data, ["NGÀY THỰC HIỆN", "NGÀY TẠO", "TRANSACTION DATE", "NGÀY", "DATE"])
             credit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Credit (ERP)
             debit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Debit (ERP)
             balance_col = self._find_any_column(data, ["SỐ DƯ", "BALANCE"])
-            desc_col = self._find_any_column(data, ["NỘI DUNG", "DESCRIPTION", "DIỄN GIẢI", "CONTENT"])
+            desc_col = self._find_any_column(data, ["NỘI DUNG GIAO DỊCH", "NỘI DUNG", "DESCRIPTION", "DIỄN GIẢI", "CONTENT"])
             transaction_id_col = self._find_any_column(data, ["SỐ GD", "TRANSACTION NUMBER"])
+
+            # Format 2 additional columns (beneficiary info)
+            beneficiary_name_col = self._find_any_column(data, ["TÊN NGƯỜI THỤ HƯỞNG", "RECIPIENT"])
+            beneficiary_acc_col = self._find_any_column(data, ["SỐ TÀI KHOẢN THỤ HƯỞNG", "COUNTERPARTY ACCOUNT"])
+            beneficiary_bank_col = self._find_any_column(data, ["NGÂN HÀNG THỤ HƯỞNG", "COUNTERPARTY BANK"])
 
             # ========== Rename Columns ==========
             rename_map = {}
@@ -107,6 +121,10 @@ class OCBParser(BaseBankParser):
             if balance_col: rename_map[balance_col] = "Balance"
             if desc_col: rename_map[desc_col] = "Description"
             if transaction_id_col: rename_map[transaction_id_col] = "TransactionID"
+            # Format 2 beneficiary columns
+            if beneficiary_name_col: rename_map[beneficiary_name_col] = "BeneficiaryName"
+            if beneficiary_acc_col: rename_map[beneficiary_acc_col] = "BeneficiaryAccNo"
+            if beneficiary_bank_col: rename_map[beneficiary_bank_col] = "BeneficiaryBank"
 
             if not rename_map:
                 return []
@@ -114,7 +132,8 @@ class OCBParser(BaseBankParser):
             data = data.rename(columns=rename_map)
 
             # Keep only renamed columns
-            keep_cols = ["Date", "Debit", "Credit", "Balance", "Description", "TransactionID"]
+            keep_cols = ["Date", "Debit", "Credit", "Balance", "Description", "TransactionID",
+                         "BeneficiaryName", "BeneficiaryAccNo", "BeneficiaryBank"]
             available = [c for c in keep_cols if c in data.columns]
             if not available:
                 return []
@@ -125,9 +144,10 @@ class OCBParser(BaseBankParser):
             if "Date" in data.columns:
                 data["Date"] = data["Date"].apply(self.fix_date)
             if "Debit" in data.columns:
-                data["Debit"] = data["Debit"].apply(self._fix_number_ocb)
+                data["Debit"] = data["Debit"].apply(lambda x: self._fix_number_ocb(x, take_absolute=True))
             if "Credit" in data.columns:
-                data["Credit"] = data["Credit"].apply(self._fix_number_ocb)
+                # Credit (tiền ra) may be negative in some OCB formats, take absolute value
+                data["Credit"] = data["Credit"].apply(lambda x: self._fix_number_ocb(x, take_absolute=True))
             if "Balance" in data.columns:
                 data["Balance"] = data["Balance"].apply(self._fix_number_ocb)
 
@@ -157,9 +177,9 @@ class OCBParser(BaseBankParser):
                     description=self.to_text(row.get("Description", "")) if "Description" in row else "",
                     currency=currency or "VND",
                     transaction_id=self.to_text(row.get("TransactionID", "")) if "TransactionID" in row else "",
-                    beneficiary_bank="",
-                    beneficiary_acc_no="",
-                    beneficiary_acc_name=""
+                    beneficiary_bank=self.to_text(row.get("BeneficiaryBank", "")) if "BeneficiaryBank" in row else "",
+                    beneficiary_acc_no=self.to_text(row.get("BeneficiaryAccNo", "")) if "BeneficiaryAccNo" in row else "",
+                    beneficiary_acc_name=self.to_text(row.get("BeneficiaryName", "")) if "BeneficiaryName" in row else ""
                 )
 
                 transactions.append(tx)
@@ -187,8 +207,12 @@ class OCBParser(BaseBankParser):
             acc_no = self._extract_account_number_ocb(top_80)
             currency = self._extract_currency_ocb(top_80)
 
-            # ========== Extract Opening Balance from Header Text ==========
+            # ========== Extract Opening/Closing Balance from Header Text ==========
             opening = self._extract_opening_balance_ocb(top_80)
+            closing_from_header = self._extract_closing_balance_ocb(top_80)
+
+            # ========== Extract Statement Period End Date ==========
+            statement_date = self._extract_statement_date_ocb(top_80)
 
             # ========== Find Header Row ==========
             header_idx = self._find_header_row_ocb(top_80)
@@ -202,7 +226,9 @@ class OCBParser(BaseBankParser):
             # ERP Convention (SWAPPED):
             # - "PS GIẢM (NỢ)" = tiền RA = Credit in ERP
             # - "PS TĂNG (CÓ)" = tiền VÀO = Debit in ERP
-            date_col = self._find_any_column(data, ["NGÀY", "DATE"])
+            # Format 1: Ngày thực hiện/Transaction Date
+            # Format 2: Ngày tạo/Transaction date
+            date_col = self._find_any_column(data, ["NGÀY THỰC HIỆN", "NGÀY TẠO", "TRANSACTION DATE", "NGÀY", "DATE"])
             credit_col = self._find_any_column(data, ["PS GIẢM", "PS NỢ", "DEBIT"])  # Money out = Credit (ERP)
             debit_col = self._find_any_column(data, ["PS TĂNG", "PS CÓ", "CREDIT"])  # Money in = Debit (ERP)
             balance_col = self._find_any_column(data, ["SỐ DƯ", "BALANCE"])
@@ -223,9 +249,9 @@ class OCBParser(BaseBankParser):
             if date_col:
                 data[date_col] = data[date_col].apply(self.fix_date)
             if debit_col:
-                data[debit_col] = data[debit_col].apply(self._fix_number_ocb)
+                data[debit_col] = data[debit_col].apply(lambda x: self._fix_number_ocb(x, take_absolute=True))
             if credit_col:
-                data[credit_col] = data[credit_col].apply(self._fix_number_ocb)
+                data[credit_col] = data[credit_col].apply(lambda x: self._fix_number_ocb(x, take_absolute=True))
             if balance_col:
                 data[balance_col] = data[balance_col].apply(self._fix_number_ocb)
 
@@ -236,26 +262,42 @@ class OCBParser(BaseBankParser):
                 data_mov = data.copy()
 
             # ========== Calculate Balances ==========
-            # Sum movements
-            sum_debit = data_mov[debit_col].sum() if debit_col and debit_col in data_mov.columns else 0
-            sum_credit = data_mov[credit_col].sum() if credit_col and credit_col in data_mov.columns else 0
-            net_move = sum_debit - sum_credit
+            # Prefer closing balance from header (Format 2 has explicit ending balance)
+            closing = closing_from_header
 
-            # Closing = Opening + NetMove
-            closing = opening + net_move if opening is not None else None
+            if closing is None:
+                # Sum movements
+                sum_debit = data_mov[debit_col].sum() if debit_col and debit_col in data_mov.columns else 0
+                sum_credit = data_mov[credit_col].sum() if credit_col and credit_col in data_mov.columns else 0
+                net_move = sum_debit - sum_credit
 
-            # Alternatively, use last balance if available
-            if balance_col and balance_col in data_mov.columns:
-                bal_list = data_mov[balance_col].dropna().tolist()
-                if bal_list:
-                    closing = bal_list[-1]
+                # Closing = Opening + NetMove
+                closing = opening + net_move if opening is not None else None
+
+                # Alternatively, use first or last balance if available
+                # (Format 2 is sorted desc by date, so first is most recent)
+                if balance_col and balance_col in data_mov.columns:
+                    bal_list = data_mov[balance_col].dropna().tolist()
+                    if bal_list:
+                        # Use first balance (most recent for desc sorted) or last (for asc sorted)
+                        # Compare first and last to determine order
+                        if len(bal_list) >= 2 and date_col:
+                            first_date = data_mov[date_col].iloc[0]
+                            last_date = data_mov[date_col].iloc[-1]
+                            if first_date and last_date and first_date > last_date:
+                                closing = bal_list[0]  # First is most recent (desc order)
+                            else:
+                                closing = bal_list[-1]  # Last is most recent (asc order)
+                        else:
+                            closing = bal_list[-1]
 
             return BankBalance(
                 bank_name="OCB",
                 acc_no=acc_no or "",
                 currency=currency or "VND",
                 opening_balance=opening or 0.0,
-                closing_balance=closing or 0.0
+                closing_balance=closing or 0.0,
+                statement_date=statement_date
             )
 
         except Exception as e:
@@ -266,16 +308,25 @@ class OCBParser(BaseBankParser):
 
     def _find_header_row_ocb(self, top_df: pd.DataFrame) -> int:
         """
-        Find header row with flexible detection.
-        Must contain: NGÀY + NỘI DUNG + (PS GIẢM OR PS NỢ) + (PS TĂNG OR PS CÓ)
+        Find header row with flexible detection for both OCB formats.
+
+        Format 1 headers: STT/No | Ngày thực hiện/Transaction Date | ... | Nội dung/Content | PS giảm (Nợ)/Debit | PS tăng (Có)/Credit
+        Format 2 headers: STT/No | Ngày tạo/Transaction date | ... | Nội dung giao dịch/Content | PS giảm (Nợ)/Debit | PS tăng (Có)/Credit
+
+        Must contain: NGÀY + (NỘI DUNG OR CONTENT) + (PS GIẢM OR PS NỢ OR DEBIT) + (PS TĂNG OR PS CÓ OR CREDIT)
         """
         for idx, row in top_df.iterrows():
             row_text = "|".join([self.to_text(cell).upper() for cell in row])
 
-            has_date = "NGÀY" in row_text
-            has_desc = "NỘI DUNG" in row_text or "DIỄN GIẢI" in row_text
-            has_credit = "PS GIẢM" in row_text or "PS NỢ" in row_text
-            has_debit = "PS TĂNG" in row_text or "PS CÓ" in row_text
+            # Check for date column (both formats use NGÀY)
+            has_date = "NGÀY" in row_text or "DATE" in row_text
+
+            # Check for description column (both formats)
+            has_desc = "NỘI DUNG" in row_text or "CONTENT" in row_text or "DIỄN GIẢI" in row_text
+
+            # Check for debit/credit columns (PS GIẢM = money out, PS TĂNG = money in)
+            has_credit = "PS GIẢM" in row_text or "PS NỢ" in row_text or ("DEBIT" in row_text and "CREDIT" in row_text)
+            has_debit = "PS TĂNG" in row_text or "PS CÓ" in row_text or ("CREDIT" in row_text and "DEBIT" in row_text)
 
             if has_date and has_desc and has_credit and has_debit:
                 return int(idx)
@@ -400,11 +451,86 @@ class OCBParser(BaseBankParser):
 
         return None
 
-    def _fix_number_ocb(self, value) -> Optional[float]:
+    def _extract_closing_balance_ocb(self, top_df: pd.DataFrame) -> Optional[float]:
+        """
+        Extract closing/ending balance from header area (Format 2).
+
+        Flexible detection:
+        1. Look for closing balance keywords (SỐ DƯ CUỐI, ENDING BALANCE, CURRENT BALANCE, etc.)
+        2. Extract number from the same row or adjacent cell
+        """
+        closing_keywords = [
+            "SỐ DƯ CUỐI KỲ", "SỐ DƯ CUỐI", "ENDING BALANCE", "ENDING BAL",
+            "BALANCE C/F", "CLOSING BALANCE", "SỐ DƯ HIỆN TẠI", "CURRENT BALANCE"
+        ]
+
+        for _, row in top_df.iterrows():
+            row_text = " ".join([self.to_text(cell).upper() for cell in row])
+
+            if any(kw in row_text for kw in closing_keywords):
+                # Try to extract number from this row
+                for cell in row:
+                    num_val = self._fix_number_ocb(cell)
+                    if num_val is not None and num_val != 0:
+                        return num_val
+
+        return None
+
+    def _extract_statement_date_ocb(self, top_df: pd.DataFrame) -> Optional[date]:
+        """
+        Extract statement period end date from header area.
+
+        Looks for patterns like:
+        - Format 1: "Từ ngày-Đến ngày: 16/11/2025  -  30/11/2025"
+        - Format 2: "Từ/ From: 2025-11-16 - Đến/ To: 2025-11-30"
+        """
+        date_keywords = [
+            "ĐẾN NGÀY", "TO:", "ĐẾN/", "TO DATE", "END DATE", "PERIOD END"
+        ]
+
+        for _, row in top_df.iterrows():
+            row_text = " ".join([self.to_text(cell).upper() for cell in row])
+
+            # Check if row contains period keywords
+            if any(kw in row_text for kw in date_keywords) or "TỪ NGÀY" in row_text or "FROM" in row_text:
+                # Try to extract dates from this row
+                for cell in row:
+                    cell_text = self.to_text(cell)
+                    if not cell_text:
+                        continue
+
+                    # Pattern 1: DD/MM/YYYY (Vietnamese format)
+                    # Look for the LAST date in string (end date)
+                    matches = re.findall(r'(\d{1,2})/(\d{1,2})/(\d{4})', cell_text)
+                    if matches:
+                        # Take the last match (end date)
+                        day, month, year = matches[-1]
+                        try:
+                            return date(int(year), int(month), int(day))
+                        except ValueError:
+                            pass
+
+                    # Pattern 2: YYYY-MM-DD (ISO format)
+                    matches = re.findall(r'(\d{4})-(\d{1,2})-(\d{1,2})', cell_text)
+                    if matches:
+                        # Take the last match (end date)
+                        year, month, day = matches[-1]
+                        try:
+                            return date(int(year), int(month), int(day))
+                        except ValueError:
+                            pass
+
+        return None
+
+    def _fix_number_ocb(self, value, take_absolute: bool = False) -> Optional[float]:
         """
         OCB-specific number parser.
         Removes: VND, commas, spaces
         Removes trailing .00
+
+        Args:
+            value: The value to parse
+            take_absolute: If True, return absolute value (useful for credit amounts that may be negative)
         """
         if value is None or pd.isna(value):
             return None
@@ -420,12 +546,15 @@ class OCBParser(BaseBankParser):
         if txt.endswith(".00"):
             txt = txt[:-3]
 
-        # Extract digits and decimal
+        # Extract digits and decimal (including negative sign)
         digits = ''.join(c for c in txt if c.isdigit() or c in ['-', '.'])
-        if not digits:
+        if not digits or digits == '-':
             return None
 
         try:
-            return float(digits)
+            result = float(digits)
+            if take_absolute:
+                result = abs(result)
+            return result
         except (ValueError, TypeError):
             return None
