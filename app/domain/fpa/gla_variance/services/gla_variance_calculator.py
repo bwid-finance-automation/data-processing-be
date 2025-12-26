@@ -298,20 +298,20 @@ class GLAVarianceCalculator:
                 result.committed_current,
                 result.committed_variance,
                 result.committed_note,
-                # WALE (cols 8-11)
-                result.months_to_expire_previous,
-                result.months_to_expire_current,
-                result.months_to_expire_variance,
+                # WALE in years (cols 8-11) - convert from months to years
+                result.months_to_expire_previous / 12,
+                result.months_to_expire_current / 12,
+                result.months_to_expire_variance / 12,
                 result.wale_note,
                 # Handover GLA (cols 12-15)
                 result.handover_previous,
                 result.handover_current,
                 result.handover_variance,
                 result.handover_note,
-                # Gross rent (cols 16-19)
-                result.monthly_gross_rent_previous,
-                result.monthly_gross_rent_current,
-                result.monthly_gross_rent_variance,
+                # Gross rent per sqm (cols 16-19) - use monthly_rate not total gross_rent
+                result.monthly_rate_previous,
+                result.monthly_rate_current,
+                result.monthly_rate_variance,
                 result.gross_rent_note,
             ]
 
