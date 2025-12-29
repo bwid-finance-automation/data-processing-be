@@ -35,6 +35,34 @@ router = APIRouter(prefix="/bank-statements", tags=["Finance - Bank Statement Pa
 _file_storage = {}
 
 
+def _generate_export_filename(transactions: list, balances: list) -> str:
+    """Generate export filename with format: {bank_codes}_statement_{timestamp}.xlsx"""
+    from datetime import datetime
+
+    # Collect unique bank names from transactions and balances
+    bank_names = set()
+    for tx in transactions:
+        if hasattr(tx, 'bank_name') and tx.bank_name:
+            bank_names.add(tx.bank_name.upper())
+    for bal in balances:
+        if hasattr(bal, 'bank_name') and bal.bank_name:
+            bank_names.add(bal.bank_name.upper())
+
+    # Sort and join bank names (limit to first 3 if too many)
+    sorted_banks = sorted(bank_names)
+    if len(sorted_banks) > 3:
+        bank_code = "_".join(sorted_banks[:3]) + "_etc"
+    elif sorted_banks:
+        bank_code = "_".join(sorted_banks)
+    else:
+        bank_code = "UNKNOWN"
+
+    # Generate timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    return f"{bank_code}_statement_{timestamp}.xlsx"
+
+
 @router.get("/", summary="Bank Statement Parser Info")
 def get_info():
     """Get information about the Bank Statement Parser API."""
@@ -121,9 +149,10 @@ async def parse_bank_statements(
 
         # Store for download
         session_id = str(uuid.uuid4())
+        export_filename = _generate_export_filename(result["all_transactions"], result["all_balances"])
         _file_storage[session_id] = {
             "content": excel_bytes,
-            "filename": f"bank_statements_erp_{session_id}.xlsx"
+            "filename": export_filename
         }
 
         # Save to database
@@ -282,9 +311,10 @@ async def parse_bank_statements_pdf(
 
         # Store for download
         session_id = str(uuid.uuid4())
+        export_filename = _generate_export_filename(result["all_transactions"], result["all_balances"])
         _file_storage[session_id] = {
             "content": excel_bytes,
-            "filename": f"bank_statements_erp_pdf_{session_id}.xlsx"
+            "filename": export_filename
         }
 
         # Save to database
@@ -452,11 +482,11 @@ async def parse_bank_statements_pdf(
 
 @router.get("/download/{session_id}", summary="Download Excel Output")
 def download_excel(session_id: str):
-    # ... (giữ nguyên code cũ)
     if session_id not in _file_storage:
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
     file_data = _file_storage[session_id]
+    logger.info(f"Download filename: {file_data['filename']}")
 
     return Response(
         content=file_data["content"],
@@ -482,7 +512,18 @@ async def download_excel_from_history(
 
         if excel_bytes:
             logger.info(f"Serving cached Excel for session: {session_id}")
-            filename = f"bank_statements_{session_id[:8]}.xlsx"
+            # Get bank names from database for filename
+            statements = await db_service.get_statements_by_session(session_id)
+            bank_names = sorted(set(stmt.bank_name.upper() for stmt in statements if stmt.bank_name))
+            if len(bank_names) > 3:
+                bank_code = "_".join(bank_names[:3]) + "_etc"
+            elif bank_names:
+                bank_code = "_".join(bank_names)
+            else:
+                bank_code = "UNKNOWN"
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{bank_code}_statement_{timestamp}.xlsx"
             return Response(
                 content=excel_bytes,
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -542,7 +583,7 @@ async def download_excel_from_history(
         await db_service.save_excel_output(session_id, excel_bytes)
 
         # Generate filename
-        filename = f"bank_statements_{session_id[:8]}.xlsx"
+        filename = _generate_export_filename(all_transactions, all_balances)
 
         return Response(
             content=excel_bytes,
@@ -901,7 +942,7 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
             result["all_transactions"],
             result["all_balances"]
         )
-        excel_filename = f"NetSuite_Export_{session_id}.xlsx"
+        excel_filename = _generate_export_filename(result["all_transactions"], result["all_balances"])
         excel_base64 = base64.b64encode(excel_bytes).decode('utf-8')
 
         # Prepare response
