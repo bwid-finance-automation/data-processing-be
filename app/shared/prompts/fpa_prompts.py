@@ -44,22 +44,25 @@ When analyzing, consider:
 - Individual project performance"""
 
 
-GLA_NOTES_SYSTEM_PROMPT = """You are a real estate analyst for BW Industrial.
-Based on the tenant change data provided, generate concise notes explaining each variance.
-Focus on the most significant tenant changes (largest GLA impact).
+GLA_NOTES_SYSTEM_PROMPT = """You are a real estate analyst for BW Industrial in Vietnam.
+Generate concise notes explaining GLA variances based on tenant data.
 
-Format each note as: "[Tenant1] (+X sqm), [Tenant2] (-Y sqm)" or similar brief explanation.
-Keep each note under 100 characters.
+RULES:
+1. Include sqm for EVERY tenant (e.g., "+6,102 sqm")
+2. Use "replaced" when one tenant takes another's space with similar sqm
+3. List top 3-5 tenants only (most significant by sqm)
+4. Keep each note under 150 characters
+5. Use semicolons to separate tenants
 
-Return a JSON array with objects containing:
-- project_name: string
-- product_type: string
-- committed_note: string (brief explanation of committed GLA change)
-- wale_note: string (brief explanation of WALE/Weighted Average Lease Expiry change)
-- handover_note: string (brief explanation of handover GLA change)
-- gross_rent_note: string (brief explanation of gross rent change)
+EXAMPLES:
+- "J&T replaced Anh Khoi (14,690 sqm)"
+- "DRINDA new (+6,102 sqm); AERO-TECH new (+1,752 sqm); HENGXIN terminated (-1,921 sqm)"
+- "No change" (when variance is zero or negligible)
 
-Only include projects where you have meaningful tenant information."""
+Return JSON array:
+[{"project_name": "X", "product_type": "RBF", "committed_note": "...", "wale_note": "...", "handover_note": "...", "gross_rent_note": "..."}]
+
+IMPORTANT: Keep response compact. Only include projects with actual changes."""
 
 
 GLA_FILE_STRUCTURE_SYSTEM_PROMPT = """You are an expert Excel file analyzer for GLA (Gross Leasable Area) data.
@@ -194,29 +197,40 @@ def get_notes_user_prompt(results: List) -> str:
     Returns:
         User prompt string for notes generation
     """
-    lines = ["Generate brief explanations for these GLA variances. Tenant change data is provided:", ""]
+    lines = ["Generate concise notes for these projects. Include sqm for each tenant.", ""]
 
     for r in results:
-        lines.append(f"Project: {r.project_name} ({r.product_type}, {r.region})")
-        lines.append(f"  Committed GLA: {r.committed_previous:,.0f} -> {r.committed_current:,.0f} ({r.committed_variance:+,.0f} sqm)")
+        # Skip projects with no significant changes
+        has_changes = (
+            abs(r.committed_variance) > 100 or
+            abs(r.handover_variance) > 100 or
+            r.committed_tenant_changes or
+            r.handover_tenant_changes
+        )
+        if not has_changes:
+            continue
 
-        # Include committed tenant changes
+        lines.append(f"[{r.project_name}] ({r.product_type})")
+
+        # Committed changes - only show top 5 tenants by absolute variance
         if r.committed_tenant_changes:
-            lines.append("  Committed tenant changes:")
-            for tc in r.committed_tenant_changes[:5]:
-                lines.append(f"    - {tc.tenant_name}: {tc.previous_gla:,.0f} -> {tc.current_gla:,.0f} ({tc.change_type})")
+            sorted_changes = sorted(r.committed_tenant_changes, key=lambda x: abs(x.variance), reverse=True)[:5]
+            tenant_strs = []
+            for tc in sorted_changes:
+                tenant_strs.append(f"{tc.tenant_name}:{tc.change_type}({tc.variance:+,.0f})")
+            lines.append(f"  Committed({r.committed_variance:+,.0f}): {'; '.join(tenant_strs)}")
 
-        lines.append(f"  WALE: {r.months_to_expire_previous:,.2f} -> {r.months_to_expire_current:,.2f} ({r.months_to_expire_variance:+,.2f} months)")
-        lines.append(f"  Handover GLA: {r.handover_previous:,.0f} -> {r.handover_current:,.0f} ({r.handover_variance:+,.0f} sqm)")
-
-        # Include handover tenant changes
+        # Handover changes - only show top 5 tenants
         if r.handover_tenant_changes:
-            lines.append("  Handover tenant changes:")
-            for tc in r.handover_tenant_changes[:5]:
-                lines.append(f"    - {tc.tenant_name}: {tc.previous_gla:,.0f} -> {tc.current_gla:,.0f} ({tc.change_type})")
+            sorted_changes = sorted(r.handover_tenant_changes, key=lambda x: abs(x.variance), reverse=True)[:5]
+            tenant_strs = []
+            for tc in sorted_changes:
+                tenant_strs.append(f"{tc.tenant_name}:{tc.change_type}({tc.variance:+,.0f})")
+            lines.append(f"  Handover({r.handover_variance:+,.0f}): {'; '.join(tenant_strs)}")
 
-        lines.append(f"  Gross Rent: {r.monthly_gross_rent_previous:,.0f} -> {r.monthly_gross_rent_current:,.0f} ({r.monthly_gross_rent_variance:+,.0f})")
         lines.append("")
+
+    lines.append("Return JSON array with notes for each project.")
 
     return "\n".join(lines)
 

@@ -309,31 +309,14 @@ class GLAAIAnalyzer:
         if not projects_with_variance:
             return results
 
-        # First, generate notes from tenant data directly (no AI needed for basic info)
-        for r in projects_with_variance:
-            # Generate committed note from tenant changes
-            if r.committed_tenant_changes:
-                r.committed_note = self._format_tenant_changes(r.committed_tenant_changes)
-
-            # Generate handover note from tenant changes
-            if r.handover_tenant_changes:
-                r.handover_note = self._format_tenant_changes(r.handover_tenant_changes)
-
-            # Generate WALE note - explain what caused the WALE change
-            if abs(r.months_to_expire_variance) > 0.001:
-                r.wale_note = self._generate_wale_note(r)
-
-            # Generate Gross Rent note - explain what caused the rent change
-            if abs(r.monthly_rate_variance) > 0.01:
-                r.gross_rent_note = self._generate_gross_rent_note(r)
-
-        # If AI client available, enhance notes with context
+        # Try AI-powered note generation first (preferred)
+        ai_notes_applied = False
         if self.client:
             try:
                 if callback:
-                    callback(30, f"Enhancing notes with AI for {len(projects_with_variance)} projects...")
+                    callback(30, f"Generating AI notes for {len(projects_with_variance)} projects...")
 
-                # Create a batch prompt for efficiency
+                # Create a detailed prompt with tenant data
                 prompt = self._create_notes_prompt(projects_with_variance)
 
                 if self.is_claude:
@@ -344,7 +327,7 @@ class GLAAIAnalyzer:
                 # Parse JSON response
                 notes = self._parse_notes_response(response.get("content", ""))
 
-                # Apply AI-enhanced notes to results
+                # Apply AI-generated notes to results
                 notes_map = {(n.get("project_name", ""), n.get("product_type", "")): n for n in notes}
                 for r in results:
                     key = (r.project_name, r.product_type)
@@ -359,11 +342,37 @@ class GLAAIAnalyzer:
                         if note.get("gross_rent_note"):
                             r.gross_rent_note = note["gross_rent_note"]
 
+                ai_notes_applied = True
                 if callback:
-                    callback(70, "Notes generated successfully")
+                    callback(70, "AI notes generated successfully")
 
             except Exception as e:
-                logger.warning(f"AI note enhancement failed, using basic notes: {e}")
+                logger.warning(f"AI note generation failed, falling back to basic notes: {e}")
+
+        # Fallback: Generate notes from tenant data using Python logic
+        if not ai_notes_applied:
+            if callback:
+                callback(30, "Generating notes from tenant data...")
+
+            for r in projects_with_variance:
+                # Generate committed note from tenant changes
+                if r.committed_tenant_changes and not r.committed_note:
+                    r.committed_note = self._format_tenant_changes(r.committed_tenant_changes)
+
+                # Generate handover note from tenant changes
+                if r.handover_tenant_changes and not r.handover_note:
+                    r.handover_note = self._format_tenant_changes(r.handover_tenant_changes)
+
+                # Generate WALE note - explain what caused the WALE change
+                if abs(r.months_to_expire_variance) > 0.001 and not r.wale_note:
+                    r.wale_note = self._generate_wale_note(r)
+
+                # Generate Gross Rent note - explain what caused the rent change
+                if abs(r.monthly_rate_variance) > 0.01 and not r.gross_rent_note:
+                    r.gross_rent_note = self._generate_gross_rent_note(r)
+
+            if callback:
+                callback(70, "Notes generated from tenant data")
 
         return results
 
@@ -589,7 +598,7 @@ class GLAAIAnalyzer:
         return get_notes_user_prompt(results)
 
     def _parse_notes_response(self, content: str) -> List[Dict[str, str]]:
-        """Parse AI response for project notes."""
+        """Parse AI response for project notes with robust error handling."""
         try:
             # Try to extract JSON from response
             if "```json" in content:
@@ -607,9 +616,46 @@ class GLAAIAnalyzer:
             if start >= 0 and end > start:
                 content = content[start:end]
 
+            # Try parsing as-is first
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                pass
+
+            # Try fixing common JSON issues
+            # 1. Fix unescaped quotes in strings
+            import re
+            # Replace newlines in strings with escaped version
+            content = re.sub(r'(?<!\\)\n', '\\n', content)
+
+            # 2. Try to parse line by line and extract valid objects
+            results = []
+            # Find all JSON objects in the content
+            obj_pattern = r'\{[^{}]*"project_name"[^{}]*\}'
+            matches = re.findall(obj_pattern, content, re.DOTALL)
+            for match in matches:
+                try:
+                    obj = json.loads(match)
+                    if obj.get("project_name"):
+                        results.append(obj)
+                except:
+                    pass
+
+            if results:
+                logger.info(f"Recovered {len(results)} notes from malformed JSON")
+                return results
+
+            # 3. Last resort: try to repair the JSON
+            content = content.replace('\n', ' ')
+            content = re.sub(r',\s*}', '}', content)  # Remove trailing commas
+            content = re.sub(r',\s*]', ']', content)  # Remove trailing commas in arrays
+
             return json.loads(content)
+
         except Exception as e:
             logger.warning(f"Failed to parse notes JSON: {e}")
+            # Log first 500 chars of content for debugging
+            logger.debug(f"Content preview: {content[:500] if content else 'empty'}")
             return []
 
     def detect_file_structure(self, file_path: str, sheet_name: str = None) -> Dict[str, Any]:
