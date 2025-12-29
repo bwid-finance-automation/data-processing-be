@@ -368,11 +368,19 @@ class GLAAIAnalyzer:
         return results
 
     def _format_tenant_changes(self, changes: List[TenantChange]) -> str:
-        """Format tenant changes into a readable note string."""
+        """
+        Format tenant changes into a readable note string.
+
+        Improvements based on stakeholder feedback:
+        1. Always include sqm values for ALL tenants
+        2. Use 'replaced' when one tenant replaces another (similar sqm)
+        3. List EACH tenant individually with sqm value
+        4. Always include 'sqm' unit
+        """
         if not changes:
             return ""
 
-        # Group changes by type for cleaner output
+        # Group changes by type
         new_tenants = []
         terminated = []
         expanded = []
@@ -383,9 +391,6 @@ class GLAAIAnalyzer:
             # Remove C0000xxxx prefix if present
             if tenant.startswith('C0000'):
                 tenant = tenant[10:].strip() if len(tenant) > 10 else tenant
-            # Truncate long names
-            if len(tenant) > 15:
-                tenant = tenant[:13] + ".."
 
             if change.change_type == "new":
                 new_tenants.append((tenant, change.variance))
@@ -397,31 +402,96 @@ class GLAAIAnalyzer:
                 reduced.append((tenant, change.variance))
 
         parts = []
+        used_terminated = set()
+        used_reduced = set()
+        replacement_count = 0
+        MAX_REPLACEMENTS = 3  # Limit to avoid overly long notes
 
-        # Format each group (limit to top 2 per group for brevity)
-        if expanded:
-            names = ", ".join([t[0] for t in expanded[:2]])
-            total = sum([t[1] for t in expanded])
-            parts.append(f"{names} expanded (+{total:,.0f})")
+        def is_similar_name(name1: str, name2: str) -> bool:
+            """Check if two names are similar (likely same company, different entity)."""
+            n1 = name1.upper().replace(" ", "").replace("VN", "").replace("VIETNAM", "")
+            n2 = name2.upper().replace(" ", "").replace("VN", "").replace("VIETNAM", "")
+            if n1 in n2 or n2 in n1:
+                return True
+            min_len = min(len(n1), len(n2))
+            if min_len >= 6 and n1[:6] == n2[:6]:
+                return True
+            return False
 
-        if new_tenants:
-            names = ", ".join([t[0] for t in new_tenants[:2]])
-            total = sum([t[1] for t in new_tenants])
-            if len(new_tenants) > 2:
-                names += f" +{len(new_tenants)-2} more"
-            parts.append(f"{names} new (+{total:,.0f})")
+        # Check for replacements: expanded tenant replacing terminated tenant
+        for exp_tenant, exp_sqm in expanded:
+            if replacement_count >= MAX_REPLACEMENTS:
+                parts.append(f"{exp_tenant} expanded (+{exp_sqm:,.0f} sqm)")
+                continue
 
-        if terminated:
-            names = ", ".join([t[0] for t in terminated[:2]])
-            total = sum([t[1] for t in terminated])  # This will be negative
-            if len(terminated) > 2:
-                names += f" +{len(terminated)-2} more"
-            parts.append(f"{names} terminated ({total:,.0f})")
+            matched = None
+            for i, (term_tenant, term_sqm) in enumerate(terminated):
+                if i in used_terminated:
+                    continue
+                if is_similar_name(exp_tenant, term_tenant):
+                    continue
+                if abs(exp_sqm + term_sqm) < max(abs(exp_sqm), abs(term_sqm)) * 0.05:
+                    matched = (i, term_tenant, term_sqm)
+                    break
 
-        if reduced:
-            names = ", ".join([t[0] for t in reduced[:2]])
-            total = sum([t[1] for t in reduced])  # This will be negative
-            parts.append(f"{names} reduced ({total:,.0f})")
+            if matched:
+                i, term_tenant, term_sqm = matched
+                used_terminated.add(i)
+                parts.append(f"{exp_tenant} replaced {term_tenant} ({abs(exp_sqm):,.0f} sqm)")
+                replacement_count += 1
+            else:
+                parts.append(f"{exp_tenant} expanded (+{exp_sqm:,.0f} sqm)")
+
+        # Check for replacements: new tenant replacing terminated tenant
+        for new_tenant, new_sqm in new_tenants:
+            if replacement_count >= MAX_REPLACEMENTS:
+                parts.append(f"{new_tenant} new (+{new_sqm:,.0f} sqm)")
+                continue
+
+            matched = None
+            for i, (term_tenant, term_sqm) in enumerate(terminated):
+                if i in used_terminated:
+                    continue
+                if is_similar_name(new_tenant, term_tenant):
+                    continue
+                if abs(new_sqm + term_sqm) < max(abs(new_sqm), abs(term_sqm)) * 0.05:
+                    matched = (i, term_tenant, term_sqm)
+                    break
+
+            if matched:
+                i, term_tenant, term_sqm = matched
+                used_terminated.add(i)
+                parts.append(f"{new_tenant} replaced {term_tenant} ({abs(new_sqm):,.0f} sqm)")
+                replacement_count += 1
+            else:
+                # Also check if new tenant replaces a reduced tenant
+                matched_reduced = None
+                for j, (red_tenant, red_sqm) in enumerate(reduced):
+                    if j in used_reduced:
+                        continue
+                    if is_similar_name(new_tenant, red_tenant):
+                        continue
+                    if abs(new_sqm + red_sqm) < max(abs(new_sqm), abs(red_sqm)) * 0.05:
+                        matched_reduced = (j, red_tenant, red_sqm)
+                        break
+
+                if matched_reduced and replacement_count < MAX_REPLACEMENTS:
+                    j, red_tenant, red_sqm = matched_reduced
+                    used_reduced.add(j)
+                    parts.append(f"{new_tenant} replaced {red_tenant} ({abs(new_sqm):,.0f} sqm)")
+                    replacement_count += 1
+                else:
+                    parts.append(f"{new_tenant} new (+{new_sqm:,.0f} sqm)")
+
+        # Add remaining terminated tenants
+        for i, (term_tenant, term_sqm) in enumerate(terminated):
+            if i not in used_terminated:
+                parts.append(f"{term_tenant} terminated ({term_sqm:,.0f} sqm)")
+
+        # Add remaining reduced tenants
+        for j, (red_tenant, red_sqm) in enumerate(reduced):
+            if j not in used_reduced:
+                parts.append(f"{red_tenant} reduced ({red_sqm:,.0f} sqm)")
 
         return "; ".join(parts)
 
