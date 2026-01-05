@@ -309,289 +309,53 @@ class GLAAIAnalyzer:
         if not projects_with_variance:
             return results
 
-        # Try AI-powered note generation first (preferred)
-        ai_notes_applied = False
-        if self.client:
-            try:
-                if callback:
-                    callback(30, f"Generating AI notes for {len(projects_with_variance)} projects...")
+        # AI-powered note generation (required)
+        if not self.client:
+            logger.error("No AI client available - API key required for note generation")
+            raise ValueError("AI API key is required for GLA note generation. Please configure OPENAI_API_KEY or ANTHROPIC_API_KEY.")
 
-                # Create a detailed prompt with tenant data
-                prompt = self._create_notes_prompt(projects_with_variance)
+        if callback:
+            callback(30, f"Generating AI notes for {len(projects_with_variance)} projects...")
 
-                if self.is_claude:
-                    response = self._call_claude(GLA_NOTES_SYSTEM_PROMPT, prompt)
-                else:
-                    response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
+        # Create a detailed prompt with tenant data
+        prompt = self._create_notes_prompt(projects_with_variance)
 
-                # Parse JSON response
-                notes = self._parse_notes_response(response.get("content", ""))
+        if self.is_claude:
+            response = self._call_claude(GLA_NOTES_SYSTEM_PROMPT, prompt)
+        else:
+            response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
 
-                # Apply AI-generated notes to results
-                notes_map = {(n.get("project_name", ""), n.get("product_type", "")): n for n in notes}
-                for r in results:
-                    key = (r.project_name, r.product_type)
-                    if key in notes_map:
-                        note = notes_map[key]
-                        if note.get("committed_note"):
-                            r.committed_note = note["committed_note"]
-                        if note.get("wale_note"):
-                            r.wale_note = note["wale_note"]
-                        if note.get("handover_note"):
-                            r.handover_note = note["handover_note"]
-                        if note.get("gross_rent_note"):
-                            r.gross_rent_note = note["gross_rent_note"]
+        # Parse JSON response
+        notes = self._parse_notes_response(response.get("content", ""))
 
-                ai_notes_applied = True
-                if callback:
-                    callback(70, "AI notes generated successfully")
+        if not notes:
+            logger.warning("AI returned empty notes, retrying...")
+            # Retry once if empty
+            if self.is_claude:
+                response = self._call_claude(GLA_NOTES_SYSTEM_PROMPT, prompt)
+            else:
+                response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
+            notes = self._parse_notes_response(response.get("content", ""))
 
-            except Exception as e:
-                logger.warning(f"AI note generation failed, falling back to basic notes: {e}")
+        # Apply AI-generated notes to results
+        notes_map = {(n.get("project_name", ""), n.get("product_type", "")): n for n in notes}
+        for r in results:
+            key = (r.project_name, r.product_type)
+            if key in notes_map:
+                note = notes_map[key]
+                if note.get("committed_note"):
+                    r.committed_note = note["committed_note"]
+                if note.get("wale_note"):
+                    r.wale_note = note["wale_note"]
+                if note.get("handover_note"):
+                    r.handover_note = note["handover_note"]
+                if note.get("gross_rent_note"):
+                    r.gross_rent_note = note["gross_rent_note"]
 
-        # Fallback: Generate notes from tenant data using Python logic
-        if not ai_notes_applied:
-            if callback:
-                callback(30, "Generating notes from tenant data...")
-
-            for r in projects_with_variance:
-                # Generate committed note from tenant changes
-                if r.committed_tenant_changes and not r.committed_note:
-                    r.committed_note = self._format_tenant_changes(r.committed_tenant_changes)
-
-                # Generate handover note from tenant changes
-                if r.handover_tenant_changes and not r.handover_note:
-                    r.handover_note = self._format_tenant_changes(r.handover_tenant_changes)
-
-                # Generate WALE note - explain what caused the WALE change
-                if abs(r.months_to_expire_variance) > 0.001 and not r.wale_note:
-                    r.wale_note = self._generate_wale_note(r)
-
-                # Generate Gross Rent note - explain what caused the rent change
-                if abs(r.monthly_rate_variance) > 0.01 and not r.gross_rent_note:
-                    r.gross_rent_note = self._generate_gross_rent_note(r)
-
-            if callback:
-                callback(70, "Notes generated from tenant data")
+        if callback:
+            callback(70, "AI notes generated successfully")
 
         return results
-
-    def _format_tenant_changes(self, changes: List[TenantChange]) -> str:
-        """
-        Format tenant changes into a readable note string.
-
-        Improvements based on stakeholder feedback:
-        1. Always include sqm values for ALL tenants
-        2. Use 'replaced' when one tenant replaces another (similar sqm)
-        3. List EACH tenant individually with sqm value
-        4. Always include 'sqm' unit
-        """
-        if not changes:
-            return ""
-
-        # Group changes by type
-        new_tenants = []
-        terminated = []
-        expanded = []
-        reduced = []
-
-        for change in changes:
-            tenant = change.tenant_name
-            # Remove C0000xxxx prefix if present
-            if tenant.startswith('C0000'):
-                tenant = tenant[10:].strip() if len(tenant) > 10 else tenant
-
-            if change.change_type == "new":
-                new_tenants.append((tenant, change.variance))
-            elif change.change_type == "terminated":
-                terminated.append((tenant, change.variance))
-            elif change.change_type == "expanded":
-                expanded.append((tenant, change.variance))
-            elif change.change_type == "reduced":
-                reduced.append((tenant, change.variance))
-
-        parts = []
-        used_terminated = set()
-        used_reduced = set()
-        replacement_count = 0
-        MAX_REPLACEMENTS = 3  # Limit to avoid overly long notes
-
-        def is_similar_name(name1: str, name2: str) -> bool:
-            """Check if two names are similar (likely same company, different entity)."""
-            n1 = name1.upper().replace(" ", "").replace("VN", "").replace("VIETNAM", "")
-            n2 = name2.upper().replace(" ", "").replace("VN", "").replace("VIETNAM", "")
-            if n1 in n2 or n2 in n1:
-                return True
-            min_len = min(len(n1), len(n2))
-            if min_len >= 6 and n1[:6] == n2[:6]:
-                return True
-            return False
-
-        # Check for replacements: expanded tenant replacing terminated tenant
-        for exp_tenant, exp_sqm in expanded:
-            if replacement_count >= MAX_REPLACEMENTS:
-                parts.append(f"{exp_tenant} expanded (+{exp_sqm:,.0f} sqm)")
-                continue
-
-            matched = None
-            for i, (term_tenant, term_sqm) in enumerate(terminated):
-                if i in used_terminated:
-                    continue
-                if is_similar_name(exp_tenant, term_tenant):
-                    continue
-                if abs(exp_sqm + term_sqm) < max(abs(exp_sqm), abs(term_sqm)) * 0.05:
-                    matched = (i, term_tenant, term_sqm)
-                    break
-
-            if matched:
-                i, term_tenant, term_sqm = matched
-                used_terminated.add(i)
-                parts.append(f"{exp_tenant} replaced {term_tenant} ({abs(exp_sqm):,.0f} sqm)")
-                replacement_count += 1
-            else:
-                parts.append(f"{exp_tenant} expanded (+{exp_sqm:,.0f} sqm)")
-
-        # Check for replacements: new tenant replacing terminated tenant
-        for new_tenant, new_sqm in new_tenants:
-            if replacement_count >= MAX_REPLACEMENTS:
-                parts.append(f"{new_tenant} new (+{new_sqm:,.0f} sqm)")
-                continue
-
-            matched = None
-            for i, (term_tenant, term_sqm) in enumerate(terminated):
-                if i in used_terminated:
-                    continue
-                if is_similar_name(new_tenant, term_tenant):
-                    continue
-                if abs(new_sqm + term_sqm) < max(abs(new_sqm), abs(term_sqm)) * 0.05:
-                    matched = (i, term_tenant, term_sqm)
-                    break
-
-            if matched:
-                i, term_tenant, term_sqm = matched
-                used_terminated.add(i)
-                parts.append(f"{new_tenant} replaced {term_tenant} ({abs(new_sqm):,.0f} sqm)")
-                replacement_count += 1
-            else:
-                # Also check if new tenant replaces a reduced tenant
-                matched_reduced = None
-                for j, (red_tenant, red_sqm) in enumerate(reduced):
-                    if j in used_reduced:
-                        continue
-                    if is_similar_name(new_tenant, red_tenant):
-                        continue
-                    if abs(new_sqm + red_sqm) < max(abs(new_sqm), abs(red_sqm)) * 0.05:
-                        matched_reduced = (j, red_tenant, red_sqm)
-                        break
-
-                if matched_reduced and replacement_count < MAX_REPLACEMENTS:
-                    j, red_tenant, red_sqm = matched_reduced
-                    used_reduced.add(j)
-                    parts.append(f"{new_tenant} replaced {red_tenant} ({abs(new_sqm):,.0f} sqm)")
-                    replacement_count += 1
-                else:
-                    parts.append(f"{new_tenant} new (+{new_sqm:,.0f} sqm)")
-
-        # Add remaining terminated tenants
-        for i, (term_tenant, term_sqm) in enumerate(terminated):
-            if i not in used_terminated:
-                parts.append(f"{term_tenant} terminated ({term_sqm:,.0f} sqm)")
-
-        # Add remaining reduced tenants
-        for j, (red_tenant, red_sqm) in enumerate(reduced):
-            if j not in used_reduced:
-                parts.append(f"{red_tenant} reduced ({red_sqm:,.0f} sqm)")
-
-        return "; ".join(parts)
-
-    def _generate_wale_note(self, r) -> str:
-        """
-        Generate a note explaining WALE (Weighted Average Lease Expiry) variance.
-
-        WALE changes are primarily caused by:
-        1. Time passing (all leases get 1 month closer to expiry each month)
-        2. New tenants with different lease terms
-        3. Tenants leaving (their lease terms no longer count)
-        4. Lease renewals/extensions
-        """
-        # Convert months to years for display
-        wale_var_years = r.months_to_expire_variance / 12
-
-        # Standard monthly decay is about -0.0833 years (-1 month / 12)
-        expected_decay = -1 / 12  # -0.0833 years
-
-        parts = []
-
-        # Check if WALE change is mostly due to time passing
-        if abs(wale_var_years - expected_decay) < 0.01:
-            parts.append("Monthly decay")
-        elif wale_var_years < expected_decay - 0.01:
-            # WALE decreased more than expected - shorter term tenants or terminations
-            if r.committed_tenant_changes:
-                # Look for terminated tenants (they may have had long leases)
-                terminated = [tc for tc in r.committed_tenant_changes if tc.change_type == "terminated"]
-                new_tenants = [tc for tc in r.committed_tenant_changes if tc.change_type == "new"]
-                if terminated:
-                    parts.append(f"Lease terminations")
-                if new_tenants:
-                    parts.append(f"New shorter-term leases")
-            if not parts:
-                parts.append("Shorter lease terms")
-        elif wale_var_years > expected_decay + 0.01:
-            # WALE increased or decreased less than expected - new long-term tenants or renewals
-            if r.committed_tenant_changes:
-                new_tenants = [tc for tc in r.committed_tenant_changes if tc.change_type == "new"]
-                if new_tenants:
-                    parts.append(f"New longer-term leases")
-            if not parts:
-                parts.append("Lease renewals/extensions")
-
-        return "; ".join(parts) if parts else ""
-
-    def _generate_gross_rent_note(self, r) -> str:
-        """
-        Generate a note explaining Gross Rent per sqm variance.
-
-        Gross rent changes are caused by:
-        1. New tenants at different rates
-        2. Tenants leaving (their rates no longer count)
-        3. Rate increases/decreases in existing contracts
-        4. Mix shift (more/less premium space leased)
-        """
-        if abs(r.monthly_rate_variance) < 0.01:
-            return ""
-
-        parts = []
-
-        # Check if there are tenant changes that explain the rent change
-        if r.handover_tenant_changes:
-            new_tenants = [tc for tc in r.handover_tenant_changes if tc.change_type == "new"]
-            terminated = [tc for tc in r.handover_tenant_changes if tc.change_type == "terminated"]
-
-            if r.monthly_rate_variance > 0:
-                # Rent increased
-                if new_tenants:
-                    parts.append("Higher rate new tenants")
-                elif terminated:
-                    parts.append("Lower rate tenants left")
-                else:
-                    parts.append("Rate adjustments")
-            else:
-                # Rent decreased
-                if new_tenants:
-                    parts.append("Lower rate new tenants")
-                elif terminated:
-                    parts.append("Higher rate tenants left")
-                else:
-                    parts.append("Rate adjustments")
-        else:
-            # No tenant changes - must be rate adjustments or mix shift
-            if r.monthly_rate_variance > 0:
-                parts.append("Rate increase")
-            else:
-                parts.append("Rate decrease")
-
-        return "; ".join(parts) if parts else ""
 
     def _create_notes_prompt(self, results: List[GLAVarianceResult]) -> str:
         """Create prompt for generating project notes with tenant details."""
