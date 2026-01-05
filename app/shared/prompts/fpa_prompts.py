@@ -50,36 +50,61 @@ Analyze raw tenant data to detect changes and generate concise notes.
 YOUR TASK:
 1. Compare PREVIOUS vs CURRENT tenant lists for each project
 2. Detect: new tenants, terminated tenants, expanded/reduced space, entity changes
-3. Generate concise notes for: committed_note, handover_note, wale_note, gross_rent_note
+3. Generate notes for: committed_note, handover_note, wale_note, gross_rent_note
 
-DETECTION RULES:
+=== DETECTION RULES ===
 - NEW: Tenant in current but not in previous (or previous=0)
 - TERMINATED: Tenant in previous but not in current (or current=0)
 - EXPANDED: Same tenant name, current > previous
 - REDUCED: Same tenant name, current < previous
-- ENTITY CHANGE: Similar company name with legal suffix change (e.g., "GA HEALTH" → "GA HEALTH VN") - use "replaced (entity change)"
-- ESCALATION: Same tenant, rate increased ~5% (common annual escalation)
+- ENTITY CHANGE: Similar company name with legal suffix (e.g., "GA HEALTH" → "GA HEALTH VN") - use "replaced (entity change)"
+- ESCALATION: Same tenant, rate increased ~3-10% (annual escalation)
+- RENEWAL: Same tenant stays but contract renewed (check dates)
 
 IMPORTANT - "REPLACED" RULES:
 - ONLY use "replaced" for ENTITY CHANGES (same company, different legal name)
 - DO NOT use "replaced" just because sqm values are similar
 
-FORMATTING FOR committed_note AND handover_note:
-- Include sqm for tenants (e.g., "+6,102 sqm" or "-1,921 sqm")
-- Examples: "KUKAHOME expanded (+21,280 sqm); DASEN terminated (-20,226 sqm)"
+=== 1. HANDOVER GLA NOTE (handover_note) ===
+Explain why Handover GLA increased/decreased/stayed flat.
+- If GLA changes: Identify tenants causing the change with sqm
+- If GLA stable: Check for renewals or replacement tenants
+Format: "GLA increased by X sqm due to TENANT handover" or "GLA stable, TENANT renewed"
+Examples:
+- "KUKAHOME expanded (+21,280 sqm); DASEN terminated (-20,226 sqm)"
+- "No change" or "GLA stable, tenant renewed"
 
-FORMATTING FOR gross_rent_note (IMPORTANT - use this specific format):
-- For escalations: "+5% esc TENANT1, TENANT2" (list tenants with ~5% rate increase)
-- For new handovers: "Handover: TENANT (XXXk VND)" (show rate in thousands VND)
-- For terminations: "Terminate: TENANT (XXXk VND)" (show rate in thousands VND)
-- Combine multiple: "+5% esc TENANT1; Handover: TENANT2 (110k VND); Terminate: TENANT3 (105k VND)"
-- If no rent variance: leave empty or "No change"
+=== 2. GROSS RENT NOTE (gross_rent_note) ===
+IMPORTANT: Follow Handover GLA logic first, then check escalations.
+Case 1 - If Handover GLA changes: Explain rent change from handover/termination
+Case 2 - If Handover GLA stable: Check for annual escalation (~3-10% rate increase)
 
-GROSS RENT EXAMPLES:
+Format:
+- Escalations: "+X% esc TENANT1, TENANT2"
+- Handovers: "Handover: TENANT (XXXk VND)"
+- Terminations: "Terminate: TENANT (XXXk VND)"
+Examples:
 - "+5% esc KANEPACKAGE, VALSPAR"
 - "Handover: Aerotech (110.7k VND), Drinda (104.4k VND)"
-- "Terminate: Ceva (164.8k VND)"
-- "+5% esc Qing Yi; Handover: Aerotech (110.7k VND), Drinda (104.4k VND)"
+- "+5% esc Qing Yi; Handover: Aerotech (110.7k VND)"
+
+=== 3. COMMITTED GLA NOTE (committed_note) ===
+Same approach as Handover GLA - explain sqm movement.
+- Identify tenants causing the change
+- Check for renewals/replacements if no change
+Examples:
+- "J&T expanded (+14,691 sqm); Anh Khoi terminated (-14,690 sqm)"
+- "TIANYUE VN replaced TIANYUE (entity change, 2,602 sqm)"
+
+=== 4. WALE NOTE (wale_note) ===
+IMPORTANT: Follow Committed GLA logic.
+- WALE normally decreases monthly (time passing)
+- If WALE stable/increases: Check for renewals or new contracts extending lease expiry
+Format: "WALE [increased/decreased/stable] due to [reason]"
+Examples:
+- "WALE decreased (-0.5 months) due to time decay"
+- "WALE increased due to TENANT renewal extending lease by X months"
+- "WALE stable, new contracts offset monthly decline"
 
 Return JSON array:
 [{"project_name": "X", "product_type": "RBF", "committed_note": "...", "handover_note": "...", "wale_note": "...", "gross_rent_note": "..."}]
