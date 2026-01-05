@@ -34,6 +34,32 @@ def _safe_float(value, default=0.0) -> float:
     except (ValueError, TypeError):
         return default
 
+
+def _is_valid_transaction(tx) -> bool:
+    """
+    Check if a transaction is valid (has meaningful data).
+
+    A transaction is considered invalid if:
+    - No transaction_id (SỐ CT) AND no debit AND no credit AND no date
+    - All key fields are empty/zero
+
+    Returns:
+        True if transaction is valid, False otherwise
+    """
+    has_tx_id = tx.transaction_id and str(tx.transaction_id).strip()
+    has_debit = tx.debit is not None and tx.debit != 0
+    has_credit = tx.credit is not None and tx.credit != 0
+    has_date = tx.date is not None
+
+    # Transaction must have at least transaction_id OR (debit/credit AND date)
+    if has_tx_id:
+        return True
+    if (has_debit or has_credit) and has_date:
+        return True
+
+    return False
+
+
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
@@ -607,6 +633,9 @@ class ParseBankStatementsUseCase:
             if all_transactions:
                 tx_data = []
                 for tx in all_transactions:
+                    # Skip invalid transactions (no TX ID, no amounts, no date)
+                    if not _is_valid_transaction(tx):
+                        continue
                     tx_data.append({
                         "Bank Name": tx.bank_name,
                         "Acc No": tx.acc_no,
@@ -648,8 +677,22 @@ class ParseBankStatementsUseCase:
 
             # ========== Sheet 2: Balances ==========
             if all_balances:
+                # Build set of account keys that have VALID transactions
+                tx_account_keys = set()
+                for tx in all_transactions:
+                    if _is_valid_transaction(tx):
+                        tx_account_keys.add(f"{tx.bank_name}_{tx.acc_no}")
+
                 bal_data = []
                 for bal in all_balances:
+                    key = f"{bal.bank_name}_{bal.acc_no}"
+
+                    # Skip accounts with no valid transactions
+                    # If OCR shows no transactions for an account, don't include it in balance export
+                    has_transactions = key in tx_account_keys
+                    if not has_transactions:
+                        continue
+
                     bal_data.append({
                         "Bank Name": bal.bank_name,
                         "Acc No": bal.acc_no,
@@ -705,6 +748,9 @@ class ParseBankStatementsUseCase:
             })
 
             for tx in all_transactions:
+                # Skip invalid transactions
+                if not _is_valid_transaction(tx):
+                    continue
                 key = f"{tx.bank_name}_{tx.acc_no}"
                 by_account[key]["transactions"] += 1
                 by_account[key]["total_debit"] += tx.debit or 0.0
@@ -777,12 +823,16 @@ class ParseBankStatementsUseCase:
         now = datetime.now()
         date_suffix = now.strftime("%m%d%y")  # MMDDYY format
 
-        # Aggregate transactions by bank_name + acc_no
-        tx_aggregates = defaultdict(lambda: {"total_debit": 0, "total_credit": 0, "max_date": None})
+        # Aggregate VALID transactions by bank_name + acc_no
+        tx_aggregates = defaultdict(lambda: {"total_debit": 0.0, "total_credit": 0.0, "max_date": None, "count": 0})
         for tx in all_transactions:
+            # Skip invalid transactions
+            if not _is_valid_transaction(tx):
+                continue
             key = f"{tx.bank_name}_{tx.acc_no}"
-            tx_aggregates[key]["total_debit"] += _safe_int(tx.debit)
-            tx_aggregates[key]["total_credit"] += _safe_int(tx.credit)
+            tx_aggregates[key]["total_debit"] += _safe_float(tx.debit)
+            tx_aggregates[key]["total_credit"] += _safe_float(tx.credit)
+            tx_aggregates[key]["count"] += 1
             if tx.date:
                 if tx_aggregates[key]["max_date"] is None or tx.date > tx_aggregates[key]["max_date"]:
                     tx_aggregates[key]["max_date"] = tx.date
@@ -792,8 +842,16 @@ class ParseBankStatementsUseCase:
 
         seq = 0
         for bal in all_balances:
-            seq += 1
             key = f"{bal.bank_name}_{bal.acc_no}"
+
+            # Skip accounts with no valid transactions
+            # If OCR shows no transactions for an account, don't include it in balance export
+            agg_check = tx_aggregates.get(key, {"count": 0})
+            has_transactions = agg_check.get("count", 0) > 0
+            if not has_transactions:
+                continue
+
+            seq += 1
 
             # External ID format: External ID{MMDDYY}_{SEQ:04d}
             external_id = f"External ID{date_suffix}_{seq:04d}"
@@ -895,6 +953,10 @@ class ParseBankStatementsUseCase:
 
         seq = 0
         for tx in all_transactions:
+            # Skip invalid transactions
+            if not _is_valid_transaction(tx):
+                continue
+
             seq += 1
 
             # External ID format: External Idline_{MMDDYY}_{SEQ:04d}
@@ -990,18 +1052,21 @@ class ParseBankStatementsUseCase:
             now = datetime.now()
             date_suffix = now.strftime("%m%d%y")  # MMDDYY format
 
-            # ========== Aggregate transactions by bank_name + acc_no ==========
+            # ========== Aggregate VALID transactions by bank_name + acc_no ==========
             tx_aggregates = defaultdict(lambda: {
-                "total_debit": 0,
-                "total_credit": 0,
+                "total_debit": 0.0,
+                "total_credit": 0.0,
                 "max_date": None,
                 "transactions": []
             })
 
             for tx in all_transactions:
+                # Skip invalid transactions
+                if not _is_valid_transaction(tx):
+                    continue
                 key = f"{tx.bank_name}_{tx.acc_no}"
-                tx_aggregates[key]["total_debit"] += _safe_int(tx.debit)
-                tx_aggregates[key]["total_credit"] += _safe_int(tx.credit)
+                tx_aggregates[key]["total_debit"] += _safe_float(tx.debit)
+                tx_aggregates[key]["total_credit"] += _safe_float(tx.credit)
                 tx_aggregates[key]["transactions"].append(tx)
                 if tx.date:
                     if tx_aggregates[key]["max_date"] is None or tx.date > tx_aggregates[key]["max_date"]:
@@ -1015,8 +1080,16 @@ class ParseBankStatementsUseCase:
             seq = 0
 
             for bal in all_balances:
-                seq += 1
                 key = f"{bal.bank_name}_{bal.acc_no}"
+
+                # Skip accounts with no valid transactions
+                # If OCR shows no transactions for an account, don't include it in balance export
+                agg_check = tx_aggregates.get(key, {"transactions": []})
+                has_transactions = len(agg_check.get("transactions", [])) > 0
+                if not has_transactions:
+                    continue
+
+                seq += 1
 
                 # External ID format: External ID{MMDDYY}_{SEQ:04d}
                 external_id = f"External ID{date_suffix}_{seq:04d}"
@@ -1088,6 +1161,10 @@ class ParseBankStatementsUseCase:
             seq = 0
 
             for tx in all_transactions:
+                # Skip invalid transactions
+                if not _is_valid_transaction(tx):
+                    continue
+
                 seq += 1
 
                 # External ID format: External Idline_{MMDDYY}_{SEQ:04d}
@@ -1269,17 +1346,22 @@ class ParseBankStatementsUseCase:
             now = datetime.now()
             date_suffix = now.strftime("%m%d%y")  # MMDDYY format
 
-            # ========== Aggregate transactions by bank_name + acc_no ==========
+            # ========== Aggregate VALID transactions by bank_name + acc_no ==========
             tx_aggregates = defaultdict(lambda: {
-                "total_debit": 0,
-                "total_credit": 0,
+                "total_debit": 0.0,
+                "total_credit": 0.0,
                 "max_date": None,
+                "count": 0
             })
 
             for tx in all_transactions:
+                # Skip invalid transactions
+                if not _is_valid_transaction(tx):
+                    continue
                 key = f"{tx.bank_name}_{tx.acc_no}"
-                tx_aggregates[key]["total_debit"] += _safe_int(tx.debit)
-                tx_aggregates[key]["total_credit"] += _safe_int(tx.credit)
+                tx_aggregates[key]["total_debit"] += _safe_float(tx.debit)
+                tx_aggregates[key]["total_credit"] += _safe_float(tx.credit)
+                tx_aggregates[key]["count"] += 1
                 if tx.date:
                     if tx_aggregates[key]["max_date"] is None or tx.date > tx_aggregates[key]["max_date"]:
                         tx_aggregates[key]["max_date"] = tx.date
@@ -1292,8 +1374,16 @@ class ParseBankStatementsUseCase:
             seq = 0
 
             for bal in all_balances:
-                seq += 1
                 key = f"{bal.bank_name}_{bal.acc_no}"
+
+                # Skip accounts with no valid transactions
+                # If OCR shows no transactions for an account, don't include it in balance export
+                agg_check = tx_aggregates.get(key, {"count": 0})
+                has_transactions = agg_check.get("count", 0) > 0
+                if not has_transactions:
+                    continue
+
+                seq += 1
 
                 # External ID format: External ID{MMDDYY}_{SEQ:04d}
                 external_id = f"External ID{date_suffix}_{seq:04d}"
@@ -1369,6 +1459,10 @@ class ParseBankStatementsUseCase:
             seq = 0
 
             for tx in all_transactions:
+                # Skip invalid transactions
+                if not _is_valid_transaction(tx):
+                    continue
+
                 seq += 1
 
                 # External ID format: External Idline_{MMDDYY}_{SEQ:04d}

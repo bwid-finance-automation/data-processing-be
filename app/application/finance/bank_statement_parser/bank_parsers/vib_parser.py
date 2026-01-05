@@ -463,16 +463,37 @@ class VIBParser(BaseBankParser):
 
                     if simple_tx and complex_tx:
                         # Both formats found this TX - pick the better one
-                        # If simple format's debit or credit matches opening balance, it's likely wrong
-                        simple_has_opening = (
-                            section_opening and section_opening > 0 and
-                            (simple_tx.debit == section_opening or simple_tx.credit == section_opening)
+                        # If simple format's debit or credit matches opening/closing balance, it's likely wrong
+                        section_closing = self._extract_section_balance(section, ["số dư cuối", "ending balance"])
+
+                        simple_has_balance = (
+                            (section_opening and section_opening > 0 and
+                             (simple_tx.debit == section_opening or simple_tx.credit == section_opening)) or
+                            (section_closing and section_closing > 0 and
+                             (simple_tx.debit == section_closing or simple_tx.credit == section_closing))
                         )
 
-                        if simple_has_opening:
-                            # Simple format picked up opening balance - use complex format
+                        # Check if simple format has suspiciously large values compared to complex
+                        # Typical TX: one side is 0/None, the other is the amount
+                        # If simple has huge values (> 100x complex) and different pattern, likely wrong
+                        complex_max = max(complex_tx.debit or 0, complex_tx.credit or 0)
+                        simple_max = max(simple_tx.debit or 0, simple_tx.credit or 0)
+
+                        # Complex has typical pattern: one side is zero/None
+                        complex_has_zero = (complex_tx.debit is None or complex_tx.debit == 0 or
+                                            complex_tx.credit is None or complex_tx.credit == 0)
+                        # Simple has both sides with values (no zero/None)
+                        simple_both_valued = ((simple_tx.debit is not None and simple_tx.debit > 0) and
+                                              (simple_tx.credit is not None and simple_tx.credit > 0))
+
+                        simple_suspicious = (
+                            complex_max > 0 and simple_max > complex_max * 100 and complex_has_zero
+                        )
+
+                        if simple_has_balance or simple_suspicious:
+                            # Simple format picked up balance or has suspicious values - use complex format
                             txs.append(complex_tx)
-                            logger.info(f"VIB: TX {tx_id} - using complex format (simple has opening balance {section_opening})")
+                            logger.info(f"VIB: TX {tx_id} - using complex format (simple has balance or suspicious values)")
                         else:
                             # Simple format looks correct
                             txs.append(simple_tx)
@@ -777,14 +798,14 @@ class VIBParser(BaseBankParser):
             # Get description for this transaction (if available)
             description = descriptions[tx_idx] if tx_idx < len(descriptions) else ""
 
-            # ACCOUNTING PERSPECTIVE (General Ledger for Bank Account - Asset):
-            # - Phát sinh có (Deposit) = tiền VÀO = DEBIT (Nợ - tăng tài sản)
-            # - Phát sinh nợ (Withdrawal) = tiền RA = CREDIT (Có - giảm tài sản)
+            # CUSTOMER PERSPECTIVE (Bank Statement):
+            # - Phát sinh nợ (Withdrawal) = tiền RA = DEBIT (giảm số dư)
+            # - Phát sinh có (Deposit) = tiền VÀO = CREDIT (tăng số dư)
             tx = BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=deposit if deposit > 0 else None,      # Deposit → Debit (tiền vào)
-                credit=withdrawal if withdrawal > 0 else None,  # Withdrawal → Credit (tiền ra)
+                debit=withdrawal if withdrawal > 0 else None,   # Withdrawal → Debit (tiền ra)
+                credit=deposit if deposit > 0 else None,        # Deposit → Credit (tiền vào)
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -794,7 +815,7 @@ class VIBParser(BaseBankParser):
                 beneficiary_acc_name=""
             )
             transactions.append(tx)
-            logger.info(f"VIB complex: TX {tx_id} - debit(deposit)={deposit}, credit(withdrawal)={withdrawal}, desc={description[:30] if description else ''}")
+            logger.info(f"VIB complex: TX {tx_id} - debit(withdrawal)={withdrawal}, credit(deposit)={deposit}, desc={description[:30] if description else ''}")
 
         return transactions
 
@@ -872,14 +893,14 @@ class VIBParser(BaseBankParser):
             deposit = amounts[1]     # Phát sinh có (tiền vào)
             tx_date = self._parse_date_from_text(date_str)
 
-            # ACCOUNTING PERSPECTIVE (General Ledger for Bank Account - Asset):
-            # - Phát sinh có (Deposit) = tiền VÀO = DEBIT (Nợ - tăng tài sản)
-            # - Phát sinh nợ (Withdrawal) = tiền RA = CREDIT (Có - giảm tài sản)
+            # CUSTOMER PERSPECTIVE (Bank Statement):
+            # - Phát sinh nợ (Withdrawal) = tiền RA = DEBIT (giảm số dư)
+            # - Phát sinh có (Deposit) = tiền VÀO = CREDIT (tăng số dư)
             tx = BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=deposit if deposit > 0 else None,      # Deposit → Debit (tiền vào)
-                credit=withdrawal if withdrawal > 0 else None,  # Withdrawal → Credit (tiền ra)
+                debit=withdrawal if withdrawal > 0 else None,   # Withdrawal → Debit (tiền ra)
+                credit=deposit if deposit > 0 else None,        # Deposit → Credit (tiền vào)
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -981,7 +1002,7 @@ class VIBParser(BaseBankParser):
                 continue
             if any(skip in next_line.lower() for skip in [
                 'withdrawal', 'deposit', 'balance', 'phát sinh nợ', 'phát sinh có',
-                'remarks', 'nội dung', 'seq.', 'số ct', 'số dư'
+                'remarks', 'nội dung', 'seq.', 'số ct', 'số dư', 'số tk', 'a/c no', 'type/ccy'
             ]):
                 prev_was_date = False
                 continue
@@ -996,7 +1017,7 @@ class VIBParser(BaseBankParser):
                 prev_was_date = False
                 continue
 
-            # Extract amount
+            # Extract amount - try single first, then multiple
             val = self._extract_single_amount(next_line, currency)
             if val is not None:
                 # Detect opening balance pattern (only for first TX in group):
@@ -1019,6 +1040,17 @@ class VIBParser(BaseBankParser):
                 elif len(all_amounts) >= amounts_to_skip + 3:
                     break
             else:
+                # Try extracting multiple amounts from single line (e.g., "0 33,000,000,000")
+                multi_vals = self._extract_multiple_amounts(next_line, currency)
+                if multi_vals:
+                    all_amounts.extend(multi_vals)
+                    logger.debug(f"VIB: Extracted multiple amounts from line: {multi_vals}")
+                    # Check if we have enough amounts
+                    if total_txs_in_group <= 1:
+                        if len(all_amounts) >= 3:
+                            break
+                    elif len(all_amounts) >= amounts_to_skip + 3:
+                        break
                 prev_was_date = False
 
         # Extract our TX's amounts from the collected amounts
@@ -1098,6 +1130,37 @@ class VIBParser(BaseBankParser):
                     return None
                 return self._parse_number_from_text(num_str)
         return None
+
+    def _extract_multiple_amounts(self, line: str, currency: str) -> List[float]:
+        """Extract multiple amounts from a single line (e.g., '0 33,000,000,000')."""
+        amounts = []
+
+        # Skip lines that contain date patterns (dd/mm/yyyy) - years can be misinterpreted as amounts
+        if re.search(r'\d{1,2}/\d{1,2}/\d{4}', line):
+            return amounts
+
+        if currency == "USD":
+            # USD: find all decimal numbers
+            matches = re.findall(r'(\d+\.\d{2})', line)
+            for m in matches:
+                amounts.append(float(m))
+        else:
+            # VND: find all comma-separated numbers or plain numbers
+            # Pattern: standalone 0 OR comma-separated numbers
+            matches = re.findall(r'\b(0|[\d,]{4,})\b', line)
+            for m in matches:
+                clean = m.replace(',', '')
+                # Skip reference numbers (11+ digits WITHOUT commas)
+                # Numbers with commas are monetary amounts, not reference numbers
+                if len(clean) >= 11 and ',' not in m:
+                    continue
+                # Skip years (2020-2030) - these appear in date strings
+                if re.match(r'^20[2-3]\d$', clean):
+                    continue
+                val = self._parse_number_from_text(m)
+                if val is not None:
+                    amounts.append(val)
+        return amounts
 
     def _extract_description_after_tx(self, lines: List[str], tx_line_idx: int) -> str:
         """Extract description from balance+description line after TX."""
@@ -1570,11 +1633,11 @@ class VIBParser(BaseBankParser):
                 if opening is None or opening == 0:
                     opening = self._extract_balance_fallback_section(section, ["số dư đầu", "opening balance"], currency)
 
-                # For closing balance - use full text search as primary (more reliable)
-                # Section-based extraction can pick up wrong values (e.g., transaction amounts)
-                closing = self._find_balance_near_account(text, acc_no, currency, ["số dư cuối", "ending balance"], is_opening=False)
+                # For closing balance - try section first (more reliable for VIB format)
+                # _find_balance_near_account may pick up transaction balances instead of closing
+                closing = self._extract_section_balance(section, ["số dư cuối", "ending balance"])
                 if closing is None or closing == 0:
-                    closing = self._extract_section_balance(section, ["số dư cuối", "ending balance"])
+                    closing = self._find_balance_near_account(text, acc_no, currency, ["số dư cuối", "ending balance"], is_opening=False)
                 if closing is None or closing == 0:
                     closing = self._extract_balance_fallback_section(section, ["số dư cuối", "ending balance"], currency)
 
@@ -1629,7 +1692,11 @@ class VIBParser(BaseBankParser):
                         return val
 
             # For VND - look for comma-separated numbers with proper format
+            # For closing balance, we want the LAST valid candidate (actual balance comes after totals)
+            is_closing = any(marker in label_lower for marker in ['cuoi', 'cuối', 'ending'])
+
             vnd_matches = re.findall(r'\b(\d{1,3}(?:,\d{3})+)\b', window)
+            vnd_candidates = []
             for num_str in vnd_matches:
                 # Skip transaction IDs (exactly 10 digits)
                 digits = num_str.replace(',', '')
@@ -1637,8 +1704,15 @@ class VIBParser(BaseBankParser):
                     continue
                 val = self._parse_number_from_text(num_str)
                 if val is not None and val >= 1000:
-                    logger.info(f"VIB fallback (VND): found {val} for '{label}'")
-                    return val
+                    vnd_candidates.append(val)
+
+            if vnd_candidates:
+                if is_closing:
+                    val = vnd_candidates[-1]  # Last candidate for closing balance
+                else:
+                    val = vnd_candidates[0]   # First candidate for opening balance
+                logger.info(f"VIB fallback (VND): found {val} for '{label}' from candidates {vnd_candidates}")
+                return val
 
         return None
 
@@ -1901,17 +1975,33 @@ class VIBParser(BaseBankParser):
                         logger.info(f"VIB section balance (USD): found {val} for '{label}' on line: {line[:80]}")
                         return val
 
-                    # Also check next few lines for USD value
-                    for j in range(i + 1, min(i + 6, len(lines))):
+                    # Also check next lines for USD value - need to search further for some OCR formats
+                    # where closing balance appears after summary headers
+                    usd_candidates = []
+                    for j in range(i + 1, min(i + 25, len(lines))):
                         next_line = lines[j].strip()
                         # Skip empty lines and labels
-                        if not next_line or any(skip in next_line.lower() for skip in ['opening', 'balance', 'seq']):
+                        if not next_line or any(skip in next_line.lower() for skip in ['opening', 'seq']):
                             continue
-                        usd_match = re.search(r'(\d+\.\d{2})', next_line)
+                        # Stop at next VIB section
+                        if next_line == 'VIB' or next_line.startswith('SO TK'):
+                            break
+                        usd_match = re.search(r'^(\d+\.\d{2})$', next_line)
                         if usd_match:
                             val = float(usd_match.group(1))
-                            logger.info(f"VIB section balance (USD next line): found {val} for '{label}'")
-                            return val
+                            usd_candidates.append(val)
+
+                    # For closing balance, if we have multiple candidates, take the LAST one
+                    # (closest to the end of the section)
+                    if usd_candidates:
+                        # Check for closing balance labels (both with and without Vietnamese diacritics)
+                        is_closing = any(marker in label.lower() for marker in ['cuoi', 'cuối', 'ending'])
+                        if is_closing:
+                            val = usd_candidates[-1]  # Last value for closing
+                        else:
+                            val = usd_candidates[0]   # First value for opening
+                        logger.info(f"VIB section balance (USD next line): found {val} for '{label}' from candidates {usd_candidates}")
+                        return val
 
                 # For VND - look for comma-separated numbers at end of line
                 # Pattern: number with at least one comma, representing >= 1,000
