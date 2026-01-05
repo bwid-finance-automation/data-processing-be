@@ -182,7 +182,13 @@ class GLAVarianceCalculator:
 
             result.calculate_variances()
 
-            # Calculate tenant-level changes using the correct GLA columns
+            # Store raw tenant data for AI analysis
+            result.committed_tenants_previous = cp.tenants if cp else []
+            result.committed_tenants_current = cc.tenants if cc else []
+            result.handover_tenants_previous = hp.tenants if hp else []
+            result.handover_tenants_current = hc.tenants if hc else []
+
+            # Calculate tenant-level changes using the correct GLA columns (legacy)
             # Handover changes use handover_gla (from Handover GLA column)
             # Committed changes use committed_gla (from Commited GLA column)
             result.handover_tenant_changes = self._calculate_tenant_changes(hp, hc, gla_type="handover_gla")

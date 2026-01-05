@@ -44,23 +44,70 @@ When analyzing, consider:
 - Individual project performance"""
 
 
-GLA_NOTES_SYSTEM_PROMPT = """You are a real estate analyst for BW Industrial in Vietnam.
-Generate concise notes explaining GLA variances based on tenant data.
+GLA_NOTES_SYSTEM_PROMPT = """You are a senior real estate analyst for BW Industrial in Vietnam.
+Analyze raw tenant data to detect changes and generate concise notes.
 
-RULES:
-1. Include sqm for EVERY tenant (e.g., "+6,102 sqm")
-2. Use "replaced" when one tenant takes another's space with similar sqm
-3. List top 3-5 tenants only (most significant by sqm)
-4. Keep each note under 150 characters
-5. Use semicolons to separate tenants
+YOUR TASK:
+1. Compare PREVIOUS vs CURRENT tenant lists for each project
+2. Detect: new tenants, terminated tenants, expanded/reduced space, entity changes
+3. Generate notes for: committed_note, handover_note, wale_note, gross_rent_note
 
-EXAMPLES:
-- "J&T replaced Anh Khoi (14,690 sqm)"
-- "DRINDA new (+6,102 sqm); AERO-TECH new (+1,752 sqm); HENGXIN terminated (-1,921 sqm)"
-- "No change" (when variance is zero or negligible)
+=== DETECTION RULES ===
+- NEW: Tenant in current but not in previous (or previous=0)
+- TERMINATED: Tenant in previous but not in current (or current=0)
+- EXPANDED: Same tenant name, current > previous
+- REDUCED: Same tenant name, current < previous
+- ENTITY CHANGE: Similar company name with legal suffix (e.g., "GA HEALTH" → "GA HEALTH VN") - use "replaced (entity change)"
+- ESCALATION: Same tenant, rate increased ~3-10% (annual escalation)
+- RENEWAL: Same tenant stays but contract renewed (check dates)
+
+IMPORTANT - "REPLACED" RULES:
+- ONLY use "replaced" for ENTITY CHANGES (same company, different legal name)
+- DO NOT use "replaced" just because sqm values are similar
+
+=== 1. HANDOVER GLA NOTE (handover_note) ===
+Explain why Handover GLA increased/decreased/stayed flat.
+- If GLA changes: Identify tenants causing the change with sqm
+- If GLA stable: Check for renewals or replacement tenants
+Format: "GLA increased by X sqm due to TENANT handover" or "GLA stable, TENANT renewed"
+Examples:
+- "KUKAHOME expanded (+21,280 sqm); DASEN terminated (-20,226 sqm)"
+- "No change" or "GLA stable, tenant renewed"
+
+=== 2. GROSS RENT NOTE (gross_rent_note) ===
+IMPORTANT: Follow Handover GLA logic first, then check escalations.
+Case 1 - If Handover GLA changes: Explain rent change from handover/termination
+Case 2 - If Handover GLA stable: Check for annual escalation (~3-10% rate increase)
+
+Format:
+- Escalations: "+X% esc TENANT1, TENANT2"
+- Handovers: "Handover: TENANT (XXXk VND)"
+- Terminations: "Terminate: TENANT (XXXk VND)"
+Examples:
+- "+5% esc KANEPACKAGE, VALSPAR"
+- "Handover: Aerotech (110.7k VND), Drinda (104.4k VND)"
+- "+5% esc Qing Yi; Handover: Aerotech (110.7k VND)"
+
+=== 3. COMMITTED GLA NOTE (committed_note) ===
+Same approach as Handover GLA - explain sqm movement.
+- Identify tenants causing the change
+- Check for renewals/replacements if no change
+Examples:
+- "J&T expanded (+14,691 sqm); Anh Khoi terminated (-14,690 sqm)"
+- "TIANYUE VN replaced TIANYUE (entity change, 2,602 sqm)"
+
+=== 4. WALE NOTE (wale_note) ===
+IMPORTANT: Follow Committed GLA logic.
+- WALE normally decreases monthly (time passing)
+- If WALE stable/increases: Check for renewals or new contracts extending lease expiry
+Format: "WALE [increased/decreased/stable] due to [reason]"
+Examples:
+- "WALE decreased (-0.5 months) due to time decay"
+- "WALE increased due to TENANT renewal extending lease by X months"
+- "WALE stable, new contracts offset monthly decline"
 
 Return JSON array:
-[{"project_name": "X", "product_type": "RBF", "committed_note": "...", "wale_note": "...", "handover_note": "...", "gross_rent_note": "..."}]
+[{"project_name": "X", "product_type": "RBF", "committed_note": "...", "handover_note": "...", "wale_note": "...", "gross_rent_note": "..."}]
 
 IMPORTANT: Keep response compact. Only include projects with actual changes."""
 
@@ -189,48 +236,123 @@ Be specific and quantitative where possible."""
 
 def get_notes_user_prompt(results: List) -> str:
     """
-    Create prompt for generating project notes with tenant details.
+    Create prompt for generating project notes with RAW tenant data.
+
+    AI will:
+    1. Compare previous vs current tenant lists
+    2. Detect changes (new, terminated, expanded, reduced, replaced)
+    3. Generate concise notes
 
     Args:
-        results: List of GLAVarianceResult objects
+        results: List of GLAVarianceResult objects with raw tenant data
 
     Returns:
         User prompt string for notes generation
     """
-    lines = ["Generate concise notes for these projects. Include sqm for each tenant.", ""]
+    lines = ["Analyze these projects. Compare PREVIOUS vs CURRENT tenants to detect changes.", ""]
 
     for r in results:
-        # Skip projects with no significant changes
+        # Skip projects with no variance
         has_changes = (
             abs(r.committed_variance) > 100 or
             abs(r.handover_variance) > 100 or
-            r.committed_tenant_changes or
-            r.handover_tenant_changes
+            r.committed_tenants_previous or
+            r.committed_tenants_current or
+            r.handover_tenants_previous or
+            r.handover_tenants_current
         )
         if not has_changes:
             continue
 
-        lines.append(f"[{r.project_name}] ({r.product_type})")
+        lines.append(f"=== {r.project_name} ({r.product_type}) ===")
 
-        # Committed changes - only show top 5 tenants by absolute variance
-        if r.committed_tenant_changes:
-            sorted_changes = sorted(r.committed_tenant_changes, key=lambda x: abs(x.variance), reverse=True)[:5]
-            tenant_strs = []
-            for tc in sorted_changes:
-                tenant_strs.append(f"{tc.tenant_name}:{tc.change_type}({tc.variance:+,.0f})")
-            lines.append(f"  Committed({r.committed_variance:+,.0f}): {'; '.join(tenant_strs)}")
+        # Committed GLA section
+        if abs(r.committed_variance) > 0 or r.committed_tenants_previous or r.committed_tenants_current:
+            lines.append(f"COMMITTED GLA: {r.committed_previous:,.0f} → {r.committed_current:,.0f} (Var: {r.committed_variance:+,.0f})")
 
-        # Handover changes - only show top 5 tenants
-        if r.handover_tenant_changes:
-            sorted_changes = sorted(r.handover_tenant_changes, key=lambda x: abs(x.variance), reverse=True)[:5]
-            tenant_strs = []
-            for tc in sorted_changes:
-                tenant_strs.append(f"{tc.tenant_name}:{tc.change_type}({tc.variance:+,.0f})")
-            lines.append(f"  Handover({r.handover_variance:+,.0f}): {'; '.join(tenant_strs)}")
+            # Build tenant dict for comparison
+            prev_dict = {t.tenant_name: t.committed_gla for t in (r.committed_tenants_previous or []) if t.committed_gla > 0}
+            curr_dict = {t.tenant_name: t.committed_gla for t in (r.committed_tenants_current or []) if t.committed_gla > 0}
+
+            # Find tenants with changes (new, terminated, or variance > 1000)
+            changed_tenants = set()
+            for name in set(prev_dict.keys()) | set(curr_dict.keys()):
+                prev_gla = prev_dict.get(name, 0)
+                curr_gla = curr_dict.get(name, 0)
+                if prev_gla == 0 or curr_gla == 0 or abs(curr_gla - prev_gla) > 1000:
+                    changed_tenants.add(name)
+
+            # Previous tenants: top 10 by GLA + any with changes
+            if r.committed_tenants_previous:
+                prev_sorted = sorted(r.committed_tenants_previous, key=lambda t: t.committed_gla, reverse=True)
+                top_10 = [t for t in prev_sorted[:10] if t.committed_gla > 0]
+                changed = [t for t in prev_sorted[10:] if t.tenant_name in changed_tenants and t.committed_gla > 0]
+                prev_strs = [f"{t.tenant_name}:{t.committed_gla:,.0f}" for t in (top_10 + changed)]
+                if prev_strs:
+                    lines.append(f"  PREV: {'; '.join(prev_strs)}")
+
+            # Current tenants: top 10 by GLA + any with changes
+            if r.committed_tenants_current:
+                curr_sorted = sorted(r.committed_tenants_current, key=lambda t: t.committed_gla, reverse=True)
+                top_10 = [t for t in curr_sorted[:10] if t.committed_gla > 0]
+                changed = [t for t in curr_sorted[10:] if t.tenant_name in changed_tenants and t.committed_gla > 0]
+                curr_strs = [f"{t.tenant_name}:{t.committed_gla:,.0f}" for t in (top_10 + changed)]
+                if curr_strs:
+                    lines.append(f"  CURR: {'; '.join(curr_strs)}")
+
+        # Handover GLA section (includes rent rate data for gross_rent_note)
+        if abs(r.handover_variance) > 0 or r.handover_tenants_previous or r.handover_tenants_current:
+            lines.append(f"HANDOVER GLA: {r.handover_previous:,.0f} → {r.handover_current:,.0f} (Var: {r.handover_variance:+,.0f})")
+
+            # Build tenant dicts for comparison (GLA and rate)
+            prev_dict = {t.tenant_name: (t.handover_gla, t.monthly_rate) for t in (r.handover_tenants_previous or []) if t.handover_gla > 0}
+            curr_dict = {t.tenant_name: (t.handover_gla, t.monthly_rate) for t in (r.handover_tenants_current or []) if t.handover_gla > 0}
+
+            # Find tenants with changes (new, terminated, or variance > 1000)
+            changed_tenants = set()
+            for name in set(prev_dict.keys()) | set(curr_dict.keys()):
+                prev_gla = prev_dict.get(name, (0, 0))[0]
+                curr_gla = curr_dict.get(name, (0, 0))[0]
+                if prev_gla == 0 or curr_gla == 0 or abs(curr_gla - prev_gla) > 1000:
+                    changed_tenants.add(name)
+
+            # Previous tenants: top 10 by GLA + any with changes (include rate)
+            if r.handover_tenants_previous:
+                prev_sorted = sorted(r.handover_tenants_previous, key=lambda t: t.handover_gla, reverse=True)
+                top_10 = [t for t in prev_sorted[:10] if t.handover_gla > 0]
+                changed = [t for t in prev_sorted[10:] if t.tenant_name in changed_tenants and t.handover_gla > 0]
+                prev_strs = [f"{t.tenant_name}:{t.handover_gla:,.0f}@{t.monthly_rate/1000:.1f}k" for t in (top_10 + changed) if t.monthly_rate > 0]
+                if not prev_strs:
+                    prev_strs = [f"{t.tenant_name}:{t.handover_gla:,.0f}" for t in (top_10 + changed)]
+                if prev_strs:
+                    lines.append(f"  PREV: {'; '.join(prev_strs)}")
+
+            # Current tenants: top 10 by GLA + any with changes (include rate)
+            if r.handover_tenants_current:
+                curr_sorted = sorted(r.handover_tenants_current, key=lambda t: t.handover_gla, reverse=True)
+                top_10 = [t for t in curr_sorted[:10] if t.handover_gla > 0]
+                changed = [t for t in curr_sorted[10:] if t.tenant_name in changed_tenants and t.handover_gla > 0]
+                curr_strs = [f"{t.tenant_name}:{t.handover_gla:,.0f}@{t.monthly_rate/1000:.1f}k" for t in (top_10 + changed) if t.monthly_rate > 0]
+                if not curr_strs:
+                    curr_strs = [f"{t.tenant_name}:{t.handover_gla:,.0f}" for t in (top_10 + changed)]
+                if curr_strs:
+                    lines.append(f"  CURR: {'; '.join(curr_strs)}")
+
+            # Add rent rate changes summary for gross_rent_note
+            escalations = []
+            for name in set(prev_dict.keys()) & set(curr_dict.keys()):
+                prev_rate = prev_dict[name][1]
+                curr_rate = curr_dict[name][1]
+                if prev_rate > 0 and curr_rate > 0:
+                    pct_change = (curr_rate - prev_rate) / prev_rate * 100
+                    if 3 <= pct_change <= 10:  # Escalation range (3-10%)
+                        escalations.append(f"{name}(+{pct_change:.0f}%)")
+            if escalations:
+                lines.append(f"  ESCALATIONS: {', '.join(escalations[:5])}")
 
         lines.append("")
 
-    lines.append("Return JSON array with notes for each project.")
+    lines.append("Return JSON array with committed_note, handover_note, wale_note, and gross_rent_note for each project.")
 
     return "\n".join(lines)
 

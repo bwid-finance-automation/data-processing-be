@@ -347,6 +347,9 @@ class GLAProcessor:
                 tenant_data[key][tenant_name].monthly_gross_rent += monthly_gross_rent
                 tenant_data[key][tenant_name].committed_gla += committed_gla
                 tenant_data[key][tenant_name].months_to_expire_x_committed_gla += months_to_expire_x_gla
+                # Store monthly rate (use latest non-zero value for this tenant)
+                if monthly_rate > 0:
+                    tenant_data[key][tenant_name].monthly_rate = monthly_rate
 
             except Exception as e:
                 logger.warning(f"Error processing row: {str(e)}")
