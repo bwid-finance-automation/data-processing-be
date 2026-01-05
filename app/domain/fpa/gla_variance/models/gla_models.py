@@ -158,9 +158,15 @@ class GLAVarianceResult:
     # Gross rent note
     gross_rent_note: str = ""  # AI-generated note for gross rent variance
 
-    # Tenant-level changes for explanation
+    # Tenant-level changes for explanation (legacy - will be removed)
     committed_tenant_changes: List[TenantChange] = field(default_factory=list)
     handover_tenant_changes: List[TenantChange] = field(default_factory=list)
+
+    # Raw tenant data for AI analysis
+    committed_tenants_previous: List['TenantGLA'] = field(default_factory=list)
+    committed_tenants_current: List['TenantGLA'] = field(default_factory=list)
+    handover_tenants_previous: List['TenantGLA'] = field(default_factory=list)
+    handover_tenants_current: List['TenantGLA'] = field(default_factory=list)
 
     def calculate_variances(self):
         """Calculate variance values"""
