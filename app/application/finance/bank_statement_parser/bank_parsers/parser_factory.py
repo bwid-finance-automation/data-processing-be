@@ -4,7 +4,6 @@ from typing import Optional, List
 from .base_parser import BaseBankParser
 from .acb_parser import ACBParser
 from .vib_parser import VIBParser
-from .ctbc_parser import CTBCParser
 from .kbank_parser import KBANKParser
 from .sinopac_parser import SINOPACParser
 from .mbb_parser import MBBParser
@@ -25,12 +24,11 @@ class ParserFactory:
     # NOTE: Order matters! More specific parsers should come before generic ones
     # - VCB must come early (VCBACCOUNTDETAIL sheet name is unique, but has bilingual "Opening balance :" that matches Woori)
     # - OCB and Woori must come before MBB (MBB has broad detection that can match others)
-    # - Banks with unique markers (ACB, VIB, CTBC, KBANK) can be in any order
+    # - Banks with unique markers (ACB, VIB, KBANK) can be in any order
     _parsers: List[BaseBankParser] = [
         ACBParser(),
         VIBParser(),
         VCBParser(),      # Must be early (has "Opening balance :" that can match Woori)
-        CTBCParser(),
         TCBParser(),      # Must be before KBANK (KBANK has broad "transaction date + debit + credit" detection)
         SCBParser(),      # Must be before KBANK (Standard Chartered)
         KBANKParser(),    # Has broader detection patterns for PDF

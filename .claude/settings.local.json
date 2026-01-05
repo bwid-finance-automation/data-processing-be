@@ -33,7 +33,8 @@
       "Bash(msiexec /x \"{8A033D83-DF0B-48E9-ACD3-EC33AA2A4639}\" /qn /norestart)",
       "Bash(tasklist:*)",
       "Bash(sc query:*)",
-      "Bash(net stop:*)"
+      "Bash(net stop:*)",
+      "Bash(del \"d:\\\\Project\\\\data-processing-be\\\\app\\\\application\\\\finance\\\\bank_statement_parser\\\\bank_parsers\\\\ctbc_parser.py\")"
     ],
     "deny": [],
     "ask": []
