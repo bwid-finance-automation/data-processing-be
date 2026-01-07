@@ -179,7 +179,7 @@ class GLAAIAnalyzer:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                "max_tokens": 4000,
+                "max_tokens": 8000,
             }
 
             # GPT-5 doesn't support temperature
@@ -204,7 +204,7 @@ class GLAAIAnalyzer:
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4000,
+                max_tokens=8000,
                 system=system_prompt,
                 messages=[
                     {"role": "user", "content": user_prompt}
@@ -314,31 +314,45 @@ class GLAAIAnalyzer:
             logger.error("No AI client available - API key required for note generation")
             raise ValueError("AI API key is required for GLA note generation. Please configure OPENAI_API_KEY or ANTHROPIC_API_KEY.")
 
-        if callback:
-            callback(30, f"Generating AI notes for {len(projects_with_variance)} projects...")
+        # Batch projects to avoid truncation (max 20 projects per batch)
+        BATCH_SIZE = 20
+        all_notes = []
+        total_batches = (len(projects_with_variance) + BATCH_SIZE - 1) // BATCH_SIZE
 
-        # Create a detailed prompt with tenant data
-        prompt = self._create_notes_prompt(projects_with_variance)
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, len(projects_with_variance))
+            batch = projects_with_variance[start_idx:end_idx]
 
-        if self.is_claude:
-            response = self._call_claude(GLA_NOTES_SYSTEM_PROMPT, prompt)
-        else:
-            response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
+            if callback:
+                progress = 30 + int(40 * batch_idx / total_batches)
+                callback(progress, f"Generating AI notes batch {batch_idx + 1}/{total_batches} ({len(batch)} projects)...")
 
-        # Parse JSON response
-        notes = self._parse_notes_response(response.get("content", ""))
+            # Create a detailed prompt with tenant data for this batch
+            prompt = self._create_notes_prompt(batch)
 
-        if not notes:
-            logger.warning("AI returned empty notes, retrying...")
-            # Retry once if empty
             if self.is_claude:
                 response = self._call_claude(GLA_NOTES_SYSTEM_PROMPT, prompt)
             else:
                 response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
-            notes = self._parse_notes_response(response.get("content", ""))
+
+            # Parse JSON response
+            batch_notes = self._parse_notes_response(response.get("content", ""))
+
+            if not batch_notes:
+                logger.warning(f"AI returned empty notes for batch {batch_idx + 1}, retrying...")
+                # Retry once if empty
+                if self.is_claude:
+                    response = self._call_claude(GLA_NOTES_SYSTEM_PROMPT, prompt)
+                else:
+                    response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
+                batch_notes = self._parse_notes_response(response.get("content", ""))
+
+            all_notes.extend(batch_notes)
+            logger.info(f"Batch {batch_idx + 1}/{total_batches}: Generated {len(batch_notes)} notes")
 
         # Apply AI-generated notes to results
-        notes_map = {(n.get("project_name", ""), n.get("product_type", "")): n for n in notes}
+        notes_map = {(n.get("project_name", ""), n.get("product_type", "")): n for n in all_notes}
         for r in results:
             key = (r.project_name, r.product_type)
             if key in notes_map:
@@ -353,8 +367,9 @@ class GLAAIAnalyzer:
                     r.gross_rent_note = note["gross_rent_note"]
 
         if callback:
-            callback(70, "AI notes generated successfully")
+            callback(70, f"AI notes generated successfully ({len(all_notes)} total)")
 
+        logger.info(f"Total notes generated: {len(all_notes)} for {len(projects_with_variance)} projects")
         return results
 
     def _create_notes_prompt(self, results: List[GLAVarianceResult]) -> str:

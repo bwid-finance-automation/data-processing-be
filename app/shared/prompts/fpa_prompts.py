@@ -252,10 +252,11 @@ def get_notes_user_prompt(results: List) -> str:
     lines = ["Analyze these projects. Compare PREVIOUS vs CURRENT tenants to detect changes.", ""]
 
     for r in results:
-        # Skip projects with no variance
+        # Skip projects with no variance (include gross rent variance for escalations)
         has_changes = (
             abs(r.committed_variance) > 100 or
             abs(r.handover_variance) > 100 or
+            abs(r.monthly_rate_variance) > 100 or  # Include gross rent changes
             r.committed_tenants_previous or
             r.committed_tenants_current or
             r.handover_tenants_previous or
@@ -265,6 +266,10 @@ def get_notes_user_prompt(results: List) -> str:
             continue
 
         lines.append(f"=== {r.project_name} ({r.product_type}) ===")
+
+        # Add gross rent variance for context
+        if abs(r.monthly_rate_variance) > 0:
+            lines.append(f"GROSS RENT: {r.monthly_rate_previous:,.0f} → {r.monthly_rate_current:,.0f} VND/sqm (Var: {r.monthly_rate_variance:+,.0f})")
 
         # Committed GLA section
         if abs(r.committed_variance) > 0 or r.committed_tenants_previous or r.committed_tenants_current:
@@ -301,7 +306,8 @@ def get_notes_user_prompt(results: List) -> str:
                     lines.append(f"  CURR: {'; '.join(curr_strs)}")
 
         # Handover GLA section (includes rent rate data for gross_rent_note)
-        if abs(r.handover_variance) > 0 or r.handover_tenants_previous or r.handover_tenants_current:
+        # Also include if gross rent changed (for escalation detection)
+        if abs(r.handover_variance) > 0 or abs(r.monthly_rate_variance) > 0 or r.handover_tenants_previous or r.handover_tenants_current:
             lines.append(f"HANDOVER GLA: {r.handover_previous:,.0f} → {r.handover_current:,.0f} (Var: {r.handover_variance:+,.0f})")
 
             # Build tenant dicts for comparison (GLA and rate)
