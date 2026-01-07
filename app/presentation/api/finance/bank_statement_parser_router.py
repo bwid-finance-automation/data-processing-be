@@ -17,7 +17,10 @@ from app.presentation.schemas.bank_statement_schemas import (
     BankTransactionResponse,
     SupportedBanksResponse,
     PowerAutomateParseRequest,
-    PowerAutomateParseResponse
+    PowerAutomateParseResponse,
+    SharePointBalanceItem,
+    SharePointTransactionItem,
+    SharePointData
 )
 from app.application.finance.bank_statement_parser.parse_bank_statements import ParseBankStatementsUseCase
 from app.application.finance.bank_statement_parser.bank_parsers.parser_factory import ParserFactory
@@ -61,6 +64,173 @@ def _generate_export_filename(transactions: list, balances: list) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     return f"{bank_code}_statement_{timestamp}.xlsx"
+
+
+def _format_for_sharepoint(transactions: list, balances: list) -> SharePointData:
+    """
+    Convert parsed transactions and balances to SharePoint Lists format.
+
+    Args:
+        transactions: List of BankTransaction objects
+        balances: List of BankBalance objects
+
+    Returns:
+        SharePointData containing formatted balances and transactions for SharePoint Lists
+    """
+    from datetime import datetime
+
+    def safe_float(value, default=0.0) -> float:
+        """Convert value to float, handling NaN and None."""
+        if value is None:
+            return default
+        try:
+            f = float(value)
+            return default if math.isnan(f) else f
+        except (ValueError, TypeError):
+            return default
+
+    def safe_str(value, default="") -> str:
+        """Convert value to string, handling None."""
+        if value is None:
+            return default
+        return str(value).strip() if str(value).strip() else default
+
+    def get_date_str(value) -> str:
+        """Get date as YYYY-MM-DD string."""
+        if value is None:
+            return datetime.now().strftime("%Y-%m-%d")
+        if hasattr(value, 'strftime'):
+            return value.strftime("%Y-%m-%d")
+        return str(value)[:10] if len(str(value)) >= 10 else str(value)
+
+    def get_date_short(value) -> str:
+        """Get date as ddMMyy string for External ID."""
+        if value is None:
+            return datetime.now().strftime("%d%m%y")
+        if hasattr(value, 'strftime'):
+            return value.strftime("%d%m%y")
+        # Try to parse YYYY-MM-DD format
+        try:
+            date_str = str(value)[:10]
+            if "-" in date_str:
+                parts = date_str.split("-")
+                if len(parts) == 3:
+                    return f"{parts[2]}{parts[1]}{parts[0][2:]}"
+        except Exception:
+            pass
+        return datetime.now().strftime("%d%m%y")
+
+    def get_date_yyyymmdd(value) -> str:
+        """Get date as YYYYMMDD string for StatementName."""
+        if value is None:
+            return datetime.now().strftime("%Y%m%d")
+        if hasattr(value, 'strftime'):
+            return value.strftime("%Y%m%d")
+        # Try to parse YYYY-MM-DD format
+        try:
+            date_str = str(value)[:10]
+            if "-" in date_str:
+                return date_str.replace("-", "")
+        except Exception:
+            pass
+        return datetime.now().strftime("%Y%m%d")
+
+    sp_balances: list[SharePointBalanceItem] = []
+    sp_transactions: list[SharePointTransactionItem] = []
+
+    # Build a map of balance keys for linking transactions
+    # Key format: {bank_code}_{acc_no}_{currency}
+    balance_map: dict[str, tuple[str, str]] = {}  # key -> (balance_external_id, statement_name)
+
+    # Process balances
+    for idx, bal in enumerate(balances, start=1):
+        bank_code = safe_str(getattr(bal, 'bank_name', ''), 'UNKNOWN')
+        acc_no = safe_str(getattr(bal, 'acc_no', ''), '')
+        currency = safe_str(getattr(bal, 'currency', ''), 'VND')
+        statement_date = getattr(bal, 'statement_date', None)
+
+        # Generate IDs
+        date_short = get_date_short(statement_date)
+        date_yyyymmdd = get_date_yyyymmdd(statement_date)
+        external_id = f"{date_short}_{idx:04d}"
+        statement_name = f"BS/{bank_code}/{currency}-{acc_no}/{date_yyyymmdd}"
+
+        # Calculate totals from transactions for this balance
+        balance_key = f"{bank_code}_{acc_no}_{currency}"
+        total_debit = 0.0
+        total_credit = 0.0
+        for tx in transactions:
+            tx_bank = safe_str(getattr(tx, 'bank_name', ''), '')
+            tx_acc = safe_str(getattr(tx, 'acc_no', ''), '')
+            tx_currency = safe_str(getattr(tx, 'currency', ''), 'VND')
+            tx_key = f"{tx_bank}_{tx_acc}_{tx_currency}"
+            if tx_key == balance_key:
+                total_debit += safe_float(getattr(tx, 'debit', 0))
+                total_credit += safe_float(getattr(tx, 'credit', 0))
+
+        # Store mapping for transaction linking
+        balance_map[balance_key] = (external_id, statement_name)
+
+        sp_balances.append(SharePointBalanceItem(
+            ExternalID=external_id,
+            StatementName=statement_name,
+            BankAccountNumber=acc_no,
+            BankCode=bank_code,
+            OpeningBalance=safe_float(getattr(bal, 'opening_balance', 0)),
+            ClosingBalance=safe_float(getattr(bal, 'closing_balance', 0)),
+            TotalDebit=total_debit,
+            TotalCredit=total_credit,
+            Currency=currency,
+            StatementDate=get_date_str(statement_date)
+        ))
+
+    # Process transactions
+    for idx, tx in enumerate(transactions, start=1):
+        bank_code = safe_str(getattr(tx, 'bank_name', ''), 'UNKNOWN')
+        acc_no = safe_str(getattr(tx, 'acc_no', ''), '')
+        currency = safe_str(getattr(tx, 'currency', ''), 'VND')
+        tx_date = getattr(tx, 'date', None)
+
+        # Find parent balance
+        tx_key = f"{bank_code}_{acc_no}_{currency}"
+        balance_external_id, bank_statement_daily = balance_map.get(
+            tx_key,
+            ("", f"BS/{bank_code}/{currency}-{acc_no}/{get_date_yyyymmdd(tx_date)}")
+        )
+
+        # Generate IDs
+        date_short = get_date_short(tx_date)
+        external_id = f"line_{date_short}_{idx:04d}"
+        line_name = f"{bank_statement_daily}/{idx:04d}"
+
+        # Determine amounts and type
+        debit = safe_float(getattr(tx, 'debit', 0))
+        credit = safe_float(getattr(tx, 'credit', 0))
+        amount = abs(debit) if debit > 0 else abs(credit)
+        trans_type = "D" if debit > 0 else ("C" if credit > 0 else None)
+
+        sp_transactions.append(SharePointTransactionItem(
+            ExternalID=external_id,
+            BalanceExternalID=balance_external_id,
+            BankStatementDaily=bank_statement_daily,
+            LineName=line_name,
+            BankCode=bank_code,
+            BankAccountNumber=acc_no,
+            TransID=safe_str(getattr(tx, 'transaction_id', ''), None) or None,
+            TransDate=get_date_str(tx_date),
+            Description=safe_str(getattr(tx, 'description', ''), ''),
+            Currency=currency,
+            Debit=debit,
+            Credit=credit,
+            Amount=amount,
+            TransType=trans_type,
+            Balance=None,  # Not used
+            Partner=safe_str(getattr(tx, 'beneficiary_acc_name', ''), None) or None,
+            PartnerAccount=safe_str(getattr(tx, 'beneficiary_acc_no', ''), None) or None,
+            PartnerBankID=safe_str(getattr(tx, 'beneficiary_bank', ''), None) or None
+        ))
+
+    return SharePointData(balances=sp_balances, transactions=sp_transactions)
 
 
 @router.get("/", summary="Bank Statement Parser Info")
@@ -945,13 +1115,20 @@ async def parse_bank_statements_power_automate(request: PowerAutomateParseReques
         excel_filename = _generate_export_filename(result["all_transactions"], result["all_balances"])
         excel_base64 = base64.b64encode(excel_bytes).decode('utf-8')
 
+        # Format data for SharePoint Lists
+        sharepoint_data = _format_for_sharepoint(
+            result["all_transactions"],
+            result["all_balances"]
+        )
+
         # Prepare response
         response = PowerAutomateParseResponse(
             success=result["summary"]["successful"] > 0,
             message=f"Processed {result['summary']['successful']} of {result['summary']['total_files']} files successfully",
             summary=result["summary"],
             excel_base64=excel_base64,
-            excel_filename=excel_filename
+            excel_filename=excel_filename,
+            sharepoint_data=sharepoint_data
         )
 
         return response

@@ -142,6 +142,53 @@ class SupportedBanksResponse(BaseModel):
     count: int = 0
 
 
+# ========== SharePoint Data Schemas ==========
+
+class SharePointBalanceItem(BaseModel):
+    """SharePoint List item for BSM_Balances."""
+
+    ExternalID: str = Field(..., description="External ID format: {ddMMyy}_{sequence:04d}")
+    StatementName: str = Field(..., description="BS/{BankCode}/{Currency}-{AccNo}/{YYYYMMDD}")
+    BankAccountNumber: str = Field(..., description="Account number")
+    BankCode: str = Field(..., description="Bank code/name")
+    OpeningBalance: float = Field(0.0, description="Opening balance")
+    ClosingBalance: float = Field(0.0, description="Closing balance")
+    TotalDebit: float = Field(0.0, description="Sum of all debits")
+    TotalCredit: float = Field(0.0, description="Sum of all credits")
+    Currency: str = Field("VND", description="Currency code")
+    StatementDate: str = Field(..., description="Statement date in YYYY-MM-DD format")
+
+
+class SharePointTransactionItem(BaseModel):
+    """SharePoint List item for BSM_Transactions."""
+
+    ExternalID: str = Field(..., description="External ID format: line_{ddMMyy}_{sequence:04d}")
+    BalanceExternalID: str = Field(..., description="Link to parent balance ExternalID")
+    BankStatementDaily: str = Field(..., description="BS/{BankCode}/{Currency}-{AccNo}/{YYYYMMDD}")
+    LineName: str = Field(..., description="{BankStatementDaily}/{sequence}")
+    BankCode: str = Field(..., description="Bank code/name")
+    BankAccountNumber: str = Field(..., description="Account number")
+    TransID: Optional[str] = Field(None, description="Transaction ID")
+    TransDate: str = Field(..., description="Transaction date in YYYY-MM-DD format")
+    Description: str = Field("", description="Transaction description")
+    Currency: str = Field("VND", description="Currency code")
+    Debit: float = Field(0.0, description="Debit amount")
+    Credit: float = Field(0.0, description="Credit amount")
+    Amount: float = Field(0.0, description="Absolute amount (debit or credit)")
+    TransType: Optional[str] = Field(None, description="D for debit, C for credit")
+    Balance: Optional[float] = Field(None, description="Running balance (not used)")
+    Partner: Optional[str] = Field(None, description="Beneficiary account name")
+    PartnerAccount: Optional[str] = Field(None, description="Beneficiary account number")
+    PartnerBankID: Optional[str] = Field(None, description="Beneficiary bank")
+
+
+class SharePointData(BaseModel):
+    """Container for SharePoint Lists data."""
+
+    balances: List[SharePointBalanceItem] = Field(default_factory=list, description="Items for BSM_Balances list")
+    transactions: List[SharePointTransactionItem] = Field(default_factory=list, description="Items for BSM_Transactions list")
+
+
 # ========== Power Automate Schemas ==========
 
 class PowerAutomateFileInput(BaseModel):
@@ -224,7 +271,45 @@ class PowerAutomateParseResponse(BaseModel):
                     "total_balances": 2
                 },
                 "excel_base64": "UEsDBBQAAAAI...",
-                "excel_filename": "NetSuite_Export_abc123.xlsx"
+                "excel_filename": "NetSuite_Export_abc123.xlsx",
+                "sharepoint_data": {
+                    "balances": [
+                        {
+                            "ExternalID": "070126_0001",
+                            "StatementName": "BS/ACB/VND-123456789/20260107",
+                            "BankAccountNumber": "123456789",
+                            "BankCode": "ACB",
+                            "OpeningBalance": 10000000.0,
+                            "ClosingBalance": 15000000.0,
+                            "TotalDebit": 2000000.0,
+                            "TotalCredit": 7000000.0,
+                            "Currency": "VND",
+                            "StatementDate": "2026-01-07"
+                        }
+                    ],
+                    "transactions": [
+                        {
+                            "ExternalID": "line_070126_0001",
+                            "BalanceExternalID": "070126_0001",
+                            "BankStatementDaily": "BS/ACB/VND-123456789/20260107",
+                            "LineName": "BS/ACB/VND-123456789/20260107/0001",
+                            "BankCode": "ACB",
+                            "BankAccountNumber": "123456789",
+                            "TransID": "FT12345",
+                            "TransDate": "2026-01-07",
+                            "Description": "Transfer from ABC Corp",
+                            "Currency": "VND",
+                            "Debit": 0.0,
+                            "Credit": 5000000.0,
+                            "Amount": 5000000.0,
+                            "TransType": "C",
+                            "Balance": None,
+                            "Partner": "ABC Corp",
+                            "PartnerAccount": "987654321",
+                            "PartnerBankID": "VCB"
+                        }
+                    ]
+                }
             }
         }
     )
@@ -234,3 +319,4 @@ class PowerAutomateParseResponse(BaseModel):
     summary: Dict[str, Any] = Field(default_factory=dict)
     excel_base64: Optional[str] = Field(None, description="Base64 encoded Excel file with 2 sheets (Balance + Details)")
     excel_filename: Optional[str] = Field(default=None, description="Excel filename")
+    sharepoint_data: Optional[SharePointData] = Field(None, description="SharePoint Lists data for Power Automate")
