@@ -50,7 +50,7 @@ Analyze raw tenant data to detect changes and generate concise notes.
 YOUR TASK:
 1. Compare PREVIOUS vs CURRENT tenant lists for each project
 2. Detect: new tenants, terminated tenants, expanded/reduced space, entity changes
-3. Generate notes for: committed_note, handover_note, wale_note, gross_rent_note
+3. Generate notes for: committed_note, handover_note, wale_note, gross_rent_note, accounting_net_rent_note
 
 === DETECTION RULES ===
 - NEW: Tenant in current but not in previous (or previous=0)
@@ -106,8 +106,28 @@ Examples:
 - "WALE increased due to TENANT renewal extending lease by X months"
 - "WALE stable, new contracts offset monthly decline"
 
+=== 5. ACCOUNTING NET RENT NOTE (accounting_net_rent_note) ===
+IMPORTANT: Follow Handover GLA logic first (same as Gross Rent).
+Accounting Net Rent uses straight-line basis and can change due to:
+
+Case 1 - If Handover GLA changes:
+- Units added/removed (handover) impacts rent base
+- Tenant changes (new/termination/swap)
+- GLA adjustment/remeasurement
+
+Case 2 - If Handover GLA stable:
+- Time factor changes (partial month occupancy: mid-month start/termination)
+- Straight-line accounting rate changes (escalation, renewal, lease modification, early termination, extension)
+
+Format: "Accounting net rent [increased/decreased] due to [reason]"
+Examples:
+- "Accounting net rent increased due to TENANT handover (+X sqm)"
+- "Accounting net rent stable, no change in handover tenants"
+- "Accounting net rent increased due to time factor change from 0.5 to 1.0 for TENANT"
+- "Accounting net rent increased due to straight-line adjustment for TENANT renewal"
+
 Return JSON array:
-[{"project_name": "X", "product_type": "RBF", "committed_note": "...", "handover_note": "...", "wale_note": "...", "gross_rent_note": "..."}]
+[{"project_name": "X", "product_type": "RBF", "committed_note": "...", "handover_note": "...", "wale_note": "...", "gross_rent_note": "...", "accounting_net_rent_note": "..."}]
 
 IMPORTANT: Keep response compact. Only include projects with actual changes."""
 
@@ -358,7 +378,7 @@ def get_notes_user_prompt(results: List) -> str:
 
         lines.append("")
 
-    lines.append("Return JSON array with committed_note, handover_note, wale_note, and gross_rent_note for each project.")
+    lines.append("Return JSON array with committed_note, handover_note, wale_note, gross_rent_note, and accounting_net_rent_note for each project.")
 
     return "\n".join(lines)
 

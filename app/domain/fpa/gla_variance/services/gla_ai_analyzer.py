@@ -365,6 +365,8 @@ class GLAAIAnalyzer:
                     r.handover_note = note["handover_note"]
                 if note.get("gross_rent_note"):
                     r.gross_rent_note = note["gross_rent_note"]
+                if note.get("accounting_net_rent_note"):
+                    r.accounting_net_rent_note = note["accounting_net_rent_note"]
 
         if callback:
             callback(70, f"AI notes generated successfully ({len(all_notes)} total)")

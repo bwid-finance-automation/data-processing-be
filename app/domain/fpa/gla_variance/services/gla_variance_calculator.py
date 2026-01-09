@@ -282,6 +282,11 @@ class GLAVarianceCalculator:
             f"Gross rent\n(sqm)\n{current_period}",
             "Var",
             "Note",
+            # Accounting Net Rent
+            f"Accounting Net Rent\n{previous_period}",
+            f"Accounting Net Rent\n{current_period}",
+            "Var",
+            "Note",
         ]
 
         # Write headers
@@ -319,6 +324,11 @@ class GLAVarianceCalculator:
                 result.monthly_rate_current,
                 result.monthly_rate_variance,
                 result.gross_rent_note,
+                # Accounting Net Rent (cols 20-23)
+                result.accounting_net_rent_previous,
+                result.accounting_net_rent_current,
+                result.accounting_net_rent_variance,
+                result.accounting_net_rent_note,
             ]
 
             for col, value in enumerate(values, 1):
@@ -337,8 +347,11 @@ class GLAVarianceCalculator:
                 # Format numbers - Gross rent columns (16, 17)
                 elif col in [16, 17]:
                     cell.number_format = '#,##0.00'
-                # Variance columns with color (6, 10, 14, 18)
-                elif col in [6, 10, 14, 18]:
+                # Format numbers - Accounting Net Rent columns (20, 21)
+                elif col in [20, 21]:
+                    cell.number_format = '#,##0.00'
+                # Variance columns with color (6, 10, 14, 18, 22)
+                elif col in [6, 10, 14, 18, 22]:
                     cell.number_format = '#,##0.00'
                     if isinstance(value, (int, float)):
                         if value > 0:

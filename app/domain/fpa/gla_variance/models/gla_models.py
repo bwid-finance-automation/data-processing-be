@@ -158,6 +158,12 @@ class GLAVarianceResult:
     # Gross rent note
     gross_rent_note: str = ""  # AI-generated note for gross rent variance
 
+    # Accounting Net Rent (straight-line basis)
+    accounting_net_rent_previous: float = 0.0
+    accounting_net_rent_current: float = 0.0
+    accounting_net_rent_variance: float = 0.0
+    accounting_net_rent_note: str = ""  # AI-generated note for accounting net rent variance
+
     # Tenant-level changes for explanation (legacy - will be removed)
     committed_tenant_changes: List[TenantChange] = field(default_factory=list)
     handover_tenant_changes: List[TenantChange] = field(default_factory=list)
@@ -176,6 +182,7 @@ class GLAVarianceResult:
         self.monthly_rate_variance = self.monthly_rate_current - self.monthly_rate_previous
         self.months_to_expire_variance = self.months_to_expire_current - self.months_to_expire_previous
         self.months_to_expire_x_gla_variance = self.months_to_expire_x_gla_current - self.months_to_expire_x_gla_previous
+        self.accounting_net_rent_variance = self.accounting_net_rent_current - self.accounting_net_rent_previous
 
     def to_dict(self) -> dict:
         """Convert to dictionary for output"""
@@ -208,6 +215,11 @@ class GLAVarianceResult:
             'months_to_expire_x_gla_previous': self.months_to_expire_x_gla_previous,
             'months_to_expire_x_gla_current': self.months_to_expire_x_gla_current,
             'months_to_expire_x_gla_variance': self.months_to_expire_x_gla_variance,
+            # Accounting Net Rent
+            'accounting_net_rent_previous': self.accounting_net_rent_previous,
+            'accounting_net_rent_current': self.accounting_net_rent_current,
+            'accounting_net_rent_variance': self.accounting_net_rent_variance,
+            'accounting_net_rent_note': self.accounting_net_rent_note,
         }
 
 
