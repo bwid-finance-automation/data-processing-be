@@ -91,6 +91,12 @@ class GLAProcessor:
         'Committed GLA - Current': ('committed', 'current'),
     }
 
+    # Optional Amor (Accounting Net Rent) sheet names
+    AMOR_SHEETS = {
+        "Amor'-Previous": 'previous',
+        "Amor'-Current": 'current',
+    }
+
     def __init__(self):
         self.project_mapping = PROJECT_NAME_MAPPING.copy()
 
@@ -413,6 +419,67 @@ class GLAProcessor:
 
         return result
 
+    def process_amor_sheet(
+        self,
+        file_path: str,
+        sheet_name: str
+    ) -> Dict[Tuple[str, str], float]:
+        """
+        Process an Amor (Accounting Net Rent) sheet.
+
+        Amor sheets have header in row 1 (0-indexed) with columns:
+        - 'Project name\n(Reporting)' - Project name
+        - 'Product type' - RBF/RBW
+        - 'Monthly Net amount (VND)' - The accounting net rent amount
+
+        Returns:
+            Dict mapping (project_name, product_type) to total Monthly Net amount
+        """
+        logger.info(f"Processing Amor sheet: {sheet_name}")
+
+        try:
+            df = pd.read_excel(file_path, sheet_name=sheet_name, header=1)
+
+            # Find required columns
+            project_col = None
+            product_col = None
+            amount_col = None
+
+            for col in df.columns:
+                col_lower = str(col).lower().strip()
+                if 'project name' in col_lower and 'reporting' in col_lower:
+                    project_col = col
+                elif col_lower == 'product type':
+                    product_col = col
+                elif 'monthly net amount' in col_lower:
+                    amount_col = col
+
+            if not all([project_col, product_col, amount_col]):
+                logger.warning(f"Amor sheet missing required columns: project={project_col}, product={product_col}, amount={amount_col}")
+                return {}
+
+            # Aggregate by project + product type
+            result = {}
+            for _, row in df.iterrows():
+                project_name = str(row[project_col]).strip() if pd.notna(row[project_col]) else ''
+                product_type = str(row[product_col]).strip() if pd.notna(row[product_col]) else ''
+                amount = float(row[amount_col]) if pd.notna(row[amount_col]) else 0.0
+
+                if not project_name or not product_type:
+                    continue
+
+                key = (project_name, product_type)
+                if key not in result:
+                    result[key] = 0.0
+                result[key] += amount
+
+            logger.info(f"Processed {len(result)} project/product combinations from Amor sheet")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error processing Amor sheet {sheet_name}: {e}")
+            return {}
+
     def validate_sheet_names(self, sheet_names: List[str]) -> Tuple[bool, List[str]]:
         """
         Validate that the Excel file contains exactly the required sheet names.
@@ -483,6 +550,15 @@ class GLAProcessor:
                 summaries = self.aggregate_by_project_type(df, data_type)
                 result[data_type][period] = summaries
                 logger.info(f"Processed {len(summaries)} projects for {data_type}/{period}")
+
+            # Process optional Amor sheets (Accounting Net Rent)
+            result['amor'] = {'previous': {}, 'current': {}}
+            for sheet_name, period in self.AMOR_SHEETS.items():
+                if sheet_name in sheet_names:
+                    logger.info(f"Processing Amor sheet '{sheet_name}' as {period}")
+                    amor_data = self.process_amor_sheet(file_path, sheet_name)
+                    result['amor'][period] = amor_data
+                    logger.info(f"Processed {len(amor_data)} projects for amor/{period}")
 
         except ValueError:
             # Re-raise validation errors

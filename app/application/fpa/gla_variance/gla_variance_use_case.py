@@ -118,10 +118,16 @@ class GLAVarianceUseCase:
             committed_previous = processed_data['committed'].get('previous', {})
             committed_current = processed_data['committed'].get('current', {})
 
+            # Extract Accounting Net Rent data (optional Amor sheets)
+            amor_previous = processed_data.get('amor', {}).get('previous', {})
+            amor_current = processed_data.get('amor', {}).get('current', {})
+
             logger.info(f"Handover previous: {len(handover_previous)} projects")
             logger.info(f"Handover current: {len(handover_current)} projects")
             logger.info(f"Committed previous: {len(committed_previous)} projects")
             logger.info(f"Committed current: {len(committed_current)} projects")
+            logger.info(f"Amor previous: {len(amor_previous)} projects")
+            logger.info(f"Amor current: {len(amor_current)} projects")
 
             # Calculate variances
             logger.info("Calculating variances...")
@@ -129,7 +135,9 @@ class GLAVarianceUseCase:
                 handover_previous=handover_previous,
                 handover_current=handover_current,
                 committed_previous=committed_previous,
-                committed_current=committed_current
+                committed_current=committed_current,
+                amor_previous=amor_previous,
+                amor_current=amor_current
             )
 
             # Use provided labels or extract from filename

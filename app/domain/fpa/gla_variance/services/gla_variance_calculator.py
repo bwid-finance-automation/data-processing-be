@@ -115,7 +115,9 @@ class GLAVarianceCalculator:
         handover_previous: Dict[Tuple[str, str], ProjectGLASummary],
         handover_current: Dict[Tuple[str, str], ProjectGLASummary],
         committed_previous: Dict[Tuple[str, str], ProjectGLASummary],
-        committed_current: Dict[Tuple[str, str], ProjectGLASummary]
+        committed_current: Dict[Tuple[str, str], ProjectGLASummary],
+        amor_previous: Optional[Dict[Tuple[str, str], float]] = None,
+        amor_current: Optional[Dict[Tuple[str, str], float]] = None
     ) -> GLAAnalysisSummary:
         """
         Calculate variance between previous and current periods.
@@ -125,11 +127,15 @@ class GLAVarianceCalculator:
             handover_current: Handover GLA data for current period
             committed_previous: Committed GLA data for previous period
             committed_current: Committed GLA data for current period
+            amor_previous: Optional Accounting Net Rent data for previous period
+            amor_current: Optional Accounting Net Rent data for current period
 
         Returns:
             GLAAnalysisSummary with all variance results
         """
         logger.info("Calculating GLA variances...")
+        amor_previous = amor_previous or {}
+        amor_current = amor_current or {}
 
         # Get all unique project-type combinations
         all_keys = set()
@@ -137,6 +143,8 @@ class GLAVarianceCalculator:
         all_keys.update(handover_current.keys())
         all_keys.update(committed_previous.keys())
         all_keys.update(committed_current.keys())
+        all_keys.update(amor_previous.keys())
+        all_keys.update(amor_current.keys())
 
         logger.info(f"Found {len(all_keys)} unique project-type combinations")
 
@@ -178,6 +186,9 @@ class GLAVarianceCalculator:
                 months_to_expire_current=cc.months_to_expire if cc else 0.0,
                 months_to_expire_x_gla_previous=cp.months_to_expire_x_committed_gla if cp else 0.0,
                 months_to_expire_x_gla_current=cc.months_to_expire_x_committed_gla if cc else 0.0,
+                # Accounting Net Rent (from Amor sheets)
+                accounting_net_rent_previous=amor_previous.get(key, 0.0),
+                accounting_net_rent_current=amor_current.get(key, 0.0),
             )
 
             result.calculate_variances()
