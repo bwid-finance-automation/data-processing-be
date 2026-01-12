@@ -200,12 +200,22 @@ async def process_python_analysis(
 async def start_ai_analysis(
     request: Request,
     excel_files: List[UploadFile] = File(...),
+    loan_interest_file: Optional[UploadFile] = File(None, description="Optional: ERP Loan Interest Rate file for enhanced A2 analysis"),
+    revenue_breakdown_file: Optional[UploadFile] = File(None, description="Optional: RevenueBreakdown file for Account 511 drill-down"),
+    unit_for_lease_file: Optional[UploadFile] = File(None, description="Optional: UnitForLeaseList file for Account 511 drill-down"),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Start AI-powered analysis with file validation.
-    Optionally save to project if project_uuid is provided."""
+    Optionally save to project if project_uuid is provided.
+    Optionally upload RevenueBreakdown and UnitForLeaseList files for Account 511 drill-down."""
     logger.info(f"Starting AI analysis for {len(excel_files)} files")
+    if loan_interest_file:
+        logger.info(f"Loan interest file provided: {loan_interest_file.filename}")
+    if revenue_breakdown_file:
+        logger.info(f"RevenueBreakdown file provided: {revenue_breakdown_file.filename}")
+    if unit_for_lease_file:
+        logger.info(f"UnitForLeaseList file provided: {unit_for_lease_file.filename}")
 
     try:
         # 1. Validate uploaded files
@@ -223,8 +233,39 @@ async def start_ai_analysis(
                 details="; ".join(error_details)
             )
 
-        # 2. Start AI analysis
-        session = await analysis_service.start_ai_analysis(excel_files)
+        # 1b. Validate optional loan interest file if provided
+        if loan_interest_file:
+            loan_filename = loan_interest_file.filename or ""
+            if not loan_filename.lower().endswith(('.xlsx', '.xls')):
+                raise FileProcessingError(
+                    "Loan interest file must be an Excel file (.xlsx or .xls)",
+                    details=f"Received file: {loan_filename}"
+                )
+
+        # 1c. Validate Account 511 files if provided
+        if revenue_breakdown_file:
+            rev_filename = revenue_breakdown_file.filename or ""
+            if not rev_filename.lower().endswith(('.xlsx', '.xls')):
+                raise FileProcessingError(
+                    "RevenueBreakdown file must be an Excel file (.xlsx or .xls)",
+                    details=f"Received file: {rev_filename}"
+                )
+
+        if unit_for_lease_file:
+            unit_filename = unit_for_lease_file.filename or ""
+            if not unit_filename.lower().endswith(('.xlsx', '.xls')):
+                raise FileProcessingError(
+                    "UnitForLeaseList file must be an Excel file (.xlsx or .xls)",
+                    details=f"Received file: {unit_filename}"
+                )
+
+        # 2. Start AI analysis with optional 511 files
+        session = await analysis_service.start_ai_analysis(
+            excel_files,
+            loan_interest_file=loan_interest_file,
+            revenue_breakdown_file=revenue_breakdown_file,
+            unit_for_lease_file=unit_for_lease_file
+        )
 
         logger.info(f"AI analysis session started: {session.session_id}")
 
