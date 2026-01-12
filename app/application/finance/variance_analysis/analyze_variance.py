@@ -80,6 +80,8 @@ class AnalysisService:
         self,
         excel_files: List[UploadFile],
         loan_interest_file: Optional[UploadFile] = None,
+        revenue_breakdown_file: Optional[UploadFile] = None,
+        unit_for_lease_file: Optional[UploadFile] = None,
         mapping_file: Optional[UploadFile] = None,
         config_overrides: Optional[Dict[str, Any]] = None
     ) -> bytes:
@@ -88,6 +90,8 @@ class AnalysisService:
         Args:
             excel_files: List of BS/PL Breakdown Excel files
             loan_interest_file: Optional ERP Loan Interest Rate file for enhanced A2 analysis
+            revenue_breakdown_file: Optional RevenueBreakdown file for Account 511 drill-down
+            unit_for_lease_file: Optional UnitForLeaseList file for Account 511 drill-down
             mapping_file: Deprecated, not used
             config_overrides: Deprecated, not used
 
@@ -109,10 +113,27 @@ class AnalysisService:
                     await loan_interest_file.read()
                 )
 
-            # Use the 22-rule variance analysis pipeline with optional loan data
+            # Read Account 511 files if provided
+            revenue_breakdown_data: Optional[Tuple[str, bytes]] = None
+            if revenue_breakdown_file:
+                revenue_breakdown_data = (
+                    revenue_breakdown_file.filename or "revenue_breakdown.xls",
+                    await revenue_breakdown_file.read()
+                )
+
+            unit_for_lease_data: Optional[Tuple[str, bytes]] = None
+            if unit_for_lease_file:
+                unit_for_lease_data = (
+                    unit_for_lease_file.filename or "unit_for_lease.xls",
+                    await unit_for_lease_file.read()
+                )
+
+            # Use the 22-rule variance analysis pipeline with optional loan and 511 data
             xlsx_bytes: bytes = process_variance_analysis(
                 files,
-                loan_interest_file=loan_file_data
+                loan_interest_file=loan_file_data,
+                revenue_breakdown_file=revenue_breakdown_data,
+                unit_for_lease_file=unit_for_lease_data
             )
 
             return xlsx_bytes
@@ -120,8 +141,21 @@ class AnalysisService:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-    async def start_ai_analysis(self, excel_files: List[UploadFile]) -> AnalysisSession:
-        """Start AI-powered analysis in background thread."""
+    async def start_ai_analysis(
+        self,
+        excel_files: List[UploadFile],
+        loan_interest_file: Optional[UploadFile] = None,
+        revenue_breakdown_file: Optional[UploadFile] = None,
+        unit_for_lease_file: Optional[UploadFile] = None
+    ) -> AnalysisSession:
+        """Start AI-powered analysis in background thread.
+
+        Args:
+            excel_files: List of BS/PL Breakdown Excel files
+            loan_interest_file: Optional ERP Loan Interest Rate file for enhanced A2 analysis
+            revenue_breakdown_file: Optional RevenueBreakdown file for Account 511 drill-down
+            unit_for_lease_file: Optional UnitForLeaseList file for Account 511 drill-down
+        """
         try:
             # Create session
             session = self.create_session()
@@ -133,6 +167,29 @@ class AnalysisService:
                 for f in excel_files
             ]
 
+            # Read optional loan interest file
+            loan_file_data: Optional[Tuple[str, bytes]] = None
+            if loan_interest_file:
+                loan_file_data = (
+                    loan_interest_file.filename or "loan_interest.xlsx",
+                    await loan_interest_file.read()
+                )
+
+            # Read optional Account 511 files
+            revenue_breakdown_data: Optional[Tuple[str, bytes]] = None
+            if revenue_breakdown_file:
+                revenue_breakdown_data = (
+                    revenue_breakdown_file.filename or "revenue_breakdown.xls",
+                    await revenue_breakdown_file.read()
+                )
+
+            unit_for_lease_data: Optional[Tuple[str, bytes]] = None
+            if unit_for_lease_file:
+                unit_for_lease_data = (
+                    unit_for_lease_file.filename or "unit_for_lease.xls",
+                    await unit_for_lease_file.read()
+                )
+
             # Create log stream BEFORE starting thread so SSE endpoint can access it immediately
             log_capture = LogCapture(session.session_id)
             self.log_streams[session.session_id] = log_capture.queue
@@ -141,7 +198,7 @@ class AnalysisService:
             # Start background processing
             thread = threading.Thread(
                 target=self._run_ai_analysis,
-                args=(session.session_id, files, log_capture)
+                args=(session.session_id, files, log_capture, loan_file_data, revenue_breakdown_data, unit_for_lease_data)
             )
             thread.daemon = True
             thread.start()
@@ -151,9 +208,29 @@ class AnalysisService:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to start AI analysis: {str(e)}")
 
-    def _run_ai_analysis(self, session_id: str, files: List[Tuple[str, bytes]], log_capture: LogCapture):
-        """Run AI analysis in background thread."""
+    def _run_ai_analysis(
+        self,
+        session_id: str,
+        files: List[Tuple[str, bytes]],
+        log_capture: LogCapture,
+        loan_file_data: Optional[Tuple[str, bytes]] = None,
+        revenue_breakdown_data: Optional[Tuple[str, bytes]] = None,
+        unit_for_lease_data: Optional[Tuple[str, bytes]] = None
+    ):
+        """Run AI analysis in background thread.
+
+        Args:
+            session_id: Session ID for tracking
+            files: List of (filename, bytes) tuples for BS/PL files
+            log_capture: LogCapture instance for streaming logs
+            loan_file_data: Optional (filename, bytes) for loan interest file
+            revenue_breakdown_data: Optional (filename, bytes) for RevenueBreakdown file
+            unit_for_lease_data: Optional (filename, bytes) for UnitForLeaseList file
+        """
         import sys
+        from app.domain.finance.variance_analysis.services.account_511_analyzer import analyze_account_511
+        from openpyxl import load_workbook
+        import io
 
         # log_capture is now passed from start_ai_analysis to ensure it exists before SSE connects
         # Redirect stdout to capture print statements
@@ -174,6 +251,14 @@ class AnalysisService:
             log_capture.queue.put(f"🚀 Starting AI-powered variance analysis")
             log_capture.queue.put(f"📁 Processing {len(files)} file(s)")
 
+            # Log optional files
+            if loan_file_data:
+                log_capture.queue.put(f"📋 Loan interest file: {loan_file_data[0]}")
+            if revenue_breakdown_data:
+                log_capture.queue.put(f"📊 RevenueBreakdown file: {revenue_breakdown_data[0]}")
+            if unit_for_lease_data:
+                log_capture.queue.put(f"🏢 UnitForLeaseList file: {unit_for_lease_data[0]}")
+
             # Configure AI analysis
             config = get_analysis_config()
             config["use_llm_analysis"] = True
@@ -190,6 +275,45 @@ class AnalysisService:
                 CONFIG=config,
                 progress_callback=progress_update
             )
+
+            progress_update(80, "AI analysis complete...")
+
+            # Add Account 511 drill-down if files provided
+            if revenue_breakdown_data and unit_for_lease_data:
+                log_capture.queue.put(f"📈 Running Account 511 drill-down analysis...")
+                progress_update(82, "Running Account 511 analysis...")
+
+                try:
+                    # Extract bytes from tuples (filename, bytes)
+                    revenue_bytes = revenue_breakdown_data[1]
+                    unit_bytes = unit_for_lease_data[1]
+
+                    account_511_result = analyze_account_511(
+                        revenue_bytes,
+                        unit_bytes
+                    )
+
+                    if account_511_result and account_511_result.sub_accounts:
+                        log_capture.queue.put(f"   ✅ Found {len(account_511_result.sub_accounts)} sub-accounts")
+                        log_capture.queue.put(f"   ✅ Found {len(account_511_result.by_project)} projects")
+
+                        # Add 511 sheets to the Excel output
+                        from app.domain.finance.variance_analysis.services.variance_detector import _add_account_511_sheets
+                        wb = load_workbook(io.BytesIO(xlsx_bytes))
+                        _add_account_511_sheets(wb, account_511_result)
+
+                        # Save back to bytes
+                        output = io.BytesIO()
+                        wb.save(output)
+                        xlsx_bytes = output.getvalue()
+
+                        log_capture.queue.put(f"   ✅ Added Account 511 sheets to output")
+                    else:
+                        log_capture.queue.put(f"   ⚠️ No Account 511 data found in files")
+
+                except Exception as e:
+                    log_capture.queue.put(f"   ⚠️ Account 511 analysis failed: {str(e)}")
+                    # Continue without 511 data - don't fail the whole analysis
 
             progress_update(85, "Storing results...")
 

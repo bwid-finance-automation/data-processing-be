@@ -38,6 +38,12 @@ from app.domain.finance.variance_analysis.services.loan_interest_parser import (
     MONTH_ABBR_TO_NUM
 )
 
+# Import Account 511 analyzer for revenue drill-down
+from app.domain.finance.variance_analysis.services.account_511_analyzer import (
+    analyze_account_511,
+    Account511DrillDownResult
+)
+
 
 # ============================================================================
 # CONFIGURATION AND CONSTANTS
@@ -2045,13 +2051,14 @@ def run_all_variance_rules(
 # OUTPUT FUNCTIONS
 # ============================================================================
 
-def create_excel_output(all_file_data, combined_flags):
+def create_excel_output(all_file_data, combined_flags, account_511_result: Optional[Account511DrillDownResult] = None):
     """
     Create Excel output with raw data sheets and flagged variances.
 
     Args:
         all_file_data: List of dicts with keys: 'subsidiary', 'filename', 'bs_df', 'pl_df', 'flags'
         combined_flags: Combined list of all flags from all files
+        account_511_result: Optional Account 511 drill-down result
 
     Returns:
         bytes: Excel file
@@ -2253,7 +2260,219 @@ def create_excel_output(all_file_data, combined_flags):
                     adjusted_width = min(max_length + 2, 50)
                     pl_ws.column_dimensions[column_letter].width = adjusted_width
 
+        # Add Account 511 drill-down sheets if available
+        if account_511_result:
+            _add_account_511_sheets(writer, account_511_result)
+
     return output.getvalue()
+
+
+def _add_account_511_sheets(writer, result: Account511DrillDownResult):
+    """
+    Add Account 511 drill-down sheets to Excel output.
+
+    Args:
+        writer: ExcelWriter instance
+        result: Account511DrillDownResult from analysis
+    """
+    header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+    header_font = Font(bold=True, color='FFFFFF')
+    highlight_fill = PatternFill(start_color='FFF9C4', end_color='FFF9C4', fill_type='solid')
+
+    # Sheet: 511 Summary
+    summary_data = {
+        'Metric': [
+            'Analysis Period',
+            'Total Revenue (Current)',
+            'Total Revenue (Previous)',
+            'Total Variance',
+            'Variance %',
+            '',
+            'AI Executive Summary'
+        ],
+        'Value': [
+            f"{result.previous_period[1]:02d}/{result.previous_period[0]} → {result.current_period[1]:02d}/{result.current_period[0]}",
+            f"{result.total_current:,.0f} VND",
+            f"{result.total_previous:,.0f} VND",
+            f"{result.total_variance:,.0f} VND",
+            f"{result.total_variance_pct:+.2f}%",
+            '',
+            result.ai_narrative.get('executive_summary', 'N/A')
+        ]
+    }
+    summary_df = pd.DataFrame(summary_data)
+    summary_df.to_excel(writer, sheet_name='511 Summary', index=False)
+
+    # Format summary sheet
+    summary_ws = writer.sheets['511 Summary']
+    for cell in summary_ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+    summary_ws.column_dimensions['A'].width = 30
+    summary_ws.column_dimensions['B'].width = 80
+
+    # Sheet: 511 Sub-Accounts
+    if result.sub_accounts:
+        sub_account_rows = []
+        for sa in result.sub_accounts:
+            sub_account_rows.append({
+                'Account Code': sa['account_code'],
+                'Account Name': sa['account_name'],
+                'Level': sa.get('level', 0),
+                'Current Month': sa['current_month_amount'],
+                'Previous Month': sa['previous_month_amount'],
+                'Variance': sa['variance'],
+                'Variance %': f"{sa['variance_pct']:+.2f}%" if sa['variance_pct'] != 0 else "0.00%"
+            })
+
+        sub_df = pd.DataFrame(sub_account_rows)
+        sub_df.to_excel(writer, sheet_name='511 Sub-Accounts', index=False)
+
+        # Format sub-accounts sheet
+        sub_ws = writer.sheets['511 Sub-Accounts']
+        for cell in sub_ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+
+        # Highlight rows with significant variance (>5%)
+        for idx, row in enumerate(sub_account_rows, start=2):
+            if abs(row['Variance']) > 0 and abs(float(row['Variance %'].replace('%', '').replace('+', ''))) > 5:
+                for cell in sub_ws[idx]:
+                    cell.fill = highlight_fill
+
+        # Auto-width columns
+        for column in sub_ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except:
+                    pass
+            sub_ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+
+    # Sheet: 511 By Project
+    if result.by_project:
+        project_df = pd.DataFrame(result.by_project)
+        project_df.columns = ['Project', 'Current Amount', 'Formatted']
+        project_df = project_df.sort_values('Current Amount', ascending=False)
+        project_df.to_excel(writer, sheet_name='511 By Project', index=False)
+
+        # Format project sheet
+        proj_ws = writer.sheets['511 By Project']
+        for cell in proj_ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+
+        for column in proj_ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except:
+                    pass
+            proj_ws.column_dimensions[column_letter].width = min(max_length + 2, 40)
+
+    # Sheet: 511 Tenant Matches
+    if result.tenant_matches:
+        matches_df = pd.DataFrame(result.tenant_matches)
+        matches_df.columns = ['Revenue Entity', 'Unit Tenant', 'Confidence %', 'Match Type']
+        matches_df = matches_df.sort_values('Confidence %', ascending=False)
+        matches_df.to_excel(writer, sheet_name='511 Tenant Matches', index=False)
+
+        # Format matches sheet
+        matches_ws = writer.sheets['511 Tenant Matches']
+        for cell in matches_ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+
+        for column in matches_ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except:
+                    pass
+            matches_ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+
+    # Sheet: 511 Unit Summary
+    if result.unit_summary:
+        # Status breakdown
+        status_rows = []
+        for status, count in result.unit_summary.get('by_status', {}).items():
+            gla = result.unit_summary.get('total_gla_by_status', {}).get(status, 0)
+            status_rows.append({
+                'Status': status,
+                'Unit Count': count,
+                'Total GLA (sqm)': f"{gla:,.0f}"
+            })
+
+        if status_rows:
+            status_df = pd.DataFrame(status_rows)
+            status_df.to_excel(writer, sheet_name='511 Unit Summary', index=False)
+
+            # Format unit summary sheet
+            unit_ws = writer.sheets['511 Unit Summary']
+            for cell in unit_ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+
+            for column in unit_ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if cell.value:
+                            max_length = max(max_length, len(str(cell.value)))
+                    except:
+                        pass
+                unit_ws.column_dimensions[column_letter].width = min(max_length + 2, 30)
+
+    # Sheet: 511 AI Insights
+    if result.ai_narrative:
+        insights_rows = [
+            {'Section': 'Executive Summary', 'Content': result.ai_narrative.get('executive_summary', 'N/A')},
+            {'Section': '', 'Content': ''},
+            {'Section': 'Occupancy Correlation', 'Content': result.ai_narrative.get('occupancy_correlation', 'N/A')},
+            {'Section': '', 'Content': ''},
+        ]
+
+        # Add key drivers
+        key_drivers = result.ai_narrative.get('key_drivers', [])
+        if key_drivers:
+            insights_rows.append({'Section': 'Key Drivers', 'Content': ''})
+            for driver in key_drivers:
+                insights_rows.append({
+                    'Section': f"  - {driver.get('sub_account', 'N/A')}",
+                    'Content': f"{driver.get('description', 'N/A')} ({driver.get('impact', 'N/A')})"
+                })
+            insights_rows.append({'Section': '', 'Content': ''})
+
+        # Add recommendations
+        recommendations = result.ai_narrative.get('recommendations', [])
+        if recommendations:
+            insights_rows.append({'Section': 'Recommendations', 'Content': ''})
+            for idx, rec in enumerate(recommendations, 1):
+                insights_rows.append({
+                    'Section': f"  {idx}.",
+                    'Content': rec
+                })
+
+        insights_df = pd.DataFrame(insights_rows)
+        insights_df.to_excel(writer, sheet_name='511 AI Insights', index=False)
+
+        # Format insights sheet
+        insights_ws = writer.sheets['511 AI Insights']
+        for cell in insights_ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+        insights_ws.column_dimensions['A'].width = 25
+        insights_ws.column_dimensions['B'].width = 100
 
 
 # ============================================================================
@@ -2262,7 +2481,9 @@ def create_excel_output(all_file_data, combined_flags):
 
 def process_variance_analysis(
     files: List[Tuple[str, bytes]],
-    loan_interest_file: Optional[Tuple[str, bytes]] = None
+    loan_interest_file: Optional[Tuple[str, bytes]] = None,
+    revenue_breakdown_file: Optional[Tuple[str, bytes]] = None,
+    unit_for_lease_file: Optional[Tuple[str, bytes]] = None
 ) -> bytes:
     """
     Main function to process variance analysis for backend integration.
@@ -2271,6 +2492,8 @@ def process_variance_analysis(
     Args:
         files: List of tuples (filename, file_bytes) for BS/PL Breakdown files
         loan_interest_file: Optional tuple (filename, file_bytes) for ERP Loan Interest Rate file
+        revenue_breakdown_file: Optional tuple (filename, file_bytes) for Account 511 RevenueBreakdown file
+        unit_for_lease_file: Optional tuple (filename, file_bytes) for Account 511 UnitForLeaseList file
 
     Returns:
         bytes: Excel file with variance flags and raw data
@@ -2412,7 +2635,42 @@ def process_variance_analysis(
             "  • Files contain financial data below the headers"
         )
 
-    # Create output Excel with all data
-    xlsx_bytes = create_excel_output(all_file_data, combined_flags)
+    # Check if Account 511 drill-down should be triggered
+    # Trigger conditions: 511 files are provided AND Rule A1 or B1 is flagged (revenue variance)
+    account_511_result = None
+    if revenue_breakdown_file and unit_for_lease_file:
+        # Check if any revenue-related rule is flagged
+        revenue_rule_ids = ['A1', 'B1', 'C1', 'C2']  # Revenue-related rules
+        has_revenue_flag = any(
+            flag.get('Rule_ID', '').split(' ')[0] in revenue_rule_ids
+            for flag in combined_flags
+        )
+
+        # Always run 511 analysis when files are provided (user explicitly uploaded them)
+        print(f"📊 Account 511 drill-down: Revenue flag detected = {has_revenue_flag}")
+        print(f"📊 Running Account 511 analysis (files provided)...")
+
+        try:
+            rev_filename, rev_bytes = revenue_breakdown_file
+            unit_filename, unit_bytes = unit_for_lease_file
+            print(f"   • RevenueBreakdown: {rev_filename}")
+            print(f"   • UnitForLeaseList: {unit_filename}")
+
+            account_511_result = analyze_account_511(
+                revenue_breakdown_bytes=rev_bytes,
+                unit_for_lease_bytes=unit_bytes
+            )
+            print(f"✅ Account 511 analysis complete:")
+            print(f"   • {len(account_511_result.sub_accounts)} sub-accounts analyzed")
+            print(f"   • {len(account_511_result.by_project)} projects")
+            print(f"   • {len(account_511_result.tenant_matches)} tenant matches")
+            print(f"   • Total variance: {account_511_result.total_variance:,.0f} VND ({account_511_result.total_variance_pct:+.2f}%)")
+        except Exception as e:
+            print(f"⚠️ Warning: Account 511 analysis failed: {e}")
+            print("   Continuing without 511 drill-down...")
+            account_511_result = None
+
+    # Create output Excel with all data (including 511 drill-down if available)
+    xlsx_bytes = create_excel_output(all_file_data, combined_flags, account_511_result)
 
     return xlsx_bytes
