@@ -13,14 +13,20 @@ Architecture: N-Layer Monolith
 """
 
 import os
+import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # Setup logging first (before any other imports that might use logging)
 from app.shared.utils.logging_config import setup_logging
 setup_logging(level="INFO")
+
+# Initialize scheduler
+scheduler = AsyncIOScheduler()
 
 # Import exception handlers
 from app.core.exceptions import (
@@ -92,6 +98,42 @@ app.include_router(ai_usage_router.router, prefix="/api", tags=["AI Usage"])
 import logging
 logger = logging.getLogger(__name__)
 
+
+async def scheduled_cleanup_job():
+    """
+    Scheduled job to clean up old files daily.
+    Runs at 3AM every day to minimize impact on users.
+    """
+    logger.info("🧹 Starting scheduled cleanup job...")
+
+    try:
+        from app.infrastructure.database.session import get_db
+        from app.application.finance.bank_statement_parser.bank_statement_db_service import BankStatementDbService
+
+        async for db in get_db():
+            db_service = BankStatementDbService(db)
+            stats = await db_service.cleanup_old_files(retention_days=7)
+            logger.info(
+                f"✅ Scheduled cleanup completed: "
+                f"{stats['files_deleted']} files deleted, "
+                f"{stats.get('disk_space_freed', 0) / 1024 / 1024:.2f} MB freed"
+            )
+            break
+    except Exception as e:
+        logger.error(f"❌ Scheduled cleanup failed: {e}")
+
+    # Also cleanup FPA files
+    try:
+        fpa_use_case = CompareExcelFilesUseCase()
+        fpa_use_case.cleanup_old_files()
+
+        gla_use_case = GLAVarianceUseCase()
+        gla_use_case.cleanup_old_files()
+        logger.info("✅ FPA file cleanup completed")
+    except Exception as e:
+        logger.warning(f"⚠️ FPA cleanup warning: {e}")
+
+
 # Startup event for cleanup and database initialization
 @app.on_event("startup")
 async def startup_event():
@@ -114,27 +156,42 @@ async def startup_event():
     gla_use_case = GLAVarianceUseCase()
     gla_use_case.cleanup_old_files()
 
-    # Cleanup old bank statement uploads (30 days retention)
+    # Cleanup old bank statement uploads (7 days retention)
     try:
         from app.infrastructure.database.session import get_db
         from app.application.finance.bank_statement_parser.bank_statement_db_service import BankStatementDbService
 
         async for db in get_db():
             db_service = BankStatementDbService(db)
-            stats = await db_service.cleanup_old_files(retention_days=30)
+            stats = await db_service.cleanup_old_files(retention_days=7)
             if stats["files_deleted"] > 0:
                 logger.info(f"Cleaned up {stats['files_deleted']} old bank statement files")
             break
     except Exception as e:
         logger.warning(f"Bank statement cleanup skipped: {e}")
 
-    logger.info("Startup complete - Logging enabled")
+    # Start the scheduler for daily cleanup at 3AM
+    scheduler.add_job(
+        scheduled_cleanup_job,
+        CronTrigger(hour=3, minute=0),
+        id="daily_cleanup",
+        replace_existing=True,
+    )
+    scheduler.start()
+    logger.info("📅 Scheduled daily cleanup job at 3:00 AM")
+
+    logger.info("✅ Startup complete")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("🛑 Application shutting down...")
+
+    # Stop the scheduler
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+        logger.info("⏹️ Scheduler stopped")
 
     # Close database connections
     try:

@@ -13,6 +13,7 @@ from app.infrastructure.database.models.bank_statement import BankStatementModel
 from app.infrastructure.database.models.contract import ContractModel
 from app.infrastructure.database.models.gla import GLAProjectModel
 from app.infrastructure.database.models.analysis_session import AnalysisSessionModel
+from app.infrastructure.database.models.file_upload import FileUploadModel
 from app.infrastructure.persistence.repositories.base import BaseRepository
 
 
@@ -222,6 +223,32 @@ class ProjectCaseRepository(BaseRepository[ProjectCaseModel]):
         )
         statements = list(result.scalars().all())
 
+        # Get unique session IDs for file upload lookup
+        unique_session_ids = set(
+            stmt.session_id for stmt in statements if stmt.session_id
+        )
+
+        # Fetch file uploads for all sessions
+        file_uploads_by_session = {}
+        if unique_session_ids:
+            uploads_result = await self.session.execute(
+                select(FileUploadModel)
+                .where(FileUploadModel.session_id.in_(unique_session_ids))
+                .where(FileUploadModel.is_deleted == False)
+                .order_by(FileUploadModel.id.asc())
+            )
+            file_uploads = list(uploads_result.scalars().all())
+            for upload in file_uploads:
+                if upload.session_id not in file_uploads_by_session:
+                    file_uploads_by_session[upload.session_id] = []
+                file_uploads_by_session[upload.session_id].append({
+                    "id": upload.id,
+                    "file_name": upload.original_filename,
+                    "file_size": upload.file_size,
+                    "content_type": upload.content_type,
+                    "metadata": upload.metadata_json or {},
+                })
+
         # Group by session_id
         sessions_dict = {}
         for stmt in statements:
@@ -231,6 +258,7 @@ class ProjectCaseRepository(BaseRepository[ProjectCaseModel]):
                     "session_id": session_id,
                     "processed_at": stmt.processed_at,
                     "files": [],
+                    "uploaded_files": file_uploads_by_session.get(session_id, []),
                     "total_transactions": 0,
                     "banks": set(),
                 }

@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 UPLOAD_BASE_DIR = Path("uploads/bank_statements")
 
 # File retention period in days
-FILE_RETENTION_DAYS = 30
+FILE_RETENTION_DAYS = 7
 
 
 class BankStatementDbService:

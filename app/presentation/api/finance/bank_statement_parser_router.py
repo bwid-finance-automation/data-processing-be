@@ -40,7 +40,11 @@ _file_storage = {}
 
 
 def _generate_export_filename(transactions: list, balances: list) -> str:
-    """Generate export filename with format: {bank_codes}_statement_{timestamp}.xlsx"""
+    """
+    Generate export filename:
+    - Single bank: {BANK_NAME}_statement_{timestamp}.xlsx (e.g., VCB_statement_20260112_165835.xlsx)
+    - Multiple banks: bank_statement_{timestamp}.xlsx
+    """
     from datetime import datetime
 
     # Collect unique bank names from transactions and balances
@@ -52,19 +56,15 @@ def _generate_export_filename(transactions: list, balances: list) -> str:
         if hasattr(bal, 'bank_name') and bal.bank_name:
             bank_names.add(bal.bank_name.upper())
 
-    # Sort and join bank names (limit to first 3 if too many)
-    sorted_banks = sorted(bank_names)
-    if len(sorted_banks) > 3:
-        bank_code = "_".join(sorted_banks[:3]) + "_etc"
-    elif sorted_banks:
-        bank_code = "_".join(sorted_banks)
-    else:
-        bank_code = "UNKNOWN"
-
     # Generate timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    return f"{bank_code}_statement_{timestamp}.xlsx"
+    # Single bank: use bank name, multiple banks: use generic name
+    if len(bank_names) == 1:
+        bank_code = list(bank_names)[0]
+        return f"{bank_code}_statement_{timestamp}.xlsx"
+    else:
+        return f"bank_statement_{timestamp}.xlsx"
 
 
 def _format_for_sharepoint(transactions: list, balances: list) -> SharePointData:
@@ -477,6 +477,7 @@ async def parse_bank_statements(
         pdf_files: List[Tuple[str, bytes, Optional[str], Optional[str]]] = []  # (filename, content, bank_code, password)
         zip_errors: List[dict] = []
         original_uploads: List[Tuple[str, bytes]] = []  # For saving to DB
+        zip_extraction_info: dict = {}  # Track extracted file counts per ZIP
         zip_index = 0  # Track index for zip password mapping
 
         for file in files:
@@ -496,6 +497,14 @@ async def parse_bank_statements(
                 excel_files.extend(extracted_excel)
                 pdf_files.extend([(name, data, None, None) for name, data in extracted_pdf])
                 zip_errors.extend(errors)
+
+                # Track extraction info for this ZIP
+                zip_extraction_info[filename] = {
+                    "excel_count": len(extracted_excel),
+                    "pdf_count": len(extracted_pdf),
+                    "excel_files": [f[0] for f in extracted_excel],
+                    "pdf_files": [f[0] for f in extracted_pdf]
+                }
                 logger.info(f"Extracted from {filename}: {len(extracted_excel)} Excel, {len(extracted_pdf)} PDF files")
 
             elif lower_name.endswith(('.xlsx', '.xls')):
@@ -608,12 +617,25 @@ async def parse_bank_statements(
                 lower_name = filename.lower()
                 if lower_name.endswith('.xlsx'):
                     content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    file_metadata = {"source": "parse-excel", "project_uuid": project_uuid}
                 elif lower_name.endswith('.xls'):
                     content_type = "application/vnd.ms-excel"
+                    file_metadata = {"source": "parse-excel", "project_uuid": project_uuid}
                 elif lower_name.endswith('.zip'):
                     content_type = "application/zip"
+                    # Include extraction info for ZIP files
+                    extraction_info = zip_extraction_info.get(filename, {})
+                    file_metadata = {
+                        "source": "parse-zip",
+                        "project_uuid": project_uuid,
+                        "extracted_excel_count": extraction_info.get("excel_count", 0),
+                        "extracted_pdf_count": extraction_info.get("pdf_count", 0),
+                        "extracted_excel_files": extraction_info.get("excel_files", []),
+                        "extracted_pdf_files": extraction_info.get("pdf_files", [])
+                    }
                 else:
                     content_type = "application/octet-stream"
+                    file_metadata = {"source": "parse-excel", "project_uuid": project_uuid}
 
                 await db_service.save_file_upload(
                     filename=filename,
@@ -623,7 +645,7 @@ async def parse_bank_statements(
                     session_id=session_id,
                     content_type=content_type,
                     processing_status="completed",
-                    metadata={"source": "parse-excel", "project_uuid": project_uuid},
+                    metadata=file_metadata,
                 )
 
             # Save parsed statements to database (with project linkage if provided)
@@ -808,6 +830,7 @@ async def parse_bank_statements_pdf(
         pdf_inputs = []
         zip_errors = []
         original_uploads: List[Tuple[str, bytes]] = []  # For saving to DB
+        zip_extraction_info: dict = {}  # Track extracted file counts per ZIP
         pdf_index = 0  # Track index for bank_code/password mapping
         zip_index = 0  # Track index for zip password mapping
 
@@ -823,10 +846,18 @@ async def parse_bank_statements_pdf(
                 zip_index += 1
 
                 # Extract PDFs from ZIP
-                _, extracted_pdfs, errors, needs_password = _extract_files_from_zip(content, filename, zip_password)
+                extracted_excel, extracted_pdfs, errors, needs_password = _extract_files_from_zip(content, filename, zip_password)
                 # Add extracted PDFs without bank_code/password (not applicable for ZIP contents)
                 pdf_inputs.extend([(name, data, None, None) for name, data in extracted_pdfs])
                 zip_errors.extend(errors)
+
+                # Track extraction info for this ZIP (for PDF endpoint, we only process PDFs)
+                zip_extraction_info[filename] = {
+                    "excel_count": len(extracted_excel),
+                    "pdf_count": len(extracted_pdfs),
+                    "excel_files": [f[0] for f in extracted_excel],
+                    "pdf_files": [f[0] for f in extracted_pdfs]
+                }
                 logger.info(f"Extracted {len(extracted_pdfs)} PDF files from {filename}")
 
             elif lower_name.endswith('.pdf'):
@@ -898,10 +929,22 @@ async def parse_bank_statements_pdf(
                 lower_name = filename.lower()
                 if lower_name.endswith('.pdf'):
                     content_type = "application/pdf"
+                    file_metadata = {"source": "parse-pdf", "project_uuid": project_uuid}
                 elif lower_name.endswith('.zip'):
                     content_type = "application/zip"
+                    # Include extraction info for ZIP files
+                    extraction_info = zip_extraction_info.get(filename, {})
+                    file_metadata = {
+                        "source": "parse-zip",
+                        "project_uuid": project_uuid,
+                        "extracted_excel_count": extraction_info.get("excel_count", 0),
+                        "extracted_pdf_count": extraction_info.get("pdf_count", 0),
+                        "extracted_excel_files": extraction_info.get("excel_files", []),
+                        "extracted_pdf_files": extraction_info.get("pdf_files", [])
+                    }
                 else:
                     content_type = "application/octet-stream"
+                    file_metadata = {"source": "parse-pdf", "project_uuid": project_uuid}
 
                 await db_service.save_file_upload(
                     filename=filename,
@@ -911,7 +954,7 @@ async def parse_bank_statements_pdf(
                     session_id=session_id,
                     content_type=content_type,
                     processing_status="completed",
-                    metadata={"source": "parse-pdf", "project_uuid": project_uuid},
+                    metadata=file_metadata,
                 )
 
             # Save parsed statements to database (with project linkage if provided)
@@ -1088,16 +1131,14 @@ async def download_excel_from_history(
             logger.info(f"Serving cached Excel for session: {session_id}")
             # Get bank names from database for filename
             statements = await db_service.get_statements_by_session(session_id)
-            bank_names = sorted(set(stmt.bank_name.upper() for stmt in statements if stmt.bank_name))
-            if len(bank_names) > 3:
-                bank_code = "_".join(bank_names[:3]) + "_etc"
-            elif bank_names:
-                bank_code = "_".join(bank_names)
-            else:
-                bank_code = "UNKNOWN"
+            bank_names = set(stmt.bank_name.upper() for stmt in statements if stmt.bank_name)
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{bank_code}_statement_{timestamp}.xlsx"
+            # Single bank: use bank name, multiple banks: use generic name
+            if len(bank_names) == 1:
+                filename = f"{list(bank_names)[0]}_statement_{timestamp}.xlsx"
+            else:
+                filename = f"bank_statement_{timestamp}.xlsx"
             return Response(
                 content=excel_bytes,
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1194,10 +1235,10 @@ async def get_storage_stats(
 
 @router.post("/storage/cleanup", summary="Cleanup Old Files")
 async def cleanup_old_files(
-    retention_days: int = 30,
+    retention_days: int = 7,
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
 ):
-    """Manually trigger cleanup of old uploaded files."""
+    """Manually trigger cleanup of old uploaded files (default: 7 days)."""
     try:
         stats = await db_service.cleanup_old_files(retention_days)
         return {
@@ -1236,6 +1277,153 @@ async def list_uploaded_files_by_session(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+
+
+@router.get("/session/{session_id}", summary="Get Session Details")
+async def get_session_details(
+    session_id: str,
+    db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+):
+    """
+    Get detailed information about a parsing session.
+
+    Returns:
+    - Session metadata
+    - Uploaded files with extraction info
+    - Parsed statements with transactions and balances
+    """
+    try:
+        # Get uploaded files
+        files = await db_service.get_files_by_session(session_id)
+        if not files:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Get parsed statements
+        statements = await db_service.get_statements_by_session(session_id)
+
+        # Calculate totals
+        total_transactions = sum(len(s.transactions) for s in statements)
+        total_balances = sum(len(s.balances) for s in statements)
+        banks = list(set(s.bank_name for s in statements if s.bank_name))
+
+        # Get earliest and latest processed_at
+        processed_dates = [s.processed_at for s in statements if s.processed_at]
+        processed_at = max(processed_dates) if processed_dates else None
+
+        # Calculate file type breakdown
+        zip_files = []
+        excel_files = []
+        pdf_files = []
+
+        for f in files:
+            file_info = {
+                "id": f.id,
+                "file_name": f.original_filename,
+                "file_size": f.file_size,
+                "content_type": f.content_type,
+                "uploaded_at": f.created_at.isoformat() if f.created_at else None,
+                "download_url": f"/api/finance/bank-statements/uploaded-file/{f.id}" if f.file_path else None,
+                "metadata": f.metadata_json or {},
+            }
+
+            lower_name = (f.original_filename or "").lower()
+            if lower_name.endswith('.zip'):
+                zip_files.append(file_info)
+            elif lower_name.endswith('.pdf'):
+                pdf_files.append(file_info)
+            elif lower_name.endswith(('.xlsx', '.xls')):
+                excel_files.append(file_info)
+
+        # Calculate extracted counts from ZIP metadata
+        extracted_excel_count = 0
+        extracted_pdf_count = 0
+        extracted_excel_files = []
+        extracted_pdf_files = []
+
+        for zf in zip_files:
+            meta = zf.get("metadata", {})
+            extracted_excel_count += meta.get("extracted_excel_count", 0)
+            extracted_pdf_count += meta.get("extracted_pdf_count", 0)
+            extracted_excel_files.extend(meta.get("extracted_excel_files", []))
+            extracted_pdf_files.extend(meta.get("extracted_pdf_files", []))
+
+        # Format statements for response
+        statements_data = []
+        for stmt in statements:
+            # Get balance info
+            balance_data = None
+            if stmt.balances:
+                bal = stmt.balances[0]  # Usually one balance per statement
+                balance_data = {
+                    "acc_no": bal.acc_no,
+                    "currency": bal.currency,
+                    "opening_balance": float(bal.opening_balance) if bal.opening_balance else 0,
+                    "closing_balance": float(bal.closing_balance) if bal.closing_balance else 0,
+                }
+
+            # Format transactions
+            transactions_data = []
+            for tx in stmt.transactions:
+                transactions_data.append({
+                    "id": tx.id,
+                    "date": tx.transaction_date.isoformat() if tx.transaction_date else None,
+                    "description": tx.description,
+                    "debit": float(tx.debit) if tx.debit else None,
+                    "credit": float(tx.credit) if tx.credit else None,
+                    "currency": tx.currency,
+                    "acc_no": tx.acc_no,
+                    "transaction_id": tx.transaction_id,
+                    "beneficiary_bank": tx.beneficiary_bank,
+                    "beneficiary_acc_no": tx.beneficiary_acc_no,
+                    "beneficiary_acc_name": tx.beneficiary_acc_name,
+                })
+
+            statements_data.append({
+                "uuid": str(stmt.uuid),
+                "bank_name": stmt.bank_name,
+                "file_name": stmt.file_name,
+                "processed_at": stmt.processed_at.isoformat() if stmt.processed_at else None,
+                "transaction_count": len(stmt.transactions),
+                "balance": balance_data,
+                "transactions": transactions_data,
+            })
+
+        return {
+            "session_id": session_id,
+            "processed_at": processed_at.isoformat() if processed_at else None,
+            "banks": banks,
+            "total_files": len(files),
+            "total_statements": len(statements),
+            "total_transactions": total_transactions,
+            "total_balances": total_balances,
+            "download_url": f"/api/finance/bank-statements/download-history/{session_id}",
+
+            # File breakdown
+            "uploaded_files": {
+                "zip_files": zip_files,
+                "excel_files": excel_files,
+                "pdf_files": pdf_files,
+                "zip_count": len(zip_files),
+                "excel_count": len(excel_files),
+                "pdf_count": len(pdf_files),
+            },
+
+            # Extracted from ZIP
+            "extracted_from_zip": {
+                "excel_count": extracted_excel_count,
+                "pdf_count": extracted_pdf_count,
+                "excel_files": extracted_excel_files,
+                "pdf_files": extracted_pdf_files,
+            },
+
+            # Parsed statements
+            "statements": statements_data,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session details: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get session details: {str(e)}")
 
 
 @router.get("/uploaded-file/{file_id}", summary="Download Uploaded File")
