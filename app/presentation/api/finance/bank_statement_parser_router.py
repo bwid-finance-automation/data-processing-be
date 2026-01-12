@@ -7,6 +7,7 @@ import uuid
 import math
 import base64
 import re
+import zipfile
 from io import BytesIO
 import pandas as pd  # Added pandas for HTML handling
 
@@ -233,6 +234,124 @@ def _format_for_sharepoint(transactions: list, balances: list) -> SharePointData
     return SharePointData(balances=sp_balances, transactions=sp_transactions)
 
 
+def _check_zip_encrypted(zip_bytes: bytes) -> bool:
+    """Check if a ZIP file is password-protected."""
+    try:
+        with zipfile.ZipFile(BytesIO(zip_bytes), 'r') as zf:
+            for file_info in zf.infolist():
+                if file_info.flag_bits & 0x1:  # Encrypted flag
+                    return True
+                # Try to read a small file to check for encryption
+                if not file_info.is_dir():
+                    try:
+                        zf.read(file_info.filename)
+                        return False  # Successfully read without password
+                    except RuntimeError as e:
+                        if "encrypted" in str(e).lower() or "password" in str(e).lower():
+                            return True
+                        raise
+    except Exception:
+        pass
+    return False
+
+
+def _extract_files_from_zip(
+    zip_bytes: bytes,
+    zip_filename: str,
+    password: Optional[str] = None
+) -> Tuple[List[Tuple[str, bytes]], List[Tuple[str, bytes]], List[dict], bool]:
+    """
+    Extract Excel and PDF files from a ZIP archive.
+
+    Args:
+        zip_bytes: The ZIP file content as bytes
+        zip_filename: Original ZIP filename for error reporting
+        password: Optional password for encrypted ZIP files
+
+    Returns:
+        Tuple of:
+        - excel_files: List of (filename, content) tuples for Excel files
+        - pdf_files: List of (filename, content) tuples for PDF files
+        - errors: List of error dicts for unsupported files
+        - needs_password: True if ZIP is encrypted and no/wrong password provided
+    """
+    excel_files = []
+    pdf_files = []
+    errors = []
+    needs_password = False
+
+    try:
+        with zipfile.ZipFile(BytesIO(zip_bytes), 'r') as zf:
+            # Set password if provided
+            pwd_bytes = password.encode('utf-8') if password else None
+
+            for file_info in zf.infolist():
+                # Skip directories
+                if file_info.is_dir():
+                    continue
+
+                # Skip hidden files and macOS resource forks
+                filename = file_info.filename
+                basename = filename.split('/')[-1]
+                if basename.startswith('.') or basename.startswith('__MACOSX'):
+                    continue
+
+                # Read file content
+                try:
+                    content = zf.read(filename, pwd=pwd_bytes)
+                except RuntimeError as e:
+                    error_msg = str(e).lower()
+                    if "encrypted" in error_msg or "password" in error_msg or "bad password" in error_msg:
+                        needs_password = True
+                        if password:
+                            errors.append({
+                                "file_name": zip_filename,
+                                "error": "Wrong password for encrypted ZIP file"
+                            })
+                        else:
+                            errors.append({
+                                "file_name": zip_filename,
+                                "error": "ZIP file is encrypted. Please provide password."
+                            })
+                        return excel_files, pdf_files, errors, needs_password
+                    errors.append({
+                        "file_name": f"{zip_filename}/{filename}",
+                        "error": f"Failed to read from ZIP: {str(e)}"
+                    })
+                    continue
+                except Exception as e:
+                    errors.append({
+                        "file_name": f"{zip_filename}/{filename}",
+                        "error": f"Failed to read from ZIP: {str(e)}"
+                    })
+                    continue
+
+                # Categorize by extension
+                lower_name = filename.lower()
+                if lower_name.endswith(('.xlsx', '.xls')):
+                    excel_files.append((basename, content))
+                elif lower_name.endswith('.pdf'):
+                    pdf_files.append((basename, content))
+                else:
+                    errors.append({
+                        "file_name": f"{zip_filename}/{filename}",
+                        "error": "Unsupported file type. Only .xlsx, .xls, .pdf are supported inside ZIP."
+                    })
+
+    except zipfile.BadZipFile:
+        errors.append({
+            "file_name": zip_filename,
+            "error": "Invalid ZIP file or corrupted archive"
+        })
+    except Exception as e:
+        errors.append({
+            "file_name": zip_filename,
+            "error": f"Failed to process ZIP: {str(e)}"
+        })
+
+    return excel_files, pdf_files, errors, needs_password
+
+
 @router.get("/", summary="Bank Statement Parser Info")
 def get_info():
     """Get information about the Bank Statement Parser API."""
@@ -279,37 +398,185 @@ def get_supported_banks():
     )
 
 
+@router.post("/verify-zip-password", summary="Verify ZIP Password")
+async def verify_zip_password(
+    file: UploadFile = File(..., description="ZIP file to verify password"),
+    password: str = Form(..., description="Password to verify"),
+):
+    """
+    Verify if the provided password is correct for an encrypted ZIP file.
+    Returns {"valid": true} if password is correct, {"valid": false} otherwise.
+    """
+    try:
+        content = await file.read()
+
+        # Check if ZIP is encrypted first
+        if not _check_zip_encrypted(content):
+            return {"valid": True, "message": "ZIP file is not encrypted"}
+
+        # Try to extract with the password
+        try:
+            with zipfile.ZipFile(BytesIO(content), 'r') as zf:
+                pwd_bytes = password.encode('utf-8') if password else None
+
+                # Try to read the first non-directory file
+                for file_info in zf.infolist():
+                    if not file_info.is_dir():
+                        try:
+                            zf.read(file_info.filename, pwd=pwd_bytes)
+                            return {"valid": True, "message": "Password is correct"}
+                        except RuntimeError as e:
+                            error_msg = str(e).lower()
+                            if "bad password" in error_msg or "password" in error_msg or "encrypted" in error_msg:
+                                return {"valid": False, "message": "Incorrect password"}
+                            raise
+
+                return {"valid": True, "message": "ZIP file is empty or contains only directories"}
+
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid ZIP file")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying ZIP password: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to verify ZIP password: {str(e)}")
+
+
 @router.post("/parse", response_model=ParseBankStatementsResponse, summary="Parse Bank Statements (Batch)")
 async def parse_bank_statements(
-    files: List[UploadFile] = File(..., description="Bank statement Excel files (.xlsx, .xls)"),
+    files: List[UploadFile] = File(..., description="Bank statement files (.xlsx, .xls, .zip containing Excel/PDF)"),
+    zip_passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted ZIP files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted ZIPs."),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Parse multiple bank statement files in batch.
-    ... (giữ nguyên docstring)
+
+    Supports:
+    - Excel files (.xlsx, .xls)
+    - ZIP files containing Excel (.xlsx, .xls) and/or PDF (.pdf) files (including password-protected ZIPs)
+
+    When a ZIP file is uploaded, all Excel and PDF files inside will be extracted
+    and processed automatically. Excel files are parsed directly, PDF files are
+    processed using Gemini OCR.
     """
     try:
         # Validate files
         if not files:
             raise HTTPException(status_code=400, detail="No files uploaded")
 
-        # Read files into memory
-        file_data = []
+        # Parse zip_passwords if provided
+        zip_password_list = []
+        if zip_passwords:
+            zip_password_list = [pwd.strip() if pwd.strip() else None for pwd in zip_passwords.split(",")]
+
+        # Separate files by type
+        excel_files: List[Tuple[str, bytes]] = []
+        pdf_files: List[Tuple[str, bytes, Optional[str], Optional[str]]] = []  # (filename, content, bank_code, password)
+        zip_errors: List[dict] = []
+        original_uploads: List[Tuple[str, bytes]] = []  # For saving to DB
+        zip_index = 0  # Track index for zip password mapping
+
         for file in files:
-            # Validate file extension
-            if not file.filename.lower().endswith(('.xlsx', '.xls')):
+            filename = file.filename
+            content = await file.read()
+            original_uploads.append((filename, content))
+
+            lower_name = filename.lower()
+
+            if lower_name.endswith('.zip'):
+                # Get password for this ZIP file
+                zip_password = zip_password_list[zip_index] if zip_index < len(zip_password_list) else None
+                zip_index += 1
+
+                # Extract files from ZIP
+                extracted_excel, extracted_pdf, errors, needs_password = _extract_files_from_zip(content, filename, zip_password)
+                excel_files.extend(extracted_excel)
+                pdf_files.extend([(name, data, None, None) for name, data in extracted_pdf])
+                zip_errors.extend(errors)
+                logger.info(f"Extracted from {filename}: {len(extracted_excel)} Excel, {len(extracted_pdf)} PDF files")
+
+            elif lower_name.endswith(('.xlsx', '.xls')):
+                excel_files.append((filename, content))
+
+            else:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid file type: {file.filename}. Only .xlsx and .xls files are supported."
+                    detail=f"Invalid file type: {filename}. Supported: .xlsx, .xls, .zip"
                 )
 
-            content = await file.read()
-            file_data.append((file.filename, content))
+        # Check if we have any files to process
+        if not excel_files and not pdf_files:
+            if zip_errors:
+                return ParseBankStatementsResponse(
+                    statements=[],
+                    summary={
+                        "total_files": len(files),
+                        "successful": 0,
+                        "failed": len(zip_errors),
+                        "failed_files": zip_errors,
+                        "total_transactions": 0,
+                        "total_balances": 0
+                    },
+                    download_url="",
+                    session_id=""
+                )
+            raise HTTPException(status_code=400, detail="No valid files found to process")
 
         # Parse using use case
         use_case = ParseBankStatementsUseCase()
-        result = use_case.execute(file_data)
+
+        # Initialize combined result
+        combined_result = {
+            "statements": [],
+            "all_transactions": [],
+            "all_balances": [],
+            "summary": {
+                "total_files": 0,
+                "successful": 0,
+                "failed": 0,
+                "failed_files": [],
+                "total_transactions": 0,
+                "total_balances": 0
+            },
+            "ai_usage": None
+        }
+
+        # Process Excel files
+        if excel_files:
+            excel_result = use_case.execute(excel_files)
+            combined_result["statements"].extend(excel_result["statements"])
+            combined_result["all_transactions"].extend(excel_result["all_transactions"])
+            combined_result["all_balances"].extend(excel_result["all_balances"])
+            combined_result["summary"]["total_files"] += excel_result["summary"]["total_files"]
+            combined_result["summary"]["successful"] += excel_result["summary"]["successful"]
+            combined_result["summary"]["failed"] += excel_result["summary"]["failed"]
+            combined_result["summary"]["failed_files"].extend(excel_result["summary"]["failed_files"])
+
+        # Process PDF files (from ZIP)
+        if pdf_files:
+            pdf_result = use_case.execute_from_pdf(pdf_files)
+            combined_result["statements"].extend(pdf_result["statements"])
+            combined_result["all_transactions"].extend(pdf_result["all_transactions"])
+            combined_result["all_balances"].extend(pdf_result["all_balances"])
+            combined_result["summary"]["total_files"] += pdf_result["summary"]["total_files"]
+            combined_result["summary"]["successful"] += pdf_result["summary"]["successful"]
+            combined_result["summary"]["failed"] += pdf_result["summary"]["failed"]
+            combined_result["summary"]["failed_files"].extend(pdf_result["summary"]["failed_files"])
+            combined_result["ai_usage"] = pdf_result.get("ai_usage")
+
+        # Add ZIP extraction errors
+        if zip_errors:
+            combined_result["summary"]["failed"] += len(zip_errors)
+            combined_result["summary"]["failed_files"].extend(zip_errors)
+
+        # Update totals
+        combined_result["summary"]["total_transactions"] = len(combined_result["all_transactions"])
+        combined_result["summary"]["total_balances"] = len(combined_result["all_balances"])
+
+        result = combined_result
 
         # Generate Excel output (ERP Template format)
         excel_bytes = use_case.export_to_erp_template_excel(
@@ -336,14 +603,25 @@ async def parse_bank_statements(
                     logger.warning(f"Invalid project_uuid format: {project_uuid}")
 
             # Save file upload records (with file content for download later)
-            for i, (filename, content) in enumerate(file_data):
+            for filename, content in original_uploads:
+                # Determine content type
+                lower_name = filename.lower()
+                if lower_name.endswith('.xlsx'):
+                    content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                elif lower_name.endswith('.xls'):
+                    content_type = "application/vnd.ms-excel"
+                elif lower_name.endswith('.zip'):
+                    content_type = "application/zip"
+                else:
+                    content_type = "application/octet-stream"
+
                 await db_service.save_file_upload(
                     filename=filename,
                     file_size=len(content),
                     file_content=content,  # Save actual file to disk
                     file_type="bank_statement",
                     session_id=session_id,
-                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if filename.endswith('.xlsx') else "application/vnd.ms-excel",
+                    content_type=content_type,
                     processing_status="completed",
                     metadata={"source": "parse-excel", "project_uuid": project_uuid},
                 )
@@ -363,6 +641,65 @@ async def parse_bank_statements(
         except Exception as db_error:
             logger.error(f"Failed to save to database: {db_error}")
             # Don't fail the request, just log the error - parsing was successful
+
+        # Log AI usage if PDF files were processed from ZIP
+        ai_usage = None
+        if result.get("ai_usage") and pdf_files:
+            from app.presentation.schemas.bank_statement_schemas import AIUsageMetrics, AIUsageFileMetrics
+            from app.infrastructure.database.models.ai_usage import AIUsageModel
+            from datetime import datetime
+
+            ai_usage_data = result["ai_usage"]
+            ai_usage = AIUsageMetrics(
+                total_input_tokens=ai_usage_data.get("total_input_tokens", 0),
+                total_output_tokens=ai_usage_data.get("total_output_tokens", 0),
+                total_tokens=ai_usage_data.get("total_tokens", 0),
+                total_processing_time_ms=ai_usage_data.get("total_processing_time_ms", 0),
+                total_processing_time_seconds=ai_usage_data.get("total_processing_time_seconds", 0),
+                files_processed=ai_usage_data.get("files_processed", 0),
+                files_successful=ai_usage_data.get("files_successful", 0),
+                files_failed=ai_usage_data.get("files_failed", 0),
+                model_name=ai_usage_data.get("model_name", ""),
+                file_metrics=[
+                    AIUsageFileMetrics(**fm) for fm in ai_usage_data.get("file_metrics", [])
+                ]
+            )
+
+            # Save AI usage to database
+            try:
+                input_cost = ai_usage_data.get("total_input_tokens", 0) * 0.000000075
+                output_cost = ai_usage_data.get("total_output_tokens", 0) * 0.0000003
+                estimated_cost = input_cost + output_cost
+
+                ai_usage_log = AIUsageModel(
+                    project_id=None,
+                    case_id=None,
+                    session_id=session_id,
+                    provider="gemini",
+                    model_name=ai_usage_data.get("model_name", "gemini-2.0-flash"),
+                    task_type="ocr",
+                    task_description="Bank statement PDF OCR parsing (from ZIP)",
+                    file_name=", ".join([f[0] for f in pdf_files]),
+                    file_count=ai_usage_data.get("files_processed", len(pdf_files)),
+                    input_tokens=ai_usage_data.get("total_input_tokens", 0),
+                    output_tokens=ai_usage_data.get("total_output_tokens", 0),
+                    total_tokens=ai_usage_data.get("total_tokens", 0),
+                    processing_time_ms=ai_usage_data.get("total_processing_time_ms", 0),
+                    estimated_cost_usd=estimated_cost,
+                    success=ai_usage_data.get("files_failed", 0) == 0,
+                    error_message=None,
+                    metadata_json={
+                        "files_successful": ai_usage_data.get("files_successful", 0),
+                        "files_failed": ai_usage_data.get("files_failed", 0),
+                        "source": "zip_extraction",
+                    },
+                    requested_at=datetime.utcnow(),
+                )
+                await ai_usage_repo.create(ai_usage_log)
+                await ai_usage_repo.session.commit()
+                logger.info(f"Saved AI usage log for session: {session_id}")
+            except Exception as ai_log_error:
+                logger.error(f"Failed to save AI usage log: {ai_log_error}")
 
         # Convert to response schema
         statements_response = []
@@ -417,7 +754,8 @@ async def parse_bank_statements(
             statements=statements_response,
             summary=result["summary"],
             download_url=f"/api/finance/bank-statements/download/{session_id}",
-            session_id=session_id
+            session_id=session_id,
+            ai_usage=ai_usage
         )
 
     except HTTPException:
@@ -428,16 +766,23 @@ async def parse_bank_statements(
 
 @router.post("/parse-pdf", response_model=ParseBankStatementsResponse, summary="Parse Bank Statements from PDF (Gemini OCR)")
 async def parse_bank_statements_pdf(
-    files: List[UploadFile] = File(..., description="Bank statement PDF files (.pdf)"),
+    files: List[UploadFile] = File(..., description="Bank statement PDF files (.pdf, .zip containing PDFs)"),
     bank_codes: Optional[str] = Form(None, description="Comma-separated bank codes for each file (e.g., 'VIB,ACB,VCB'). Leave empty for auto-detection."),
     passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted PDF files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted PDFs."),
+    zip_passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted ZIP files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted ZIPs."),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
     ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Parse multiple bank statement PDF files using Gemini Flash OCR.
-    ... (giữ nguyên docstring)
+
+    Supports:
+    - PDF files (.pdf)
+    - ZIP files containing PDF files (.zip) (including password-protected ZIPs)
+
+    When a ZIP file is uploaded, all PDF files inside will be extracted and processed.
+    Note: bank_codes and passwords apply only to directly uploaded PDFs, not to PDFs inside ZIPs.
     """
     try:
         # Validate files
@@ -449,29 +794,79 @@ async def parse_bank_statements_pdf(
         if bank_codes:
             bank_code_list = [code.strip() if code.strip() else None for code in bank_codes.split(",")]
 
-        # Parse passwords if provided
+        # Parse passwords if provided (for PDF files)
         password_list = []
         if passwords:
             password_list = [pwd.strip() if pwd.strip() else None for pwd in passwords.split(",")]
 
+        # Parse zip_passwords if provided
+        zip_password_list = []
+        if zip_passwords:
+            zip_password_list = [pwd.strip() if pwd.strip() else None for pwd in zip_passwords.split(",")]
+
         # Read files into memory
         pdf_inputs = []
-        for i, file in enumerate(files):
-            # Validate file extension
-            if not file.filename.lower().endswith('.pdf'):
+        zip_errors = []
+        original_uploads: List[Tuple[str, bytes]] = []  # For saving to DB
+        pdf_index = 0  # Track index for bank_code/password mapping
+        zip_index = 0  # Track index for zip password mapping
+
+        for file in files:
+            filename = file.filename
+            content = await file.read()
+            original_uploads.append((filename, content))
+            lower_name = filename.lower()
+
+            if lower_name.endswith('.zip'):
+                # Get password for this ZIP file
+                zip_password = zip_password_list[zip_index] if zip_index < len(zip_password_list) else None
+                zip_index += 1
+
+                # Extract PDFs from ZIP
+                _, extracted_pdfs, errors, needs_password = _extract_files_from_zip(content, filename, zip_password)
+                # Add extracted PDFs without bank_code/password (not applicable for ZIP contents)
+                pdf_inputs.extend([(name, data, None, None) for name, data in extracted_pdfs])
+                zip_errors.extend(errors)
+                logger.info(f"Extracted {len(extracted_pdfs)} PDF files from {filename}")
+
+            elif lower_name.endswith('.pdf'):
+                bank_code = bank_code_list[pdf_index] if pdf_index < len(bank_code_list) else None
+                password = password_list[pdf_index] if pdf_index < len(password_list) else None
+                pdf_inputs.append((filename, content, bank_code, password))
+                pdf_index += 1
+
+            else:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid file type: {file.filename}. Only .pdf files are supported for this endpoint."
+                    detail=f"Invalid file type: {filename}. Supported: .pdf, .zip"
                 )
 
-            content = await file.read()
-            bank_code = bank_code_list[i] if i < len(bank_code_list) else None
-            password = password_list[i] if i < len(password_list) else None
-            pdf_inputs.append((file.filename, content, bank_code, password))
+        # Check if we have any PDFs to process
+        if not pdf_inputs:
+            if zip_errors:
+                return ParseBankStatementsResponse(
+                    statements=[],
+                    summary={
+                        "total_files": len(files),
+                        "successful": 0,
+                        "failed": len(zip_errors),
+                        "failed_files": zip_errors,
+                        "total_transactions": 0,
+                        "total_balances": 0
+                    },
+                    download_url="",
+                    session_id=""
+                )
+            raise HTTPException(status_code=400, detail="No PDF files found to process")
 
         # Parse using use case
         use_case = ParseBankStatementsUseCase()
         result = use_case.execute_from_pdf(pdf_inputs)
+
+        # Add ZIP extraction errors to result
+        if zip_errors:
+            result["summary"]["failed"] += len(zip_errors)
+            result["summary"]["failed_files"].extend(zip_errors)
 
         # Generate Excel output (ERP Template format)
         excel_bytes = use_case.export_to_erp_template_excel(
@@ -498,16 +893,25 @@ async def parse_bank_statements_pdf(
                     logger.warning(f"Invalid project_uuid format: {project_uuid}")
 
             # Save file upload records (with file content for download later)
-            for i, (filename, content, bank_code, password) in enumerate(pdf_inputs):
+            for filename, content in original_uploads:
+                # Determine content type
+                lower_name = filename.lower()
+                if lower_name.endswith('.pdf'):
+                    content_type = "application/pdf"
+                elif lower_name.endswith('.zip'):
+                    content_type = "application/zip"
+                else:
+                    content_type = "application/octet-stream"
+
                 await db_service.save_file_upload(
                     filename=filename,
                     file_size=len(content),
                     file_content=content,  # Save actual file to disk
                     file_type="bank_statement",
                     session_id=session_id,
-                    content_type="application/pdf",
+                    content_type=content_type,
                     processing_status="completed",
-                    metadata={"source": "parse-pdf", "bank_code": bank_code, "project_uuid": project_uuid},
+                    metadata={"source": "parse-pdf", "project_uuid": project_uuid},
                 )
 
             # Save parsed statements to database (with project linkage if provided)
