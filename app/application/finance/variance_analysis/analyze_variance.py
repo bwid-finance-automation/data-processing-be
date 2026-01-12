@@ -284,14 +284,18 @@ class AnalysisService:
                 progress_update(82, "Running Account 511 analysis...")
 
                 try:
+                    # Extract bytes from tuples (filename, bytes)
+                    revenue_bytes = revenue_breakdown_data[1]
+                    unit_bytes = unit_for_lease_data[1]
+
                     account_511_result = analyze_account_511(
-                        revenue_breakdown_data,
-                        unit_for_lease_data
+                        revenue_bytes,
+                        unit_bytes
                     )
 
                     if account_511_result and account_511_result.sub_accounts:
                         log_capture.queue.put(f"   ✅ Found {len(account_511_result.sub_accounts)} sub-accounts")
-                        log_capture.queue.put(f"   ✅ Found {len(account_511_result.project_breakdown)} projects")
+                        log_capture.queue.put(f"   ✅ Found {len(account_511_result.by_project)} projects")
 
                         # Add 511 sheets to the Excel output
                         from app.domain.finance.variance_analysis.services.variance_detector import _add_account_511_sheets
