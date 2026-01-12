@@ -80,6 +80,8 @@ class AnalysisService:
         self,
         excel_files: List[UploadFile],
         loan_interest_file: Optional[UploadFile] = None,
+        revenue_breakdown_file: Optional[UploadFile] = None,
+        unit_for_lease_file: Optional[UploadFile] = None,
         mapping_file: Optional[UploadFile] = None,
         config_overrides: Optional[Dict[str, Any]] = None
     ) -> bytes:
@@ -88,6 +90,8 @@ class AnalysisService:
         Args:
             excel_files: List of BS/PL Breakdown Excel files
             loan_interest_file: Optional ERP Loan Interest Rate file for enhanced A2 analysis
+            revenue_breakdown_file: Optional RevenueBreakdown file for Account 511 drill-down
+            unit_for_lease_file: Optional UnitForLeaseList file for Account 511 drill-down
             mapping_file: Deprecated, not used
             config_overrides: Deprecated, not used
 
@@ -109,10 +113,27 @@ class AnalysisService:
                     await loan_interest_file.read()
                 )
 
-            # Use the 22-rule variance analysis pipeline with optional loan data
+            # Read Account 511 files if provided
+            revenue_breakdown_data: Optional[Tuple[str, bytes]] = None
+            if revenue_breakdown_file:
+                revenue_breakdown_data = (
+                    revenue_breakdown_file.filename or "revenue_breakdown.xls",
+                    await revenue_breakdown_file.read()
+                )
+
+            unit_for_lease_data: Optional[Tuple[str, bytes]] = None
+            if unit_for_lease_file:
+                unit_for_lease_data = (
+                    unit_for_lease_file.filename or "unit_for_lease.xls",
+                    await unit_for_lease_file.read()
+                )
+
+            # Use the 22-rule variance analysis pipeline with optional loan and 511 data
             xlsx_bytes: bytes = process_variance_analysis(
                 files,
-                loan_interest_file=loan_file_data
+                loan_interest_file=loan_file_data,
+                revenue_breakdown_file=revenue_breakdown_data,
+                unit_for_lease_file=unit_for_lease_data
             )
 
             return xlsx_bytes

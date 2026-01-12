@@ -84,6 +84,8 @@ async def process_python_analysis(
     request: Request,
     excel_files: List[UploadFile] = File(..., description="BS/PL Breakdown Excel files"),
     loan_interest_file: Optional[UploadFile] = File(None, description="Optional: ERP Loan Interest Rate file for enhanced A2 analysis"),
+    revenue_breakdown_file: Optional[UploadFile] = File(None, description="Optional: RevenueBreakdown file for Account 511 drill-down"),
+    unit_for_lease_file: Optional[UploadFile] = File(None, description="Optional: UnitForLeaseList file for Account 511 drill-down"),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -92,11 +94,14 @@ async def process_python_analysis(
     Upload one or more BS/PL Breakdown Excel files for variance analysis.
     Optionally upload an ERP Loan Interest Rate file (from Save Search) to enable
     enhanced Rule A2 analysis with interest rate lookups.
+    Optionally upload RevenueBreakdown and UnitForLeaseList files for Account 511 drill-down.
     Optionally save to project if project_uuid is provided.
 
     Args:
         excel_files: List of BS/PL Breakdown Excel files (required)
         loan_interest_file: Optional ERP Loan Interest Rate file for enhanced A2
+        revenue_breakdown_file: Optional RevenueBreakdown file for 511 drill-down
+        unit_for_lease_file: Optional UnitForLeaseList file for 511 drill-down
         project_uuid: Optional project UUID to save analysis to
 
     Returns:
@@ -105,6 +110,10 @@ async def process_python_analysis(
     logger.info(f"Processing {len(excel_files)} files for Python variance analysis")
     if loan_interest_file:
         logger.info(f"Loan interest file provided: {loan_interest_file.filename}")
+    if revenue_breakdown_file:
+        logger.info(f"RevenueBreakdown file provided: {revenue_breakdown_file.filename}")
+    if unit_for_lease_file:
+        logger.info(f"UnitForLeaseList file provided: {unit_for_lease_file.filename}")
 
     try:
         # Get unified config to access file_processing settings
@@ -139,10 +148,29 @@ async def process_python_analysis(
                     details=f"Received file: {loan_filename}"
                 )
 
-        # 3. Process files using 22-rule pipeline with optional loan data
+        # 2b. Validate Account 511 files if provided
+        if revenue_breakdown_file:
+            rev_filename = revenue_breakdown_file.filename or ""
+            if not rev_filename.lower().endswith(('.xlsx', '.xls')):
+                raise FileProcessingError(
+                    "RevenueBreakdown file must be an Excel file (.xlsx or .xls)",
+                    details=f"Received file: {rev_filename}"
+                )
+
+        if unit_for_lease_file:
+            unit_filename = unit_for_lease_file.filename or ""
+            if not unit_filename.lower().endswith(('.xlsx', '.xls')):
+                raise FileProcessingError(
+                    "UnitForLeaseList file must be an Excel file (.xlsx or .xls)",
+                    details=f"Received file: {unit_filename}"
+                )
+
+        # 3. Process files using 22-rule pipeline with optional loan and 511 data
         xlsx_bytes = await analysis_service.process_python_analysis(
             excel_files=excel_files,
-            loan_interest_file=loan_interest_file
+            loan_interest_file=loan_interest_file,
+            revenue_breakdown_file=revenue_breakdown_file,
+            unit_for_lease_file=unit_for_lease_file
         )
 
         logger.info("Python variance analysis completed successfully")
