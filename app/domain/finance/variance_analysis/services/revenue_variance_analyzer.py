@@ -36,64 +36,192 @@ from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
 
-# AI System Prompt for Revenue Variance Analysis
-REVENUE_VARIANCE_SYSTEM_PROMPT = """You are a senior financial analyst for BW Industrial Development JSC, a leading industrial real estate company in Vietnam.
+# =============================================================================
+# AI SYSTEM PROMPTS FOR EACH ANALYSIS STEP
+# =============================================================================
 
-You are analyzing Revenue Variance data with Unit for Lease (UFL) linkage. Your task is to provide deep analysis and insights.
+# Step 1: AI analyzes each monthly variance
+AI_MONTHLY_ANALYSIS_PROMPT = """You are a senior financial analyst for BW Industrial Development JSC analyzing monthly revenue variance.
 
-## Your Analysis Should:
-1. **Identify Key Drivers**: Explain the TOP 5 factors driving revenue variance
-2. **UFL Correlation**: Connect revenue changes to lease activity (new handovers, terminations)
-3. **Pattern Detection**: Identify trends across months (seasonal, tenant concentration, etc.)
-4. **Flag Analysis**: Explain what flagged items mean and prioritize investigation
-5. **Recommendations**: Provide actionable recommendations for management
+## Context
+You are analyzing revenue changes from {prior_month} to {current_month}.
 
-## Revenue Types:
-- **Leasing (511710001)**: Core rental income - should be stable, changes indicate new leases or terminations
-- **Service/Mgmt Fee (511600xxx)**: Management fees - typically proportional to leasing
+## Your Task
+Analyze the revenue data and UFL (Unit for Lease) activity to:
+1. Identify the TOP drivers of variance (both increases and decreases)
+2. Match revenue changes to UFL activity (handovers = new leases, terminations = ended leases)
+3. Flag items that need investigation (revenue changes without matching UFL records)
+4. Provide a concise narrative explaining the month's variance
+
+## Revenue Types
+- **Leasing (511710001)**: Core rental income - changes indicate new leases or terminations
+- **Service/Mgmt Fee (511600xxx)**: Management fees - typically follows leasing
 - **Utilities (511800001)**: Pass-through utility charges
 - **Others (511800002)**: Miscellaneous revenue
 
-## Flag Types to Analyze:
-- **INCREASE NO UFL**: Revenue increased but no corresponding UFL handover found - possible data gap
-- **DECREASE NO UFL**: Revenue decreased but no UFL termination found - possible data gap
-- **NEGATIVE NO UFL**: Revenue went negative (straight-line reversal) without termination
-- **REVERSAL**: Prior negative, now positive - billing correction
-- **UFL NO REVENUE**: Large UFL handover without corresponding revenue increase
+## UFL Matching Rules
+- Revenue INCREASE should have UFL handover within 0-2 months prior
+- Revenue DECREASE should have UFL termination within 0-1 month prior
+- REVERSAL = prior month negative, current month positive (billing correction)
+- NEGATIVE NO UFL = revenue went negative without termination record
 
-## Output Format (JSON):
-{
-    "executive_summary": "3-5 sentence overview of the revenue variance situation for the year",
-    "key_drivers": [
-        {
-            "rank": 1,
-            "driver": "description of the key driver",
-            "impact": "+X.XB VND",
-            "explanation": "detailed explanation with tenant/project names"
-        }
+## Output Format (JSON)
+{{
+    "period": "{current_month} vs {prior_month}",
+    "narrative": "2-3 sentence summary explaining the variance drivers",
+    "net_variance_explanation": "Why did total revenue change by X amount?",
+    "top_increases": [
+        {{
+            "tenant": "tenant name",
+            "subsidiary": "code",
+            "variance_b": 1.5,
+            "ufl_match": "NEW LEASE" or "RATE ADJUSTMENT" or "UNKNOWN",
+            "ufl_date": "Nov 2025" or null,
+            "gla": 5000 or null,
+            "explanation": "Why this tenant's revenue increased"
+        }}
     ],
-    "monthly_trends": "analysis of month-over-month patterns",
-    "flag_priorities": [
-        {
-            "priority": "HIGH/MEDIUM/LOW",
-            "flag_type": "type",
+    "top_decreases": [
+        {{
+            "tenant": "tenant name",
+            "subsidiary": "code",
+            "variance_b": -2.0,
+            "ufl_match": "TERMINATED" or "PARTIAL TERMINATION" or "UNKNOWN",
+            "termination_date": "Oct 2025" or null,
+            "gla": 3000 or null,
+            "explanation": "Why this tenant's revenue decreased"
+        }}
+    ],
+    "flags": [
+        {{
+            "flag_type": "INCREASE NO UFL" or "DECREASE NO UFL" or "NEGATIVE NO UFL" or "REVERSAL",
             "tenant": "name",
-            "action": "recommended action"
-        }
+            "subsidiary": "code",
+            "variance_b": 0.5,
+            "reason": "Why this is flagged and what to investigate"
+        }}
     ],
-    "ufl_correlation_analysis": "How well do revenue changes correlate with UFL activity?",
-    "data_quality_notes": "Any concerns about data completeness or accuracy",
-    "recommendations": [
-        "Specific actionable recommendation 1",
-        "Specific actionable recommendation 2"
-    ]
-}
+    "stream_analysis": {{
+        "leasing": {{"variance_b": 10.0, "driver": "explanation"}},
+        "service_fee": {{"variance_b": 1.0, "driver": "explanation"}},
+        "utilities": {{"variance_b": 0.5, "driver": "explanation"}},
+        "others": {{"variance_b": 0.1, "driver": "explanation"}}
+    }}
+}}
 
 IMPORTANT:
-- Use specific numbers (in billions B or millions M VND)
-- Name specific tenants and subsidiaries
-- Be direct and actionable
-- Focus on material items (>100M VND variance)
+- Use specific tenant names and subsidiaries from the data
+- Amounts in billions (B) VND
+- Only flag material items (>100M VND = 0.1B variance)
+- Be specific about UFL matching - did you find a matching handover/termination?
+"""
+
+# Step 2: AI analyzes flags across all months
+AI_FLAG_ANALYSIS_PROMPT = """You are a senior financial analyst reviewing flagged items from revenue variance analysis.
+
+## Context
+These flags represent revenue changes that don't have matching UFL (Unit for Lease) records.
+This could indicate:
+- Missing UFL records in NetSuite
+- Rate adjustments or expansions (not captured in UFL)
+- Billing corrections or accruals
+- Data quality issues
+
+## Your Task
+1. Prioritize flags by materiality and risk
+2. Group similar flags to identify patterns
+3. Recommend specific actions for each HIGH priority flag
+4. Identify if certain subsidiaries or tenants have recurring issues
+
+## Output Format (JSON)
+{{
+    "total_flags": 50,
+    "by_type": {{
+        "INCREASE NO UFL": {{"count": 20, "total_variance_b": 15.5}},
+        "DECREASE NO UFL": {{"count": 15, "total_variance_b": -12.0}},
+        "NEGATIVE NO UFL": {{"count": 10, "total_variance_b": -5.0}},
+        "REVERSAL": {{"count": 5, "total_variance_b": 2.0}}
+    }},
+    "high_priority": [
+        {{
+            "tenant": "name",
+            "subsidiary": "code",
+            "flag_type": "type",
+            "variance_b": 5.0,
+            "periods_affected": ["Nov vs Oct", "Dec vs Nov"],
+            "risk_assessment": "Why this is high priority",
+            "recommended_action": "Specific action to take"
+        }}
+    ],
+    "patterns_identified": [
+        "Pattern 1: Description of recurring issue",
+        "Pattern 2: Another pattern"
+    ],
+    "subsidiaries_with_issues": [
+        {{"subsidiary": "BB6", "flag_count": 10, "concern": "What's the issue"}}
+    ],
+    "overall_data_quality": "Assessment of data completeness between revenue and UFL systems"
+}}
+"""
+
+# Step 3: AI generates executive summary and recommendations
+AI_EXECUTIVE_SUMMARY_PROMPT = """You are a CFO-level financial analyst preparing an executive briefing on revenue variance.
+
+## Context
+You have analyzed a full year of monthly revenue data with UFL linkage for BW Industrial Development JSC.
+
+## Your Task
+1. Summarize the year's revenue performance in 3-5 sentences
+2. Identify the TOP 5 drivers of variance for the year
+3. Assess how well revenue changes correlate with UFL activity
+4. Provide actionable recommendations for management
+5. Note any data quality concerns
+
+## Output Format (JSON)
+{{
+    "executive_summary": "3-5 sentence overview for C-suite",
+    "year_highlights": {{
+        "total_revenue_b": 350.0,
+        "yoy_change_pct": 15.0,
+        "best_month": "November",
+        "worst_month": "December",
+        "key_trend": "Revenue growth driven by new handovers in H2"
+    }},
+    "top_5_drivers": [
+        {{
+            "rank": 1,
+            "driver": "What drove the variance",
+            "impact_b": 25.0,
+            "tenants_involved": ["Tenant A", "Tenant B"],
+            "explanation": "Detailed explanation"
+        }}
+    ],
+    "ufl_correlation_score": "HIGH/MEDIUM/LOW",
+    "ufl_correlation_explanation": "How well do revenue changes match UFL activity?",
+    "data_quality_assessment": {{
+        "score": "GOOD/FAIR/POOR",
+        "issues": ["Issue 1", "Issue 2"],
+        "impact": "How data quality affects analysis reliability"
+    }},
+    "recommendations": [
+        {{
+            "priority": "HIGH/MEDIUM/LOW",
+            "recommendation": "Specific actionable recommendation",
+            "rationale": "Why this matters",
+            "owner": "Finance/Operations/IT"
+        }}
+    ],
+    "risks_and_concerns": [
+        "Risk 1: Description",
+        "Risk 2: Description"
+    ]
+}}
+
+IMPORTANT:
+- This is for executive consumption - be clear and actionable
+- Use specific numbers and percentages
+- Prioritize what matters most
+- Be honest about data quality issues
 """
 
 # Revenue type classification based on account codes
@@ -223,7 +351,13 @@ class RevenueVarianceAnalyzer:
 
     def analyze(self, revenue_bytes: bytes, ufl_bytes: bytes) -> bytes:
         """
-        Perform full revenue variance analysis with AI insights.
+        Perform full AI-powered revenue variance analysis.
+
+        The entire analysis is driven by AI at each step:
+        1. Parse data (Python - structured XML)
+        2. For EACH month: AI analyzes variance, matches UFL, identifies flags
+        3. AI analyzes all flags across months to identify patterns
+        4. AI generates executive summary and recommendations
 
         Args:
             revenue_bytes: Raw bytes of RevenueBreakdown XML-Excel file
@@ -232,217 +366,463 @@ class RevenueVarianceAnalyzer:
         Returns:
             Excel file bytes with 14 sheets (including AI Insights)
         """
-        logger.info("Starting AI-powered revenue variance analysis...")
+        logger.info("=" * 60)
+        logger.info("STARTING AI-POWERED REVENUE VARIANCE ANALYSIS")
+        logger.info("=" * 60)
 
-        # Step 1: Parse revenue data
-        logger.info("Parsing revenue data...")
+        if not self.ai_client:
+            logger.error("AI client not available - cannot proceed with AI analysis")
+            raise ValueError("AI analysis requires API key. Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.")
+
+        # Step 1: Parse revenue data (Python - structured XML parsing)
+        logger.info("\n📊 STEP 1: Parsing Revenue Data...")
         self.revenue_records = self._parse_revenue_data(revenue_bytes)
-        logger.info(f"Parsed {len(self.revenue_records)} revenue records")
+        logger.info(f"   ✅ Parsed {len(self.revenue_records)} revenue records")
 
-        # Step 2: Parse UFL data
-        logger.info("Parsing UFL data...")
+        # Step 2: Parse UFL data (Python - structured XML parsing)
+        logger.info("\n📊 STEP 2: Parsing UFL Data...")
         self.ufl_records = self._parse_ufl_data(ufl_bytes)
-        logger.info(f"Parsed {len(self.ufl_records)} UFL records")
+        logger.info(f"   ✅ Parsed {len(self.ufl_records)} UFL records")
 
-        # Step 3: Build monthly comparisons (Dec vs Nov, Nov vs Oct, ..., Feb vs Jan)
-        logger.info("Building monthly comparisons...")
-        comparisons = self._build_monthly_comparisons()
-
-        # Step 4: Collect all flags
-        all_flags = []
-        for comp in comparisons:
-            all_flags.extend(comp.flags)
-
-        # Step 5: Check for UFL NO REVENUE flags
-        ufl_no_revenue_flags = self._check_ufl_no_revenue()
-        all_flags.extend(ufl_no_revenue_flags)
-
-        # Sort flags by variance magnitude
-        all_flags.sort(key=lambda f: abs(f.variance), reverse=True)
-
-        logger.info(f"Total flags: {len(all_flags)}")
-
-        # Step 6: Build monthly revenue summary for executive summary
+        # Step 3: Calculate monthly totals for context
+        logger.info("\n📊 STEP 3: Calculating Monthly Totals...")
         monthly_totals = self._calculate_monthly_totals()
+        logger.info(f"   ✅ Calculated totals for 12 months")
 
-        # Step 7: Generate AI Insights
-        logger.info("Generating AI insights...")
-        ai_insights = self._generate_ai_insights(comparisons, all_flags, monthly_totals)
+        # Step 4: AI ANALYZES EACH MONTHLY COMPARISON
+        logger.info("\n🤖 STEP 4: AI Analyzing Each Monthly Variance...")
+        logger.info("   AI will analyze each month-over-month comparison with UFL linkage")
+        monthly_ai_analyses = []
+        all_ai_flags = []
 
-        # Step 8: Generate Excel output with AI Insights
-        logger.info("Generating Excel output...")
+        for month in range(12, 1, -1):  # Dec vs Nov, Nov vs Oct, ..., Feb vs Jan
+            prior_month = month - 1
+            current_name = MONTH_NAMES[month - 1]
+            prior_name = MONTH_NAMES[prior_month - 1]
+
+            logger.info(f"   🔄 AI analyzing {current_name} vs {prior_name}...")
+
+            # Build context for this month's analysis
+            monthly_context = self._build_monthly_context(month, prior_month, monthly_totals)
+
+            # Call AI for this month's analysis
+            ai_result = self._ai_analyze_monthly_variance(
+                current_name, prior_name, monthly_context
+            )
+            monthly_ai_analyses.append(ai_result)
+
+            # Collect flags from AI analysis
+            if "flags" in ai_result:
+                for flag in ai_result["flags"]:
+                    all_ai_flags.append({
+                        "period": f"{current_name} vs {prior_name}",
+                        **flag
+                    })
+
+            logger.info(f"   ✅ {current_name} vs {prior_name}: {len(ai_result.get('flags', []))} flags identified")
+
+        # Step 5: Check for UFL NO REVENUE flags (large handovers without revenue)
+        logger.info("\n📊 STEP 5: Checking for UFL NO REVENUE flags...")
+        ufl_no_revenue_flags = self._check_ufl_no_revenue()
+        for flag in ufl_no_revenue_flags:
+            all_ai_flags.append({
+                "period": "Full Year",
+                "flag_type": flag.flag_type,
+                "tenant": flag.tenant,
+                "subsidiary": flag.subsidiary,
+                "variance_b": flag.variance,
+                "reason": flag.detail
+            })
+        logger.info(f"   ✅ Found {len(ufl_no_revenue_flags)} UFL NO REVENUE flags")
+
+        # Step 6: AI ANALYZES ALL FLAGS
+        logger.info(f"\n🤖 STEP 6: AI Analyzing All {len(all_ai_flags)} Flags...")
+        flag_analysis = self._ai_analyze_all_flags(all_ai_flags)
+        logger.info(f"   ✅ Flag analysis complete")
+
+        # Step 7: AI GENERATES EXECUTIVE SUMMARY
+        logger.info("\n🤖 STEP 7: AI Generating Executive Summary...")
+        executive_summary = self._ai_generate_executive_summary(
+            monthly_totals, monthly_ai_analyses, flag_analysis
+        )
+        logger.info(f"   ✅ Executive summary generated")
+
+        # Step 8: Build comparison objects from AI analyses
+        logger.info("\n📊 STEP 8: Building Output Structures...")
+        comparisons = self._build_comparisons_from_ai(monthly_ai_analyses)
+        all_flags = self._build_flags_from_ai(all_ai_flags)
+
+        # Step 9: Combine all AI insights
+        ai_insights = {
+            "executive_summary": executive_summary.get("executive_summary", ""),
+            "year_highlights": executive_summary.get("year_highlights", {}),
+            "key_drivers": executive_summary.get("top_5_drivers", []),
+            "monthly_trends": executive_summary.get("year_highlights", {}).get("key_trend", ""),
+            "flag_priorities": flag_analysis.get("high_priority", []),
+            "ufl_correlation_analysis": executive_summary.get("ufl_correlation_explanation", ""),
+            "data_quality_notes": executive_summary.get("data_quality_assessment", {}).get("issues", []),
+            "recommendations": executive_summary.get("recommendations", []),
+            "flag_analysis": flag_analysis,
+            "monthly_analyses": monthly_ai_analyses
+        }
+
+        # Step 10: Generate Excel output with AI Insights
+        logger.info("\n📊 STEP 9: Generating Excel Output...")
         xlsx_bytes = self._generate_excel(comparisons, all_flags, monthly_totals, ai_insights)
 
-        logger.info("Revenue variance analysis complete")
+        logger.info("\n" + "=" * 60)
+        logger.info("AI-POWERED REVENUE VARIANCE ANALYSIS COMPLETE")
+        logger.info("=" * 60)
         return xlsx_bytes
 
-    def _generate_ai_insights(
-        self,
-        comparisons: List[MonthlyComparison],
-        all_flags: List[VarianceFlag],
-        monthly_totals: Dict[int, float]
-    ) -> Dict[str, Any]:
-        """Generate AI-powered insights from the analysis data."""
-        if not self.ai_client:
-            logger.warning("AI client not available - returning default insights")
-            return {
-                "executive_summary": "AI analysis not available - API key not configured. Please set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.",
-                "key_drivers": [],
-                "monthly_trends": "N/A",
-                "flag_priorities": [],
-                "ufl_correlation_analysis": "N/A",
-                "data_quality_notes": "N/A",
-                "recommendations": []
-            }
+    def _build_monthly_context(self, current_month: int, prior_month: int,
+                               monthly_totals: Dict[int, float]) -> str:
+        """Build context string for a single month's AI analysis."""
+        current_name = MONTH_NAMES[current_month - 1]
+        prior_name = MONTH_NAMES[prior_month - 1]
 
-        # Build context for AI
-        context = self._build_ai_context(comparisons, all_flags, monthly_totals)
-
-        try:
-            logger.info(f"Calling AI ({self.model}) for insights...")
-            if self.is_claude:
-                response = self._call_claude(context)
-            else:
-                response = self._call_openai(context)
-
-            # Parse JSON response
-            return self._parse_ai_response(response)
-        except Exception as e:
-            logger.error(f"AI analysis failed: {e}")
-            return {
-                "executive_summary": f"AI analysis error: {str(e)}",
-                "key_drivers": [],
-                "monthly_trends": "Error during analysis",
-                "flag_priorities": [],
-                "ufl_correlation_analysis": "N/A",
-                "data_quality_notes": "AI analysis failed",
-                "recommendations": ["Review error and retry analysis"]
-            }
-
-    def _build_ai_context(
-        self,
-        comparisons: List[MonthlyComparison],
-        all_flags: List[VarianceFlag],
-        monthly_totals: Dict[int, float]
-    ) -> str:
-        """Build context string for AI analysis."""
         lines = [
-            "# BW Industrial Revenue Variance Analysis Data",
-            f"Year: {self.year}",
-            f"Total Revenue Records: {len(self.revenue_records)}",
-            f"Total UFL Records: {len(self.ufl_records)}",
+            f"# Revenue Variance Analysis: {current_name} vs {prior_name} {self.year}",
             "",
-            "## Monthly Revenue Totals (VND Billions)",
+            "## Revenue Totals",
+            f"- {prior_name} Total: {monthly_totals.get(prior_month, 0) / 1e9:.2f}B VND",
+            f"- {current_name} Total: {monthly_totals.get(current_month, 0) / 1e9:.2f}B VND",
+            f"- Net Change: {(monthly_totals.get(current_month, 0) - monthly_totals.get(prior_month, 0)) / 1e9:+.2f}B VND",
+            "",
+            "## Revenue by Tenant (Top 30 Changes)",
         ]
 
-        # Monthly totals
-        for month in range(1, 13):
-            total = monthly_totals.get(month, 0) / 1e9
-            lines.append(f"- {MONTH_NAMES[month-1]}: {total:.1f}B")
+        # Get revenue changes by tenant for this month pair
+        tenant_changes = self._get_tenant_changes(current_month, prior_month)
+        tenant_changes.sort(key=lambda x: abs(x["variance"]), reverse=True)
 
-        # YTD summary
-        ytd_total = sum(monthly_totals.values()) / 1e9
-        lines.append(f"\nYTD Total: {ytd_total:.1f}B")
-
-        # Monthly variances
-        lines.extend(["", "## Month-over-Month Variances"])
-        for comp in comparisons[:6]:  # Top 6 recent months
+        for tc in tenant_changes[:30]:
             lines.append(
-                f"- {comp.current_month_name} vs {comp.prior_month_name}: "
-                f"{comp.net_change/1e9:+.1f}B ({comp.net_change_pct:+.1f}%)"
+                f"- {tc['subsidiary']} | {tc['tenant'][:40]} | "
+                f"Type: {tc['revenue_type']} | "
+                f"{prior_name}: {tc['prior']/1e9:.2f}B | "
+                f"{current_name}: {tc['current']/1e9:.2f}B | "
+                f"Δ: {tc['variance']/1e9:+.2f}B"
             )
 
-        # Revenue stream breakdown for latest month
-        if comparisons:
-            latest = comparisons[0]
-            lines.extend(["", f"## Revenue Stream Breakdown ({latest.current_month_name} vs {latest.prior_month_name})"])
-            for stream in latest.stream_breakdown:
-                if stream["stream"] != "TOTAL":
-                    lines.append(
-                        f"- {stream['stream']}: {stream['variance']/1e9:+.2f}B "
-                        f"({stream.get('pct_of_net', 0):+.0f}% of net)"
-                    )
-
-        # Top Leasing increases/decreases
-        lines.extend(["", "## Top Leasing Changes (Most Recent Month)"])
-        if comparisons:
-            latest = comparisons[0]
-            lines.append("### Increases:")
-            for inc in latest.leasing_increases[:5]:
-                lines.append(
-                    f"- {inc['subsidiary']} | {inc['tenant'][:30]}: "
-                    f"+{inc['variance']/1e9:.2f}B | UFL: {inc['ufl_action']} | Flag: {inc.get('flag', '-')}"
-                )
-
-            lines.append("\n### Decreases:")
-            for dec in latest.leasing_decreases[:5]:
-                lines.append(
-                    f"- {dec['subsidiary']} | {dec['tenant'][:30]}: "
-                    f"{dec['variance']/1e9:.2f}B | UFL: {dec['ufl_action']} | Flag: {dec.get('flag', '-')}"
-                )
-
-        # Flags summary
-        lines.extend(["", "## Flags Summary"])
-        flag_counts = defaultdict(int)
-        for f in all_flags:
-            flag_counts[f.flag_type] += 1
-        for flag_type, count in sorted(flag_counts.items()):
-            lines.append(f"- {flag_type}: {count}")
-
-        # Top flags by impact
-        lines.extend(["", "## Top 10 Flags by Impact"])
-        for f in all_flags[:10]:
-            lines.append(
-                f"- [{f.flag_type}] {f.period} | {f.subsidiary} | {f.tenant[:25]}: "
-                f"{f.variance:+.2f}B"
-            )
-
-        # UFL Activity Summary
-        handovers_2025 = [u for u in self.ufl_records
-                         if u.status == "Handed Over" and u.start_date and u.start_date.year == self.year]
-        terminations_2025 = [u for u in self.ufl_records
-                            if u.status == "Terminated" and u.termination_date and u.termination_date.year == self.year]
-
+        # Add UFL activity for matching
         lines.extend([
             "",
-            "## UFL Activity Summary",
-            f"- Total Handovers in {self.year}: {len(handovers_2025)}",
-            f"- Total GLA Handed Over: {sum(u.gla for u in handovers_2025):,.0f} sqm",
-            f"- Total Terminations in {self.year}: {len(terminations_2025)}",
-            f"- Total GLA Terminated: {sum(u.gla for u in terminations_2025):,.0f} sqm",
+            f"## UFL Activity (Handovers & Terminations near {current_name})",
+            "",
+            "### Handovers (New Leases):",
         ])
+
+        # Get handovers within 0-2 months of current month
+        relevant_handovers = [
+            u for u in self.ufl_records
+            if u.status == "Handed Over" and u.start_date
+            and u.start_date.year == self.year
+            and u.start_date.month in [current_month, prior_month, max(1, prior_month - 1)]
+        ]
+        for u in relevant_handovers[:20]:
+            lines.append(
+                f"- {u.subsidiary} | {u.tenant_code} {u.tenant[:30]} | "
+                f"Start: {u.start_date.strftime('%b %Y')} | GLA: {u.gla:,.0f} sqm"
+            )
+
+        lines.append("\n### Terminations:")
+        relevant_terminations = [
+            u for u in self.ufl_records
+            if u.status == "Terminated" and u.termination_date
+            and u.termination_date.year == self.year
+            and u.termination_date.month in [current_month, prior_month]
+        ]
+        for u in relevant_terminations[:20]:
+            lines.append(
+                f"- {u.subsidiary} | {u.tenant_code} {u.tenant[:30]} | "
+                f"Term: {u.termination_date.strftime('%b %Y')} | GLA: {u.gla:,.0f} sqm"
+            )
 
         return "\n".join(lines)
 
-    def _call_openai(self, context: str) -> str:
-        """Call OpenAI API for analysis."""
-        params = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": REVENUE_VARIANCE_SYSTEM_PROMPT},
-                {"role": "user", "content": context}
-            ],
-            "max_tokens": 4000,
-        }
+    def _get_tenant_changes(self, current_month: int, prior_month: int) -> List[Dict]:
+        """Get revenue changes by tenant between two months."""
+        changes = []
 
-        # GPT-5 doesn't support temperature
-        if not self.model.startswith("gpt-5"):
-            params["temperature"] = 0.3
+        # Group revenue by subsidiary + tenant
+        tenant_data = defaultdict(lambda: {"prior": 0, "current": 0, "type": ""})
 
-        response = self.ai_client.chat.completions.create(**params)
-        return response.choices[0].message.content
+        for r in self.revenue_records:
+            key = (r.subsidiary, r.tenant, r.tenant_code)
+            tenant_data[key]["prior"] += r.monthly_amounts.get(prior_month, 0)
+            tenant_data[key]["current"] += r.monthly_amounts.get(current_month, 0)
+            tenant_data[key]["type"] = r.revenue_type
 
-    def _call_claude(self, context: str) -> str:
-        """Call Claude API for analysis."""
-        response = self.ai_client.messages.create(
-            model=self.model,
-            max_tokens=4000,
-            system=REVENUE_VARIANCE_SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": context}
-            ]
+        for (sub, tenant, code), data in tenant_data.items():
+            variance = data["current"] - data["prior"]
+            if abs(variance) > 0:  # Include all non-zero changes
+                changes.append({
+                    "subsidiary": sub,
+                    "tenant": tenant,
+                    "tenant_code": code,
+                    "revenue_type": data["type"],
+                    "prior": data["prior"],
+                    "current": data["current"],
+                    "variance": variance
+                })
+
+        return changes
+
+    def _ai_analyze_monthly_variance(self, current_month: str, prior_month: str,
+                                     context: str) -> Dict[str, Any]:
+        """Call AI to analyze a single month's variance."""
+        prompt = AI_MONTHLY_ANALYSIS_PROMPT.format(
+            current_month=current_month,
+            prior_month=prior_month
         )
-        return response.content[0].text
+
+        try:
+            if self.is_claude:
+                response = self.ai_client.messages.create(
+                    model=self.model,
+                    max_tokens=4000,
+                    system=prompt,
+                    messages=[{"role": "user", "content": context}]
+                )
+                result = response.content[0].text
+            else:
+                params = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": context}
+                    ],
+                    "max_tokens": 4000,
+                }
+                if not self.model.startswith("gpt-5"):
+                    params["temperature"] = 0.2
+                response = self.ai_client.chat.completions.create(**params)
+                result = response.choices[0].message.content
+
+            return self._parse_ai_response(result)
+        except Exception as e:
+            logger.error(f"AI monthly analysis failed for {current_month} vs {prior_month}: {e}")
+            return {
+                "period": f"{current_month} vs {prior_month}",
+                "narrative": f"AI analysis error: {str(e)}",
+                "flags": [],
+                "top_increases": [],
+                "top_decreases": [],
+                "stream_analysis": {}
+            }
+
+    def _ai_analyze_all_flags(self, all_flags: List[Dict]) -> Dict[str, Any]:
+        """Call AI to analyze all flags and identify patterns."""
+        if not all_flags:
+            return {"total_flags": 0, "high_priority": [], "patterns_identified": []}
+
+        # Build flag context
+        lines = [
+            "# All Flagged Items for Analysis",
+            f"Total Flags: {len(all_flags)}",
+            "",
+            "## Flag Details (sorted by variance magnitude):",
+        ]
+
+        sorted_flags = sorted(all_flags, key=lambda x: abs(x.get("variance_b", 0)), reverse=True)
+        for f in sorted_flags[:50]:  # Top 50 flags
+            lines.append(
+                f"- [{f.get('flag_type', 'UNKNOWN')}] {f.get('period', '')} | "
+                f"{f.get('subsidiary', '')} | {f.get('tenant', '')[:30]} | "
+                f"Variance: {f.get('variance_b', 0):+.2f}B | "
+                f"Reason: {f.get('reason', 'N/A')[:50]}"
+            )
+
+        context = "\n".join(lines)
+
+        try:
+            if self.is_claude:
+                response = self.ai_client.messages.create(
+                    model=self.model,
+                    max_tokens=3000,
+                    system=AI_FLAG_ANALYSIS_PROMPT,
+                    messages=[{"role": "user", "content": context}]
+                )
+                result = response.content[0].text
+            else:
+                params = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": AI_FLAG_ANALYSIS_PROMPT},
+                        {"role": "user", "content": context}
+                    ],
+                    "max_tokens": 3000,
+                }
+                if not self.model.startswith("gpt-5"):
+                    params["temperature"] = 0.2
+                response = self.ai_client.chat.completions.create(**params)
+                result = response.choices[0].message.content
+
+            return self._parse_ai_response(result)
+        except Exception as e:
+            logger.error(f"AI flag analysis failed: {e}")
+            return {
+                "total_flags": len(all_flags),
+                "high_priority": [],
+                "patterns_identified": [f"Analysis error: {str(e)}"],
+                "overall_data_quality": "Unable to assess"
+            }
+
+    def _ai_generate_executive_summary(self, monthly_totals: Dict[int, float],
+                                       monthly_analyses: List[Dict],
+                                       flag_analysis: Dict) -> Dict[str, Any]:
+        """Call AI to generate executive summary."""
+        # Build comprehensive context
+        lines = [
+            "# Full Year Revenue Variance Summary",
+            f"Year: {self.year}",
+            "",
+            "## Monthly Revenue (VND Billions):",
+        ]
+
+        for month in range(1, 13):
+            total = monthly_totals.get(month, 0) / 1e9
+            lines.append(f"- {MONTH_NAMES[month-1]}: {total:.2f}B")
+
+        ytd = sum(monthly_totals.values()) / 1e9
+        lines.append(f"\nYTD Total: {ytd:.2f}B")
+
+        # Add monthly analysis summaries
+        lines.append("\n## Monthly Analysis Summaries:")
+        for analysis in monthly_analyses:
+            period = analysis.get("period", "Unknown")
+            narrative = analysis.get("narrative", "No narrative")[:200]
+            lines.append(f"\n### {period}")
+            lines.append(narrative)
+
+        # Add flag summary
+        lines.append("\n## Flag Summary:")
+        lines.append(f"Total Flags: {flag_analysis.get('total_flags', 0)}")
+        lines.append(f"High Priority: {len(flag_analysis.get('high_priority', []))}")
+        patterns = flag_analysis.get("patterns_identified", [])
+        if patterns:
+            lines.append("Patterns: " + "; ".join(patterns[:3]))
+
+        context = "\n".join(lines)
+
+        try:
+            if self.is_claude:
+                response = self.ai_client.messages.create(
+                    model=self.model,
+                    max_tokens=4000,
+                    system=AI_EXECUTIVE_SUMMARY_PROMPT,
+                    messages=[{"role": "user", "content": context}]
+                )
+                result = response.content[0].text
+            else:
+                params = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": AI_EXECUTIVE_SUMMARY_PROMPT},
+                        {"role": "user", "content": context}
+                    ],
+                    "max_tokens": 4000,
+                }
+                if not self.model.startswith("gpt-5"):
+                    params["temperature"] = 0.3
+                response = self.ai_client.chat.completions.create(**params)
+                result = response.choices[0].message.content
+
+            return self._parse_ai_response(result)
+        except Exception as e:
+            logger.error(f"AI executive summary failed: {e}")
+            return {
+                "executive_summary": f"AI analysis error: {str(e)}",
+                "recommendations": []
+            }
+
+    def _build_comparisons_from_ai(self, monthly_analyses: List[Dict]) -> List[MonthlyComparison]:
+        """Build MonthlyComparison objects from AI analysis results."""
+        comparisons = []
+
+        for i, analysis in enumerate(monthly_analyses):
+            current_month = 12 - i  # Dec, Nov, Oct, ...
+            prior_month = current_month - 1
+
+            comp = MonthlyComparison(
+                current_month=current_month,
+                prior_month=prior_month,
+                current_month_name=MONTH_NAMES[current_month - 1],
+                prior_month_name=MONTH_NAMES[prior_month - 1]
+            )
+
+            # Extract stream analysis
+            stream = analysis.get("stream_analysis", {})
+            comp.stream_breakdown = [
+                {"stream": "Leasing", "variance": stream.get("leasing", {}).get("variance_b", 0) * 1e9,
+                 "prior": 0, "current": 0, "pct_of_net": 0},
+                {"stream": "Service/Mgmt Fee", "variance": stream.get("service_fee", {}).get("variance_b", 0) * 1e9,
+                 "prior": 0, "current": 0, "pct_of_net": 0},
+                {"stream": "Utilities", "variance": stream.get("utilities", {}).get("variance_b", 0) * 1e9,
+                 "prior": 0, "current": 0, "pct_of_net": 0},
+                {"stream": "Others", "variance": stream.get("others", {}).get("variance_b", 0) * 1e9,
+                 "prior": 0, "current": 0, "pct_of_net": 0},
+            ]
+
+            # Extract increases/decreases
+            for inc in analysis.get("top_increases", []):
+                comp.leasing_increases.append({
+                    "subsidiary": inc.get("subsidiary", ""),
+                    "tenant": inc.get("tenant", ""),
+                    "prior": 0,
+                    "current": 0,
+                    "variance": inc.get("variance_b", 0) * 1e9,
+                    "ufl_action": inc.get("ufl_match", "-"),
+                    "ufl_month": inc.get("ufl_date", ""),
+                    "gla": inc.get("gla", ""),
+                    "flag": "",
+                    "ai_explanation": inc.get("explanation", "")
+                })
+
+            for dec in analysis.get("top_decreases", []):
+                comp.leasing_decreases.append({
+                    "subsidiary": dec.get("subsidiary", ""),
+                    "tenant": dec.get("tenant", ""),
+                    "prior": 0,
+                    "current": 0,
+                    "variance": dec.get("variance_b", 0) * 1e9,
+                    "ufl_action": dec.get("ufl_match", "-"),
+                    "term_month": dec.get("termination_date", ""),
+                    "gla": dec.get("gla", ""),
+                    "flag": "",
+                    "ai_explanation": dec.get("explanation", "")
+                })
+
+            # Store AI narrative
+            comp.net_change = sum(s["variance"] for s in comp.stream_breakdown)
+
+            comparisons.append(comp)
+
+        return comparisons
+
+    def _build_flags_from_ai(self, ai_flags: List[Dict]) -> List[VarianceFlag]:
+        """Build VarianceFlag objects from AI flag results."""
+        flags = []
+
+        for f in ai_flags:
+            flag = VarianceFlag(
+                period=f.get("period", ""),
+                flag_type=f.get("flag_type", "UNKNOWN"),
+                subsidiary=f.get("subsidiary", ""),
+                tenant=f.get("tenant", ""),
+                prior_amount=0,
+                current_amount=0,
+                variance=f.get("variance_b", 0),
+                detail=f.get("reason", "")
+            )
+            flags.append(flag)
+
+        return flags
+
+    # =============================================================================
+    # AI RESPONSE PARSING
+    # =============================================================================
 
     def _parse_ai_response(self, response: str) -> Dict[str, Any]:
         """Parse AI JSON response."""
@@ -459,14 +839,16 @@ class RevenueVarianceAnalyzer:
             logger.warning(f"Failed to parse AI JSON response: {e}")
             # Fallback: return raw response as summary
             return {
-                "executive_summary": response[:1000] if len(response) > 1000 else response,
-                "key_drivers": [],
-                "monthly_trends": "See executive summary",
-                "flag_priorities": [],
-                "ufl_correlation_analysis": "See executive summary",
-                "data_quality_notes": "Response was not in expected JSON format",
-                "recommendations": []
+                "narrative": response[:1000] if len(response) > 1000 else response,
+                "flags": [],
+                "top_increases": [],
+                "top_decreases": [],
+                "stream_analysis": {}
             }
+
+    # =============================================================================
+    # DATA PARSING METHODS (structured XML parsing - not AI dependent)
+    # =============================================================================
 
     def _parse_revenue_data(self, file_bytes: bytes) -> List[RevenueRecord]:
         """Parse RevenueBreakdown XML-Excel file."""
