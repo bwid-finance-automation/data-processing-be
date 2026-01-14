@@ -738,7 +738,7 @@ class RevenueVarianceAnalyzer:
             }
 
     def _build_comparisons_from_ai(self, monthly_analyses: List[Dict]) -> List[MonthlyComparison]:
-        """Build MonthlyComparison objects from AI analysis results."""
+        """Build MonthlyComparison objects combining AI analysis with actual parsed data."""
         comparisons = []
 
         for i, analysis in enumerate(monthly_analyses):
@@ -752,50 +752,43 @@ class RevenueVarianceAnalyzer:
                 prior_month_name=MONTH_NAMES[prior_month - 1]
             )
 
-            # Extract stream analysis
-            stream = analysis.get("stream_analysis", {})
-            comp.stream_breakdown = [
-                {"stream": "Leasing", "variance": stream.get("leasing", {}).get("variance_b", 0) * 1e9,
-                 "prior": 0, "current": 0, "pct_of_net": 0},
-                {"stream": "Service/Mgmt Fee", "variance": stream.get("service_fee", {}).get("variance_b", 0) * 1e9,
-                 "prior": 0, "current": 0, "pct_of_net": 0},
-                {"stream": "Utilities", "variance": stream.get("utilities", {}).get("variance_b", 0) * 1e9,
-                 "prior": 0, "current": 0, "pct_of_net": 0},
-                {"stream": "Others", "variance": stream.get("others", {}).get("variance_b", 0) * 1e9,
-                 "prior": 0, "current": 0, "pct_of_net": 0},
-            ]
+            # Calculate ACTUAL stream breakdown from parsed revenue data
+            stream_data = self._calculate_stream_breakdown(current_month, prior_month)
+            comp.stream_breakdown = stream_data["breakdown"]
+            comp.net_change = stream_data["net_change"]
+            comp.net_change_pct = stream_data["net_change_pct"]
 
-            # Extract increases/decreases
-            for inc in analysis.get("top_increases", []):
-                comp.leasing_increases.append({
-                    "subsidiary": inc.get("subsidiary", ""),
-                    "tenant": inc.get("tenant", ""),
-                    "prior": 0,
-                    "current": 0,
-                    "variance": inc.get("variance_b", 0) * 1e9,
-                    "ufl_action": inc.get("ufl_match", "-"),
-                    "ufl_month": inc.get("ufl_date", ""),
-                    "gla": inc.get("gla", ""),
-                    "flag": "",
-                    "ai_explanation": inc.get("explanation", "")
-                })
+            # Calculate ACTUAL leasing drill-down with UFL linkage
+            leasing_data = self._calculate_leasing_drilldown(current_month, prior_month)
+            comp.leasing_variance = leasing_data["variance"]
+            comp.leasing_increases = leasing_data["increases"]
+            comp.leasing_decreases = leasing_data["decreases"]
+            comp.total_increases = leasing_data["total_increases"]
+            comp.total_decreases = leasing_data["total_decreases"]
+            comp.flags = leasing_data["flags"]
 
-            for dec in analysis.get("top_decreases", []):
-                comp.leasing_decreases.append({
-                    "subsidiary": dec.get("subsidiary", ""),
-                    "tenant": dec.get("tenant", ""),
-                    "prior": 0,
-                    "current": 0,
-                    "variance": dec.get("variance_b", 0) * 1e9,
-                    "ufl_action": dec.get("ufl_match", "-"),
-                    "term_month": dec.get("termination_date", ""),
-                    "gla": dec.get("gla", ""),
-                    "flag": "",
-                    "ai_explanation": dec.get("explanation", "")
-                })
+            # Enrich with AI explanations if available
+            ai_increases = {inc.get("tenant", "").upper(): inc for inc in analysis.get("top_increases", [])}
+            ai_decreases = {dec.get("tenant", "").upper(): dec for dec in analysis.get("top_decreases", [])}
 
-            # Store AI narrative
-            comp.net_change = sum(s["variance"] for s in comp.stream_breakdown)
+            for inc in comp.leasing_increases:
+                tenant_key = inc.get("tenant", "").upper()
+                if tenant_key in ai_increases:
+                    ai_data = ai_increases[tenant_key]
+                    inc["ai_explanation"] = ai_data.get("explanation", "")
+                    # Use AI's UFL match if it found one and we didn't
+                    if inc.get("ufl_action") == "-" and ai_data.get("ufl_match"):
+                        inc["ufl_action"] = ai_data.get("ufl_match", "-")
+                        inc["ufl_month"] = ai_data.get("ufl_date", "")
+
+            for dec in comp.leasing_decreases:
+                tenant_key = dec.get("tenant", "").upper()
+                if tenant_key in ai_decreases:
+                    ai_data = ai_decreases[tenant_key]
+                    dec["ai_explanation"] = ai_data.get("explanation", "")
+                    if dec.get("ufl_action") == "-" and ai_data.get("ufl_match"):
+                        dec["ufl_action"] = ai_data.get("ufl_match", "-")
+                        dec["term_month"] = ai_data.get("termination_date", "")
 
             comparisons.append(comp)
 
@@ -825,7 +818,7 @@ class RevenueVarianceAnalyzer:
     # =============================================================================
 
     def _parse_ai_response(self, response: str) -> Dict[str, Any]:
-        """Parse AI JSON response."""
+        """Parse AI JSON response with robust error handling."""
         try:
             # Try to extract JSON from response
             json_match = response
@@ -834,9 +827,29 @@ class RevenueVarianceAnalyzer:
             elif "```" in response:
                 json_match = response.split("```")[1].split("```")[0].strip()
 
+            # Clean common JSON issues from AI output
+            # Remove trailing commas before } or ]
+            import re
+            json_match = re.sub(r',\s*}', '}', json_match)
+            json_match = re.sub(r',\s*]', ']', json_match)
+            # Remove any BOM or special characters
+            json_match = json_match.strip().lstrip('\ufeff')
+
             return json.loads(json_match)
         except (json.JSONDecodeError, IndexError) as e:
             logger.warning(f"Failed to parse AI JSON response: {e}")
+            # Try a more aggressive cleanup
+            try:
+                # Find JSON-like structure
+                import re
+                json_pattern = re.search(r'\{[\s\S]*\}', response)
+                if json_pattern:
+                    cleaned = json_pattern.group(0)
+                    cleaned = re.sub(r',\s*}', '}', cleaned)
+                    cleaned = re.sub(r',\s*]', ']', cleaned)
+                    return json.loads(cleaned)
+            except Exception:
+                pass
             # Fallback: return raw response as summary
             return {
                 "narrative": response[:1000] if len(response) > 1000 else response,
@@ -1519,10 +1532,29 @@ class RevenueVarianceAnalyzer:
             row += 1
 
             for driver in key_drivers:
-                ws.cell(row=row, column=1, value=driver.get("rank", ""))
-                ws.cell(row=row, column=2, value=driver.get("driver", ""))
-                ws.cell(row=row, column=3, value=driver.get("impact", ""))
-                ws.cell(row=row, column=4, value=driver.get("explanation", ""))
+                # Handle both dict and string drivers
+                if isinstance(driver, dict):
+                    rank = driver.get("rank", "")
+                    driver_text = driver.get("driver", "")
+                    # Impact might be a number or string like "25.0B" or {"impact_b": 25.0}
+                    impact = driver.get("impact", "") or driver.get("impact_b", "")
+                    if isinstance(impact, (int, float)):
+                        impact = f"{impact:.1f}B VND"
+                    explanation = driver.get("explanation", "")
+                    # tenants_involved might be a list
+                    tenants = driver.get("tenants_involved", [])
+                    if tenants and isinstance(tenants, list):
+                        explanation = f"{explanation} (Tenants: {', '.join(str(t) for t in tenants[:3])})"
+                else:
+                    rank = ""
+                    driver_text = str(driver)
+                    impact = ""
+                    explanation = ""
+
+                ws.cell(row=row, column=1, value=str(rank))
+                ws.cell(row=row, column=2, value=str(driver_text)[:50] if driver_text else "")
+                ws.cell(row=row, column=3, value=str(impact))
+                ws.cell(row=row, column=4, value=str(explanation)[:200] if explanation else "")
                 ws.cell(row=row, column=4).alignment = wrap_alignment
                 row += 1
         else:
@@ -1561,7 +1593,19 @@ class RevenueVarianceAnalyzer:
             row += 1
 
             for flag in flag_priorities:
-                priority = flag.get("priority", "")
+                # Handle both dict flags and potential string flags
+                if isinstance(flag, dict):
+                    priority = str(flag.get("priority", ""))
+                    flag_type = str(flag.get("flag_type", ""))
+                    tenant = str(flag.get("tenant", ""))
+                    # AI might use "recommended_action" or "action"
+                    action = str(flag.get("recommended_action", "") or flag.get("action", ""))
+                else:
+                    priority = ""
+                    flag_type = ""
+                    tenant = str(flag)
+                    action = ""
+
                 ws.cell(row=row, column=1, value=priority)
                 # Color code priority
                 if priority == "HIGH":
@@ -1571,9 +1615,9 @@ class RevenueVarianceAnalyzer:
                 else:
                     ws.cell(row=row, column=1).fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
 
-                ws.cell(row=row, column=2, value=flag.get("flag_type", ""))
-                ws.cell(row=row, column=3, value=flag.get("tenant", ""))
-                ws.cell(row=row, column=4, value=flag.get("action", ""))
+                ws.cell(row=row, column=2, value=flag_type)
+                ws.cell(row=row, column=3, value=tenant[:40] if tenant else "")
+                ws.cell(row=row, column=4, value=action[:100] if action else "")
                 row += 1
         else:
             ws.cell(row=row, column=1, value="No priority flags identified")
@@ -1602,9 +1646,15 @@ class RevenueVarianceAnalyzer:
         row += 1
 
         data_notes = ai_insights.get("data_quality_notes", "N/A")
-        ws.cell(row=row, column=1, value=data_notes)
+        # Handle list of notes
+        if isinstance(data_notes, list):
+            data_notes_str = "\n".join(f"• {note}" for note in data_notes) if data_notes else "No data quality issues noted"
+        else:
+            data_notes_str = str(data_notes) if data_notes else "N/A"
+        ws.cell(row=row, column=1, value=data_notes_str)
         ws.cell(row=row, column=1).alignment = wrap_alignment
         ws.merge_cells(f'A{row}:H{row}')
+        ws.row_dimensions[row].height = max(40, len(data_notes) * 20 if isinstance(data_notes, list) else 40)
         row += 2
 
         # Recommendations
@@ -1617,7 +1667,17 @@ class RevenueVarianceAnalyzer:
         recommendations = ai_insights.get("recommendations", [])
         if recommendations:
             for i, rec in enumerate(recommendations, 1):
-                ws.cell(row=row, column=1, value=f"{i}. {rec}")
+                # Handle both string and dict recommendations
+                if isinstance(rec, dict):
+                    priority = rec.get("priority", "")
+                    recommendation = rec.get("recommendation", "")
+                    rationale = rec.get("rationale", "")
+                    rec_text = f"[{priority}] {recommendation}"
+                    if rationale:
+                        rec_text += f" - {rationale}"
+                else:
+                    rec_text = str(rec)
+                ws.cell(row=row, column=1, value=f"{i}. {rec_text}")
                 ws.cell(row=row, column=1).alignment = wrap_alignment
                 ws.merge_cells(f'A{row}:H{row}')
                 row += 1
@@ -1837,24 +1897,30 @@ class RevenueVarianceAnalyzer:
         for i, inc in enumerate(comp.leasing_increases):
             row = inc_start + 2 + i
             ws.cell(row=row, column=1, value=i+1)
-            ws.cell(row=row, column=2, value=inc["subsidiary"])
-            ws.cell(row=row, column=3, value=inc["tenant"][:30] + ".." if len(inc["tenant"]) > 30 else inc["tenant"])
-            ws.cell(row=row, column=4, value=round(inc["prior"]/1e9, 2) if inc["prior"] else "-")
-            ws.cell(row=row, column=5, value=round(inc["current"]/1e9, 2) if inc["current"] else "")
-            ws.cell(row=row, column=6, value=round(inc["variance"]/1e9, 2))
-            ws.cell(row=row, column=7, value=inc["ufl_action"])
-            ws.cell(row=row, column=8, value=inc["ufl_month"])
-            ws.cell(row=row, column=9, value=inc["gla"])
-            ws.cell(row=row, column=10, value=inc["flag"])
+            ws.cell(row=row, column=2, value=inc.get("subsidiary", ""))
+            tenant = inc.get("tenant", "")
+            ws.cell(row=row, column=3, value=tenant[:30] + ".." if len(tenant) > 30 else tenant)
+            prior = inc.get("prior", 0)
+            ws.cell(row=row, column=4, value=round(prior/1e9, 2) if prior else "-")
+            current = inc.get("current", 0)
+            ws.cell(row=row, column=5, value=round(current/1e9, 2) if current else "")
+            variance = inc.get("variance", 0)
+            ws.cell(row=row, column=6, value=round(variance/1e9, 2) if variance else 0)
+            ufl_action = inc.get("ufl_action", "-")
+            ws.cell(row=row, column=7, value=ufl_action)
+            ws.cell(row=row, column=8, value=inc.get("ufl_month", ""))
+            ws.cell(row=row, column=9, value=inc.get("gla", ""))
+            flag = inc.get("flag", "")
+            ws.cell(row=row, column=10, value=flag)
 
             # Color UFL Action
-            if inc["ufl_action"] == "NEW LEASE":
+            if ufl_action == "NEW LEASE":
                 ws.cell(row=row, column=7).fill = increase_fill
 
             # Color flags
-            if inc["flag"] == "REVERSAL":
+            if flag == "REVERSAL":
                 ws.cell(row=row, column=10).fill = reversal_fill
-            elif inc["flag"]:
+            elif flag:
                 ws.cell(row=row, column=10).fill = flag_fill
 
         # Decreases section
@@ -1871,22 +1937,27 @@ class RevenueVarianceAnalyzer:
         for i, dec in enumerate(comp.leasing_decreases):
             row = dec_start + 2 + i
             ws.cell(row=row, column=1, value=i+1)
-            ws.cell(row=row, column=2, value=dec["subsidiary"])
-            ws.cell(row=row, column=3, value=dec["tenant"][:30] + ".." if len(dec["tenant"]) > 30 else dec["tenant"])
-            ws.cell(row=row, column=4, value=round(dec["prior"]/1e9, 2) if dec["prior"] else "-")
-            ws.cell(row=row, column=5, value=round(dec["current"]/1e9, 2) if dec["current"] else "-")
-            ws.cell(row=row, column=6, value=round(dec["variance"]/1e9, 2))
-            ws.cell(row=row, column=7, value=dec["ufl_action"])
-            ws.cell(row=row, column=8, value=dec["ufl_month"])
-            ws.cell(row=row, column=9, value=dec["gla"])
-            ws.cell(row=row, column=10, value=dec["flag"])
+            ws.cell(row=row, column=2, value=dec.get("subsidiary", ""))
+            tenant = dec.get("tenant", "")
+            ws.cell(row=row, column=3, value=tenant[:30] + ".." if len(tenant) > 30 else tenant)
+            prior = dec.get("prior", 0)
+            ws.cell(row=row, column=4, value=round(prior/1e9, 2) if prior else "-")
+            current = dec.get("current", 0)
+            ws.cell(row=row, column=5, value=round(current/1e9, 2) if current else "-")
+            variance = dec.get("variance", 0)
+            ws.cell(row=row, column=6, value=round(variance/1e9, 2) if variance else 0)
+            ws.cell(row=row, column=7, value=dec.get("ufl_action", "-"))
+            # Handle both "term_month" and "ufl_month" keys
+            ws.cell(row=row, column=8, value=dec.get("term_month", "") or dec.get("ufl_month", ""))
+            ws.cell(row=row, column=9, value=dec.get("gla", ""))
+            ws.cell(row=row, column=10, value=dec.get("flag", ""))
 
             # Color UFL Action
-            if dec["ufl_action"] == "TERMINATED":
+            if dec.get("ufl_action") == "TERMINATED":
                 ws.cell(row=row, column=7).fill = decrease_fill
 
             # Color flags
-            if dec["flag"]:
+            if dec.get("flag"):
                 ws.cell(row=row, column=10).fill = flag_fill
 
         # Set column widths
