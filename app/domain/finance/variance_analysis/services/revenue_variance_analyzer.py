@@ -825,7 +825,7 @@ class RevenueVarianceAnalyzer:
     # =============================================================================
 
     def _parse_ai_response(self, response: str) -> Dict[str, Any]:
-        """Parse AI JSON response."""
+        """Parse AI JSON response with robust error handling."""
         try:
             # Try to extract JSON from response
             json_match = response
@@ -834,9 +834,29 @@ class RevenueVarianceAnalyzer:
             elif "```" in response:
                 json_match = response.split("```")[1].split("```")[0].strip()
 
+            # Clean common JSON issues from AI output
+            # Remove trailing commas before } or ]
+            import re
+            json_match = re.sub(r',\s*}', '}', json_match)
+            json_match = re.sub(r',\s*]', ']', json_match)
+            # Remove any BOM or special characters
+            json_match = json_match.strip().lstrip('\ufeff')
+
             return json.loads(json_match)
         except (json.JSONDecodeError, IndexError) as e:
             logger.warning(f"Failed to parse AI JSON response: {e}")
+            # Try a more aggressive cleanup
+            try:
+                # Find JSON-like structure
+                import re
+                json_pattern = re.search(r'\{[\s\S]*\}', response)
+                if json_pattern:
+                    cleaned = json_pattern.group(0)
+                    cleaned = re.sub(r',\s*}', '}', cleaned)
+                    cleaned = re.sub(r',\s*]', ']', cleaned)
+                    return json.loads(cleaned)
+            except Exception:
+                pass
             # Fallback: return raw response as summary
             return {
                 "narrative": response[:1000] if len(response) > 1000 else response,
@@ -1884,24 +1904,30 @@ class RevenueVarianceAnalyzer:
         for i, inc in enumerate(comp.leasing_increases):
             row = inc_start + 2 + i
             ws.cell(row=row, column=1, value=i+1)
-            ws.cell(row=row, column=2, value=inc["subsidiary"])
-            ws.cell(row=row, column=3, value=inc["tenant"][:30] + ".." if len(inc["tenant"]) > 30 else inc["tenant"])
-            ws.cell(row=row, column=4, value=round(inc["prior"]/1e9, 2) if inc["prior"] else "-")
-            ws.cell(row=row, column=5, value=round(inc["current"]/1e9, 2) if inc["current"] else "")
-            ws.cell(row=row, column=6, value=round(inc["variance"]/1e9, 2))
-            ws.cell(row=row, column=7, value=inc["ufl_action"])
-            ws.cell(row=row, column=8, value=inc["ufl_month"])
-            ws.cell(row=row, column=9, value=inc["gla"])
-            ws.cell(row=row, column=10, value=inc["flag"])
+            ws.cell(row=row, column=2, value=inc.get("subsidiary", ""))
+            tenant = inc.get("tenant", "")
+            ws.cell(row=row, column=3, value=tenant[:30] + ".." if len(tenant) > 30 else tenant)
+            prior = inc.get("prior", 0)
+            ws.cell(row=row, column=4, value=round(prior/1e9, 2) if prior else "-")
+            current = inc.get("current", 0)
+            ws.cell(row=row, column=5, value=round(current/1e9, 2) if current else "")
+            variance = inc.get("variance", 0)
+            ws.cell(row=row, column=6, value=round(variance/1e9, 2) if variance else 0)
+            ufl_action = inc.get("ufl_action", "-")
+            ws.cell(row=row, column=7, value=ufl_action)
+            ws.cell(row=row, column=8, value=inc.get("ufl_month", ""))
+            ws.cell(row=row, column=9, value=inc.get("gla", ""))
+            flag = inc.get("flag", "")
+            ws.cell(row=row, column=10, value=flag)
 
             # Color UFL Action
-            if inc["ufl_action"] == "NEW LEASE":
+            if ufl_action == "NEW LEASE":
                 ws.cell(row=row, column=7).fill = increase_fill
 
             # Color flags
-            if inc["flag"] == "REVERSAL":
+            if flag == "REVERSAL":
                 ws.cell(row=row, column=10).fill = reversal_fill
-            elif inc["flag"]:
+            elif flag:
                 ws.cell(row=row, column=10).fill = flag_fill
 
         # Decreases section
@@ -1918,22 +1944,27 @@ class RevenueVarianceAnalyzer:
         for i, dec in enumerate(comp.leasing_decreases):
             row = dec_start + 2 + i
             ws.cell(row=row, column=1, value=i+1)
-            ws.cell(row=row, column=2, value=dec["subsidiary"])
-            ws.cell(row=row, column=3, value=dec["tenant"][:30] + ".." if len(dec["tenant"]) > 30 else dec["tenant"])
-            ws.cell(row=row, column=4, value=round(dec["prior"]/1e9, 2) if dec["prior"] else "-")
-            ws.cell(row=row, column=5, value=round(dec["current"]/1e9, 2) if dec["current"] else "-")
-            ws.cell(row=row, column=6, value=round(dec["variance"]/1e9, 2))
-            ws.cell(row=row, column=7, value=dec["ufl_action"])
-            ws.cell(row=row, column=8, value=dec["ufl_month"])
-            ws.cell(row=row, column=9, value=dec["gla"])
-            ws.cell(row=row, column=10, value=dec["flag"])
+            ws.cell(row=row, column=2, value=dec.get("subsidiary", ""))
+            tenant = dec.get("tenant", "")
+            ws.cell(row=row, column=3, value=tenant[:30] + ".." if len(tenant) > 30 else tenant)
+            prior = dec.get("prior", 0)
+            ws.cell(row=row, column=4, value=round(prior/1e9, 2) if prior else "-")
+            current = dec.get("current", 0)
+            ws.cell(row=row, column=5, value=round(current/1e9, 2) if current else "-")
+            variance = dec.get("variance", 0)
+            ws.cell(row=row, column=6, value=round(variance/1e9, 2) if variance else 0)
+            ws.cell(row=row, column=7, value=dec.get("ufl_action", "-"))
+            # Handle both "term_month" and "ufl_month" keys
+            ws.cell(row=row, column=8, value=dec.get("term_month", "") or dec.get("ufl_month", ""))
+            ws.cell(row=row, column=9, value=dec.get("gla", ""))
+            ws.cell(row=row, column=10, value=dec.get("flag", ""))
 
             # Color UFL Action
-            if dec["ufl_action"] == "TERMINATED":
+            if dec.get("ufl_action") == "TERMINATED":
                 ws.cell(row=row, column=7).fill = decrease_fill
 
             # Color flags
-            if dec["flag"]:
+            if dec.get("flag"):
                 ws.cell(row=row, column=10).fill = flag_fill
 
         # Set column widths
