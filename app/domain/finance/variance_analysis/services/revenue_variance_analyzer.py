@@ -1,15 +1,23 @@
 """
-Revenue Variance Analyzer - MoM variance analysis with UFL linkage.
+Revenue Variance Analyzer - AI-powered MoM variance analysis with UFL linkage.
 
 This module implements comprehensive revenue variance analysis for BW Industrial,
 comparing monthly revenue data with Unit for Lease (UFL) activity to explain
 revenue movements and flag unusual items.
 
-Output: 13-sheet Excel with Flags, Executive Summary, and 11 monthly comparison sheets.
+Uses AI (OpenAI/Claude) for:
+- Dynamic data location and parsing
+- Deep reasoning about variance drivers
+- Executive narrative generation
+- Recommendations
+
+Output: 14-sheet Excel with Flags, Executive Summary, AI Insights, and 11 monthly comparison sheets.
 """
 
 import io
+import os
 import re
+import json
 import logging
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Optional, Any
@@ -23,7 +31,70 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
+from openai import OpenAI
+from anthropic import Anthropic
+
 logger = logging.getLogger(__name__)
+
+# AI System Prompt for Revenue Variance Analysis
+REVENUE_VARIANCE_SYSTEM_PROMPT = """You are a senior financial analyst for BW Industrial Development JSC, a leading industrial real estate company in Vietnam.
+
+You are analyzing Revenue Variance data with Unit for Lease (UFL) linkage. Your task is to provide deep analysis and insights.
+
+## Your Analysis Should:
+1. **Identify Key Drivers**: Explain the TOP 5 factors driving revenue variance
+2. **UFL Correlation**: Connect revenue changes to lease activity (new handovers, terminations)
+3. **Pattern Detection**: Identify trends across months (seasonal, tenant concentration, etc.)
+4. **Flag Analysis**: Explain what flagged items mean and prioritize investigation
+5. **Recommendations**: Provide actionable recommendations for management
+
+## Revenue Types:
+- **Leasing (511710001)**: Core rental income - should be stable, changes indicate new leases or terminations
+- **Service/Mgmt Fee (511600xxx)**: Management fees - typically proportional to leasing
+- **Utilities (511800001)**: Pass-through utility charges
+- **Others (511800002)**: Miscellaneous revenue
+
+## Flag Types to Analyze:
+- **INCREASE NO UFL**: Revenue increased but no corresponding UFL handover found - possible data gap
+- **DECREASE NO UFL**: Revenue decreased but no UFL termination found - possible data gap
+- **NEGATIVE NO UFL**: Revenue went negative (straight-line reversal) without termination
+- **REVERSAL**: Prior negative, now positive - billing correction
+- **UFL NO REVENUE**: Large UFL handover without corresponding revenue increase
+
+## Output Format (JSON):
+{
+    "executive_summary": "3-5 sentence overview of the revenue variance situation for the year",
+    "key_drivers": [
+        {
+            "rank": 1,
+            "driver": "description of the key driver",
+            "impact": "+X.XB VND",
+            "explanation": "detailed explanation with tenant/project names"
+        }
+    ],
+    "monthly_trends": "analysis of month-over-month patterns",
+    "flag_priorities": [
+        {
+            "priority": "HIGH/MEDIUM/LOW",
+            "flag_type": "type",
+            "tenant": "name",
+            "action": "recommended action"
+        }
+    ],
+    "ufl_correlation_analysis": "How well do revenue changes correlate with UFL activity?",
+    "data_quality_notes": "Any concerns about data completeness or accuracy",
+    "recommendations": [
+        "Specific actionable recommendation 1",
+        "Specific actionable recommendation 2"
+    ]
+}
+
+IMPORTANT:
+- Use specific numbers (in billions B or millions M VND)
+- Name specific tenants and subsidiaries
+- Be direct and actionable
+- Focus on material items (>100M VND variance)
+"""
 
 # Revenue type classification based on account codes
 REVENUE_TYPE_MAP = {
@@ -111,27 +182,57 @@ class MonthlyComparison:
 
 class RevenueVarianceAnalyzer:
     """
-    Analyzes revenue variance with UFL linkage.
+    AI-powered revenue variance analyzer with UFL linkage.
     """
 
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
+        """
+        Initialize analyzer with optional AI configuration.
+
+        Args:
+            api_key: OpenAI or Anthropic API key (defaults to env var)
+            model: Model to use (e.g., "gpt-4o", "claude-3-5-sonnet-20241022")
+        """
         self.ns = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
         self.revenue_records: List[RevenueRecord] = []
         self.ufl_records: List[UFLRecord] = []
         self.year = 2025  # Default year, will be detected from data
 
+        # AI Configuration
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        self.model = model or os.getenv("AI_MODEL", "gpt-4o")
+
+        # Determine API type
+        self.is_claude = "claude" in self.model.lower() if self.model else False
+
+        # Initialize AI client
+        self.ai_client = None
+        if self.api_key:
+            try:
+                if self.is_claude:
+                    self.ai_client = Anthropic(api_key=self.api_key)
+                    logger.info(f"Initialized Claude client with model: {self.model}")
+                else:
+                    self.ai_client = OpenAI(api_key=self.api_key)
+                    logger.info(f"Initialized OpenAI client with model: {self.model}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize AI client: {e}")
+                self.ai_client = None
+        else:
+            logger.warning("No API key found - AI analysis will be skipped")
+
     def analyze(self, revenue_bytes: bytes, ufl_bytes: bytes) -> bytes:
         """
-        Perform full revenue variance analysis.
+        Perform full revenue variance analysis with AI insights.
 
         Args:
             revenue_bytes: Raw bytes of RevenueBreakdown XML-Excel file
             ufl_bytes: Raw bytes of UnitForLeaseList XML-Excel file
 
         Returns:
-            Excel file bytes with 13 sheets
+            Excel file bytes with 14 sheets (including AI Insights)
         """
-        logger.info("Starting revenue variance analysis...")
+        logger.info("Starting AI-powered revenue variance analysis...")
 
         # Step 1: Parse revenue data
         logger.info("Parsing revenue data...")
@@ -164,12 +265,208 @@ class RevenueVarianceAnalyzer:
         # Step 6: Build monthly revenue summary for executive summary
         monthly_totals = self._calculate_monthly_totals()
 
-        # Step 7: Generate Excel output
+        # Step 7: Generate AI Insights
+        logger.info("Generating AI insights...")
+        ai_insights = self._generate_ai_insights(comparisons, all_flags, monthly_totals)
+
+        # Step 8: Generate Excel output with AI Insights
         logger.info("Generating Excel output...")
-        xlsx_bytes = self._generate_excel(comparisons, all_flags, monthly_totals)
+        xlsx_bytes = self._generate_excel(comparisons, all_flags, monthly_totals, ai_insights)
 
         logger.info("Revenue variance analysis complete")
         return xlsx_bytes
+
+    def _generate_ai_insights(
+        self,
+        comparisons: List[MonthlyComparison],
+        all_flags: List[VarianceFlag],
+        monthly_totals: Dict[int, float]
+    ) -> Dict[str, Any]:
+        """Generate AI-powered insights from the analysis data."""
+        if not self.ai_client:
+            logger.warning("AI client not available - returning default insights")
+            return {
+                "executive_summary": "AI analysis not available - API key not configured. Please set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.",
+                "key_drivers": [],
+                "monthly_trends": "N/A",
+                "flag_priorities": [],
+                "ufl_correlation_analysis": "N/A",
+                "data_quality_notes": "N/A",
+                "recommendations": []
+            }
+
+        # Build context for AI
+        context = self._build_ai_context(comparisons, all_flags, monthly_totals)
+
+        try:
+            logger.info(f"Calling AI ({self.model}) for insights...")
+            if self.is_claude:
+                response = self._call_claude(context)
+            else:
+                response = self._call_openai(context)
+
+            # Parse JSON response
+            return self._parse_ai_response(response)
+        except Exception as e:
+            logger.error(f"AI analysis failed: {e}")
+            return {
+                "executive_summary": f"AI analysis error: {str(e)}",
+                "key_drivers": [],
+                "monthly_trends": "Error during analysis",
+                "flag_priorities": [],
+                "ufl_correlation_analysis": "N/A",
+                "data_quality_notes": "AI analysis failed",
+                "recommendations": ["Review error and retry analysis"]
+            }
+
+    def _build_ai_context(
+        self,
+        comparisons: List[MonthlyComparison],
+        all_flags: List[VarianceFlag],
+        monthly_totals: Dict[int, float]
+    ) -> str:
+        """Build context string for AI analysis."""
+        lines = [
+            "# BW Industrial Revenue Variance Analysis Data",
+            f"Year: {self.year}",
+            f"Total Revenue Records: {len(self.revenue_records)}",
+            f"Total UFL Records: {len(self.ufl_records)}",
+            "",
+            "## Monthly Revenue Totals (VND Billions)",
+        ]
+
+        # Monthly totals
+        for month in range(1, 13):
+            total = monthly_totals.get(month, 0) / 1e9
+            lines.append(f"- {MONTH_NAMES[month-1]}: {total:.1f}B")
+
+        # YTD summary
+        ytd_total = sum(monthly_totals.values()) / 1e9
+        lines.append(f"\nYTD Total: {ytd_total:.1f}B")
+
+        # Monthly variances
+        lines.extend(["", "## Month-over-Month Variances"])
+        for comp in comparisons[:6]:  # Top 6 recent months
+            lines.append(
+                f"- {comp.current_month_name} vs {comp.prior_month_name}: "
+                f"{comp.net_change/1e9:+.1f}B ({comp.net_change_pct:+.1f}%)"
+            )
+
+        # Revenue stream breakdown for latest month
+        if comparisons:
+            latest = comparisons[0]
+            lines.extend(["", f"## Revenue Stream Breakdown ({latest.current_month_name} vs {latest.prior_month_name})"])
+            for stream in latest.stream_breakdown:
+                if stream["stream"] != "TOTAL":
+                    lines.append(
+                        f"- {stream['stream']}: {stream['variance']/1e9:+.2f}B "
+                        f"({stream.get('pct_of_net', 0):+.0f}% of net)"
+                    )
+
+        # Top Leasing increases/decreases
+        lines.extend(["", "## Top Leasing Changes (Most Recent Month)"])
+        if comparisons:
+            latest = comparisons[0]
+            lines.append("### Increases:")
+            for inc in latest.leasing_increases[:5]:
+                lines.append(
+                    f"- {inc['subsidiary']} | {inc['tenant'][:30]}: "
+                    f"+{inc['variance']/1e9:.2f}B | UFL: {inc['ufl_action']} | Flag: {inc.get('flag', '-')}"
+                )
+
+            lines.append("\n### Decreases:")
+            for dec in latest.leasing_decreases[:5]:
+                lines.append(
+                    f"- {dec['subsidiary']} | {dec['tenant'][:30]}: "
+                    f"{dec['variance']/1e9:.2f}B | UFL: {dec['ufl_action']} | Flag: {dec.get('flag', '-')}"
+                )
+
+        # Flags summary
+        lines.extend(["", "## Flags Summary"])
+        flag_counts = defaultdict(int)
+        for f in all_flags:
+            flag_counts[f.flag_type] += 1
+        for flag_type, count in sorted(flag_counts.items()):
+            lines.append(f"- {flag_type}: {count}")
+
+        # Top flags by impact
+        lines.extend(["", "## Top 10 Flags by Impact"])
+        for f in all_flags[:10]:
+            lines.append(
+                f"- [{f.flag_type}] {f.period} | {f.subsidiary} | {f.tenant[:25]}: "
+                f"{f.variance:+.2f}B"
+            )
+
+        # UFL Activity Summary
+        handovers_2025 = [u for u in self.ufl_records
+                         if u.status == "Handed Over" and u.start_date and u.start_date.year == self.year]
+        terminations_2025 = [u for u in self.ufl_records
+                            if u.status == "Terminated" and u.termination_date and u.termination_date.year == self.year]
+
+        lines.extend([
+            "",
+            "## UFL Activity Summary",
+            f"- Total Handovers in {self.year}: {len(handovers_2025)}",
+            f"- Total GLA Handed Over: {sum(u.gla for u in handovers_2025):,.0f} sqm",
+            f"- Total Terminations in {self.year}: {len(terminations_2025)}",
+            f"- Total GLA Terminated: {sum(u.gla for u in terminations_2025):,.0f} sqm",
+        ])
+
+        return "\n".join(lines)
+
+    def _call_openai(self, context: str) -> str:
+        """Call OpenAI API for analysis."""
+        params = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": REVENUE_VARIANCE_SYSTEM_PROMPT},
+                {"role": "user", "content": context}
+            ],
+            "max_tokens": 4000,
+        }
+
+        # GPT-5 doesn't support temperature
+        if not self.model.startswith("gpt-5"):
+            params["temperature"] = 0.3
+
+        response = self.ai_client.chat.completions.create(**params)
+        return response.choices[0].message.content
+
+    def _call_claude(self, context: str) -> str:
+        """Call Claude API for analysis."""
+        response = self.ai_client.messages.create(
+            model=self.model,
+            max_tokens=4000,
+            system=REVENUE_VARIANCE_SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": context}
+            ]
+        )
+        return response.content[0].text
+
+    def _parse_ai_response(self, response: str) -> Dict[str, Any]:
+        """Parse AI JSON response."""
+        try:
+            # Try to extract JSON from response
+            json_match = response
+            if "```json" in response:
+                json_match = response.split("```json")[1].split("```")[0].strip()
+            elif "```" in response:
+                json_match = response.split("```")[1].split("```")[0].strip()
+
+            return json.loads(json_match)
+        except (json.JSONDecodeError, IndexError) as e:
+            logger.warning(f"Failed to parse AI JSON response: {e}")
+            # Fallback: return raw response as summary
+            return {
+                "executive_summary": response[:1000] if len(response) > 1000 else response,
+                "key_drivers": [],
+                "monthly_trends": "See executive summary",
+                "flag_priorities": [],
+                "ufl_correlation_analysis": "See executive summary",
+                "data_quality_notes": "Response was not in expected JSON format",
+                "recommendations": []
+            }
 
     def _parse_revenue_data(self, file_bytes: bytes) -> List[RevenueRecord]:
         """Parse RevenueBreakdown XML-Excel file."""
@@ -765,8 +1062,9 @@ class RevenueVarianceAnalyzer:
 
     def _generate_excel(self, comparisons: List[MonthlyComparison],
                         all_flags: List[VarianceFlag],
-                        monthly_totals: Dict[int, float]) -> bytes:
-        """Generate the 13-sheet Excel output."""
+                        monthly_totals: Dict[int, float],
+                        ai_insights: Optional[Dict[str, Any]] = None) -> bytes:
+        """Generate the 14-sheet Excel output with AI Insights."""
         output = io.BytesIO()
 
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -776,12 +1074,184 @@ class RevenueVarianceAnalyzer:
             # Sheet 2: Executive Summary
             self._write_executive_summary(writer, monthly_totals, all_flags)
 
-            # Sheets 3-13: Monthly comparisons
+            # Sheet 3: AI Insights
+            self._write_ai_insights_sheet(writer, ai_insights or {})
+
+            # Sheets 4-14: Monthly comparisons
             for comp in comparisons:
                 sheet_name = f"{comp.current_month_name} vs {comp.prior_month_name}"
                 self._write_monthly_sheet(writer, comp, sheet_name)
 
         return output.getvalue()
+
+    def _write_ai_insights_sheet(self, writer, ai_insights: Dict[str, Any]):
+        """Write the AI Insights sheet."""
+        ws = writer.book.create_sheet("AI Insights", 2)
+
+        # Styles
+        header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+        header_font = Font(bold=True, color='FFFFFF', size=14)
+        title_font = Font(bold=True, size=18, color='2F5496')
+        section_font = Font(bold=True, size=12, color='2F5496')
+        wrap_alignment = Alignment(wrap_text=True, vertical='top')
+
+        # Title
+        ws['A1'] = "AI-POWERED REVENUE VARIANCE INSIGHTS"
+        ws['A1'].font = title_font
+        ws.merge_cells('A1:H1')
+
+        ws['A2'] = f"Generated by {self.model or 'AI'} | Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        ws['A2'].font = Font(italic=True, color='666666')
+
+        row = 4
+
+        # Executive Summary
+        ws.cell(row=row, column=1, value="EXECUTIVE SUMMARY")
+        ws.cell(row=row, column=1).font = section_font
+        ws.cell(row=row, column=1).fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+        ws.merge_cells(f'A{row}:H{row}')
+        row += 1
+
+        summary = ai_insights.get("executive_summary", "No AI summary available")
+        ws.cell(row=row, column=1, value=summary)
+        ws.cell(row=row, column=1).alignment = wrap_alignment
+        ws.merge_cells(f'A{row}:H{row}')
+        ws.row_dimensions[row].height = 80
+        row += 2
+
+        # Key Drivers
+        ws.cell(row=row, column=1, value="KEY VARIANCE DRIVERS")
+        ws.cell(row=row, column=1).font = section_font
+        ws.cell(row=row, column=1).fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+        ws.merge_cells(f'A{row}:H{row}')
+        row += 1
+
+        key_drivers = ai_insights.get("key_drivers", [])
+        if key_drivers:
+            # Headers
+            driver_headers = ["Rank", "Driver", "Impact", "Explanation"]
+            for col, header in enumerate(driver_headers, 1):
+                cell = ws.cell(row=row, column=col, value=header)
+                cell.fill = header_fill
+                cell.font = Font(bold=True, color='FFFFFF')
+            row += 1
+
+            for driver in key_drivers:
+                ws.cell(row=row, column=1, value=driver.get("rank", ""))
+                ws.cell(row=row, column=2, value=driver.get("driver", ""))
+                ws.cell(row=row, column=3, value=driver.get("impact", ""))
+                ws.cell(row=row, column=4, value=driver.get("explanation", ""))
+                ws.cell(row=row, column=4).alignment = wrap_alignment
+                row += 1
+        else:
+            ws.cell(row=row, column=1, value="No key drivers identified")
+            row += 1
+        row += 1
+
+        # Monthly Trends
+        ws.cell(row=row, column=1, value="MONTHLY TRENDS")
+        ws.cell(row=row, column=1).font = section_font
+        ws.cell(row=row, column=1).fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+        ws.merge_cells(f'A{row}:H{row}')
+        row += 1
+
+        trends = ai_insights.get("monthly_trends", "N/A")
+        ws.cell(row=row, column=1, value=trends)
+        ws.cell(row=row, column=1).alignment = wrap_alignment
+        ws.merge_cells(f'A{row}:H{row}')
+        ws.row_dimensions[row].height = 60
+        row += 2
+
+        # Flag Priorities
+        ws.cell(row=row, column=1, value="FLAG INVESTIGATION PRIORITIES")
+        ws.cell(row=row, column=1).font = section_font
+        ws.cell(row=row, column=1).fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+        ws.merge_cells(f'A{row}:H{row}')
+        row += 1
+
+        flag_priorities = ai_insights.get("flag_priorities", [])
+        if flag_priorities:
+            flag_headers = ["Priority", "Flag Type", "Tenant", "Recommended Action"]
+            for col, header in enumerate(flag_headers, 1):
+                cell = ws.cell(row=row, column=col, value=header)
+                cell.fill = header_fill
+                cell.font = Font(bold=True, color='FFFFFF')
+            row += 1
+
+            for flag in flag_priorities:
+                priority = flag.get("priority", "")
+                ws.cell(row=row, column=1, value=priority)
+                # Color code priority
+                if priority == "HIGH":
+                    ws.cell(row=row, column=1).fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+                elif priority == "MEDIUM":
+                    ws.cell(row=row, column=1).fill = PatternFill(start_color='FFEB9C', end_color='FFEB9C', fill_type='solid')
+                else:
+                    ws.cell(row=row, column=1).fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+
+                ws.cell(row=row, column=2, value=flag.get("flag_type", ""))
+                ws.cell(row=row, column=3, value=flag.get("tenant", ""))
+                ws.cell(row=row, column=4, value=flag.get("action", ""))
+                row += 1
+        else:
+            ws.cell(row=row, column=1, value="No priority flags identified")
+            row += 1
+        row += 1
+
+        # UFL Correlation Analysis
+        ws.cell(row=row, column=1, value="UFL CORRELATION ANALYSIS")
+        ws.cell(row=row, column=1).font = section_font
+        ws.cell(row=row, column=1).fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+        ws.merge_cells(f'A{row}:H{row}')
+        row += 1
+
+        ufl_analysis = ai_insights.get("ufl_correlation_analysis", "N/A")
+        ws.cell(row=row, column=1, value=ufl_analysis)
+        ws.cell(row=row, column=1).alignment = wrap_alignment
+        ws.merge_cells(f'A{row}:H{row}')
+        ws.row_dimensions[row].height = 60
+        row += 2
+
+        # Data Quality Notes
+        ws.cell(row=row, column=1, value="DATA QUALITY NOTES")
+        ws.cell(row=row, column=1).font = section_font
+        ws.cell(row=row, column=1).fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+        ws.merge_cells(f'A{row}:H{row}')
+        row += 1
+
+        data_notes = ai_insights.get("data_quality_notes", "N/A")
+        ws.cell(row=row, column=1, value=data_notes)
+        ws.cell(row=row, column=1).alignment = wrap_alignment
+        ws.merge_cells(f'A{row}:H{row}')
+        row += 2
+
+        # Recommendations
+        ws.cell(row=row, column=1, value="RECOMMENDATIONS")
+        ws.cell(row=row, column=1).font = section_font
+        ws.cell(row=row, column=1).fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+        ws.merge_cells(f'A{row}:H{row}')
+        row += 1
+
+        recommendations = ai_insights.get("recommendations", [])
+        if recommendations:
+            for i, rec in enumerate(recommendations, 1):
+                ws.cell(row=row, column=1, value=f"{i}. {rec}")
+                ws.cell(row=row, column=1).alignment = wrap_alignment
+                ws.merge_cells(f'A{row}:H{row}')
+                row += 1
+        else:
+            ws.cell(row=row, column=1, value="No specific recommendations")
+            row += 1
+
+        # Set column widths
+        ws.column_dimensions['A'].width = 12
+        ws.column_dimensions['B'].width = 30
+        ws.column_dimensions['C'].width = 15
+        ws.column_dimensions['D'].width = 50
+        ws.column_dimensions['E'].width = 15
+        ws.column_dimensions['F'].width = 15
+        ws.column_dimensions['G'].width = 15
+        ws.column_dimensions['H'].width = 15
 
     def _write_flags_sheet(self, writer, flags: List[VarianceFlag]):
         """Write the Flags - Unusual Items sheet."""
@@ -1050,16 +1520,23 @@ class RevenueVarianceAnalyzer:
         ws.column_dimensions['J'].width = 18
 
 
-def analyze_revenue_variance(revenue_bytes: bytes, ufl_bytes: bytes) -> bytes:
+def analyze_revenue_variance(
+    revenue_bytes: bytes,
+    ufl_bytes: bytes,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None
+) -> bytes:
     """
-    Convenience function to analyze revenue variance.
+    AI-powered revenue variance analysis with UFL linkage.
 
     Args:
         revenue_bytes: Raw bytes of RevenueBreakdown file
         ufl_bytes: Raw bytes of UnitForLeaseList file
+        api_key: Optional API key (defaults to OPENAI_API_KEY or ANTHROPIC_API_KEY env var)
+        model: Optional model name (defaults to AI_MODEL env var or "gpt-4o")
 
     Returns:
-        Excel file bytes with 13 sheets
+        Excel file bytes with 14 sheets (including AI Insights)
     """
-    analyzer = RevenueVarianceAnalyzer()
+    analyzer = RevenueVarianceAnalyzer(api_key=api_key, model=model)
     return analyzer.analyze(revenue_bytes, ufl_bytes)
