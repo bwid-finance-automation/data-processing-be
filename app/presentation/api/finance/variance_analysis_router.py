@@ -505,3 +505,85 @@ async def compare_excel_files(
         settings=settings
     )
 
+
+@router.post("/account-511-analysis")
+async def analyze_account_511_standalone(
+    request: Request,
+    revenue_breakdown_file: UploadFile = File(..., description="RevenueBreakdown file from NetSuite"),
+    unit_for_lease_file: UploadFile = File(..., description="UnitForLeaseList file from NetSuite"),
+    project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Revenue Variance Analysis with UFL Linkage.
+
+    Upload RevenueBreakdown and UnitForLeaseList files to perform comprehensive
+    MoM variance analysis with UFL (Unit for Lease) activity linkage.
+
+    Returns Excel file with 13 sheets:
+    - Flags - Unusual Items (mismatches between revenue and UFL)
+    - Executive Summary (monthly revenue overview)
+    - 11 monthly comparison sheets (Dec vs Nov through Feb vs Jan)
+
+    Each monthly sheet includes:
+    - Level 1: Variance by Revenue Stream (Leasing, Service/Mgmt Fee, Utilities, Others)
+    - Level 2: Leasing (511) drill-down with UFL linkage (NEW LEASE, TERMINATED)
+    - Flags for items requiring investigation
+    """
+    logger.info(f"Starting Revenue Variance Analysis")
+    logger.info(f"RevenueBreakdown file: {revenue_breakdown_file.filename}")
+    logger.info(f"UnitForLeaseList file: {unit_for_lease_file.filename}")
+
+    try:
+        # Validate file extensions
+        rev_filename = revenue_breakdown_file.filename or ""
+        if not rev_filename.lower().endswith(('.xlsx', '.xls')):
+            raise FileProcessingError(
+                "RevenueBreakdown file must be an Excel file (.xlsx or .xls)",
+                details=f"Received file: {rev_filename}"
+            )
+
+        unit_filename = unit_for_lease_file.filename or ""
+        if not unit_filename.lower().endswith(('.xlsx', '.xls')):
+            raise FileProcessingError(
+                "UnitForLeaseList file must be an Excel file (.xlsx or .xls)",
+                details=f"Received file: {unit_filename}"
+            )
+
+        # Read file contents
+        revenue_bytes = await revenue_breakdown_file.read()
+        unit_bytes = await unit_for_lease_file.read()
+
+        # Run Revenue Variance Analysis
+        from app.domain.finance.variance_analysis.services.revenue_variance_analyzer import analyze_revenue_variance
+
+        logger.info("Running revenue variance analysis with UFL linkage...")
+        xlsx_bytes = analyze_revenue_variance(revenue_bytes, unit_bytes)
+
+        logger.info("Revenue variance analysis completed successfully")
+
+        # Save to project if project_uuid provided
+        if project_uuid:
+            import uuid as uuid_lib
+            session_id = f"rev_var_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            await save_variance_to_project(db, project_uuid, session_id, 2, "REVENUE_VARIANCE")
+
+        # Generate filename with timestamp
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        filename = f"revenue_variance_analysis_{timestamp}.xlsx"
+
+        return StreamingResponse(
+            iter([xlsx_bytes]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+
+    except (FileProcessingError, ValidationError, HTTPException):
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in Revenue Variance Analysis: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred during Revenue Variance Analysis: {str(e)}"
+        )
+

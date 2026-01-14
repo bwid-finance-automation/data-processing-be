@@ -226,32 +226,38 @@ class RevenueBreakdownParser:
                             sub_account.variance_pct = (sub_account.variance / abs(sub_account.previous_month_amount)) * 100
 
         # Second pass: parse line items for project breakdown
+        # Line item rows have format: [empty], Subsidiary, Project, Phase, Entity Name, Entity Code, Account, [monthly amounts...]
+        # Example: ['', 'VC3', 'PVC3: VC3', 'VC3_00: VC3', 'CÔNG TY...', 'S00002874...', '01', '0.0', ...]
         for row_idx, row in enumerate(rows):
             cells = row.findall('ss:Cell', self.ns)
             cell_values = self._extract_cell_values(cells)
 
-            if not cell_values or len(cell_values) < 5:
+            if not cell_values or len(cell_values) < 7:
                 continue
 
             # Skip Total rows and header-like rows
             first_cell = cell_values[0] if cell_values else ""
-            if first_cell.startswith("Total -") or first_cell in ["Financial Row", "Subsidiary", ""]:
+            if first_cell.startswith("Total -") or first_cell.startswith("511") or first_cell in ["Financial Row", "1. Doanh thu"]:
                 continue
 
-            # Line items have format: Subsidiary, Project, Phase, Entity Name, Entity Code, [amounts...]
+            # Line items have empty first cell, subsidiary in [1], project in [2] (format "PXXX: Name")
             # Check if this looks like a data row
-            if len(cell_values) >= 5 and cell_values[1] and ":" in cell_values[1]:  # Project format "PXXX: Name"
+            if (first_cell == "" and
+                len(cell_values) >= 7 and
+                cell_values[2] and ":" in cell_values[2]):  # Project format "PXXX: Name"
+
                 line_item = RevenueLineItem(
-                    subsidiary_code=cell_values[0] if cell_values[0] else "",
-                    project=cell_values[1] if len(cell_values) > 1 else "",
-                    phase=cell_values[2] if len(cell_values) > 2 else "",
-                    entity_name=cell_values[3] if len(cell_values) > 3 else "",
-                    entity_code=cell_values[4] if len(cell_values) > 4 else ""
+                    subsidiary_code=cell_values[1] if len(cell_values) > 1 else "",
+                    project=cell_values[2] if len(cell_values) > 2 else "",
+                    phase=cell_values[3] if len(cell_values) > 3 else "",
+                    entity_name=cell_values[4] if len(cell_values) > 4 else "",
+                    entity_code=cell_values[5] if len(cell_values) > 5 else "",
+                    account_code=cell_values[6] if len(cell_values) > 6 else ""
                 )
 
-                # Parse monthly amounts (columns 5 onwards)
-                if len(cell_values) > 5:
-                    for i, val in enumerate(cell_values[5:]):
+                # Parse monthly amounts (columns 7 onwards - Jan through Dec)
+                if len(cell_values) > 7:
+                    for i, val in enumerate(cell_values[7:]):
                         if i < 12:  # Only first 12 are months
                             try:
                                 amount = float(val) if val else 0.0

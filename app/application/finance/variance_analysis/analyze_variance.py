@@ -299,13 +299,25 @@ class AnalysisService:
 
                         # Add 511 sheets to the Excel output
                         from app.domain.finance.variance_analysis.services.variance_detector import _add_account_511_sheets
-                        wb = load_workbook(io.BytesIO(xlsx_bytes))
-                        _add_account_511_sheets(wb, account_511_result)
+                        import pandas as pd
+                        import tempfile
+                        import os
 
-                        # Save back to bytes
-                        output = io.BytesIO()
-                        wb.save(output)
-                        xlsx_bytes = output.getvalue()
+                        # Use temp file approach to append sheets
+                        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+                            tmp.write(xlsx_bytes)
+                            tmp_path = tmp.name
+
+                        # Append 511 sheets to existing workbook
+                        with pd.ExcelWriter(tmp_path, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
+                            _add_account_511_sheets(writer, account_511_result)
+
+                        # Read back the updated file
+                        with open(tmp_path, 'rb') as f:
+                            xlsx_bytes = f.read()
+
+                        # Clean up temp file
+                        os.unlink(tmp_path)
 
                         log_capture.queue.put(f"   ✅ Added Account 511 sheets to output")
                     else:
