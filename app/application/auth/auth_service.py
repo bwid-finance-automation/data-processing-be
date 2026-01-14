@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
+import hashlib
+import secrets
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +23,25 @@ from app.application.auth.token_service import TokenService, get_token_service
 from app.shared.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+# ==================== Password Utilities ====================
+
+def hash_password(password: str) -> str:
+    """Hash a password using SHA-256 with salt."""
+    salt = secrets.token_hex(16)
+    password_hash = hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
+    return f"{salt}${password_hash}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Verify a password against its hash."""
+    try:
+        salt, stored_hash = password_hash.split("$")
+        computed_hash = hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
+        return secrets.compare_digest(computed_hash, stored_hash)
+    except (ValueError, AttributeError):
+        return False
 
 
 @dataclass
@@ -73,6 +94,77 @@ class AuthService:
             Tuple of (authorization_url, state)
         """
         return self.oauth_client.get_authorization_url(state)
+
+    async def authenticate_with_password(
+        self,
+        username: str,
+        password: str,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> AuthResult:
+        """
+        Authenticate user with username and password.
+
+        Args:
+            username: Username or email
+            password: Password
+            ip_address: Client IP address
+            user_agent: Client user agent
+
+        Returns:
+            AuthResult with user and tokens
+
+        Raises:
+            AuthenticationError: If authentication fails
+        """
+        # Find user by username or email
+        user = await self.user_repo.get_by_username(username)
+        if not user:
+            user = await self.user_repo.get_by_email(username)
+
+        if not user:
+            raise AuthenticationError(
+                "Invalid username or password",
+                "INVALID_CREDENTIALS",
+            )
+
+        # Check if user has a password (local account)
+        if not user.password_hash:
+            raise AuthenticationError(
+                "This account uses Google login. Please sign in with Google.",
+                "GOOGLE_ACCOUNT_ONLY",
+            )
+
+        # Verify password
+        if not verify_password(password, user.password_hash):
+            raise AuthenticationError(
+                "Invalid username or password",
+                "INVALID_CREDENTIALS",
+            )
+
+        # Check if user is active
+        if not user.is_active:
+            raise AuthenticationError(
+                "Your account has been deactivated",
+                "ACCOUNT_DEACTIVATED",
+            )
+
+        # Update last login
+        await self.user_repo.update_last_login(user.id, ip_address)
+
+        # Manage sessions (enforce max sessions limit)
+        await self._enforce_session_limit(user.id)
+
+        # Create session and tokens
+        tokens = await self._create_session(user, ip_address, user_agent)
+
+        await self.db.commit()
+
+        return AuthResult(
+            user=user,
+            tokens=tokens,
+            is_new_user=False,
+        )
 
     async def authenticate_with_google(
         self,

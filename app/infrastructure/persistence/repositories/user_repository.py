@@ -27,6 +27,15 @@ class UserRepository(BaseRepository[UserModel]):
         )
         return result.scalar_one_or_none()
 
+    async def get_by_username(self, username: str) -> Optional[UserModel]:
+        """Get user by username."""
+        result = await self.session.execute(
+            select(UserModel)
+            .where(UserModel.username == username)
+            .where(UserModel.is_deleted == False)
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_google_id(self, google_id: str) -> Optional[UserModel]:
         """Get user by Google OAuth ID."""
         result = await self.session.execute(
@@ -95,6 +104,84 @@ class UserRepository(BaseRepository[UserModel]):
             .where(UserModel.is_active == True)
         )
         return result.scalar_one()
+
+    # ==================== Admin Methods ====================
+
+    async def get_all_users(
+        self,
+        skip: int = 0,
+        limit: int = 50,
+        search: Optional[str] = None,
+        role: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> List[UserModel]:
+        """Get all users with optional filtering (admin only)."""
+        query = select(UserModel).where(UserModel.is_deleted == False)
+
+        if search:
+            search_term = f"%{search.lower()}%"
+            query = query.where(
+                (func.lower(UserModel.email).like(search_term)) |
+                (func.lower(UserModel.full_name).like(search_term))
+            )
+
+        if role:
+            query = query.where(UserModel.role == role)
+
+        if is_active is not None:
+            query = query.where(UserModel.is_active == is_active)
+
+        query = query.order_by(UserModel.created_at.desc()).offset(skip).limit(limit)
+
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+    async def count_all_users(
+        self,
+        search: Optional[str] = None,
+        role: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> int:
+        """Count all users with optional filtering (admin only)."""
+        query = (
+            select(func.count())
+            .select_from(UserModel)
+            .where(UserModel.is_deleted == False)
+        )
+
+        if search:
+            search_term = f"%{search.lower()}%"
+            query = query.where(
+                (func.lower(UserModel.email).like(search_term)) |
+                (func.lower(UserModel.full_name).like(search_term))
+            )
+
+        if role:
+            query = query.where(UserModel.role == role)
+
+        if is_active is not None:
+            query = query.where(UserModel.is_active == is_active)
+
+        result = await self.session.execute(query)
+        return result.scalar_one()
+
+    async def update_user_role(self, user_id: int, role: str) -> Optional[UserModel]:
+        """Update user's role (admin only)."""
+        user = await self.get(user_id)
+        if user:
+            user.role = role
+            await self.session.flush()
+            await self.session.refresh(user)
+        return user
+
+    async def update_user_status(self, user_id: int, is_active: bool) -> Optional[UserModel]:
+        """Update user's active status (admin only)."""
+        user = await self.get(user_id)
+        if user:
+            user.is_active = is_active
+            await self.session.flush()
+            await self.session.refresh(user)
+        return user
 
 
 class UserSessionRepository(BaseRepository[UserSessionModel]):

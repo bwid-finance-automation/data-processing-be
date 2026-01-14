@@ -93,6 +93,16 @@ class AIUsageByTaskTypeResponse(BaseModel):
     total_cost_usd: float
 
 
+class AIUsageByUserResponse(BaseModel):
+    """Schema for usage by user."""
+    user_id: int
+    email: str
+    full_name: Optional[str] = None
+    request_count: int
+    total_tokens: int
+    total_cost_usd: float
+
+
 class AIUsageDailyResponse(BaseModel):
     """Schema for daily usage."""
     date: str
@@ -106,6 +116,7 @@ class AIUsageDashboardResponse(BaseModel):
     stats: AIUsageStatsResponse
     by_provider: List[AIUsageByProviderResponse]
     by_task_type: List[AIUsageByTaskTypeResponse]
+    by_user: List[AIUsageByUserResponse] = []
     daily_usage: List[AIUsageDailyResponse]
     recent_logs: List[AIUsageLogResponse]
 

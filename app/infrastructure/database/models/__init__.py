@@ -35,6 +35,9 @@ from app.infrastructure.database.models.user import (
     UserModel,
     UserSessionModel,
 )
+from app.infrastructure.database.models.system_settings import (
+    SystemSettingsModel,
+)
 
 __all__ = [
     # Project models
@@ -66,4 +69,6 @@ __all__ = [
     # User/Auth models
     "UserModel",
     "UserSessionModel",
+    # System Settings
+    "SystemSettingsModel",
 ]

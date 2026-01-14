@@ -1,4 +1,4 @@
-"""User database models for Google OAuth authentication."""
+"""User database models for authentication (Google OAuth + Local accounts)."""
 
 from datetime import datetime
 from typing import Optional, List
@@ -12,7 +12,7 @@ from app.infrastructure.database.base import Base, TimestampMixin, SoftDeleteMix
 
 
 class UserModel(Base, TimestampMixin, SoftDeleteMixin):
-    """Model for authenticated users via Google OAuth."""
+    """Model for authenticated users (Google OAuth or local accounts)."""
 
     __tablename__ = "users"
 
@@ -24,12 +24,16 @@ class UserModel(Base, TimestampMixin, SoftDeleteMixin):
         nullable=False,
     )
 
-    # Google OAuth info
-    google_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    # Local account credentials (for admin accounts)
+    username: Mapped[Optional[str]] = mapped_column(String(100), unique=True, nullable=True)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # Google OAuth info (nullable for local accounts)
+    google_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True, nullable=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # Profile info from Google
+    # Profile info
     full_name: Mapped[str] = mapped_column(String(200), nullable=False)
     given_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     family_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
@@ -60,6 +64,7 @@ class UserModel(Base, TimestampMixin, SoftDeleteMixin):
 
     __table_args__ = (
         Index("ix_users_uuid", "uuid"),
+        Index("ix_users_username", "username"),
         Index("ix_users_google_id", "google_id"),
         Index("ix_users_email", "email"),
         Index("ix_users_is_active", "is_active"),

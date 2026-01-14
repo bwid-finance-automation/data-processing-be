@@ -13,6 +13,7 @@ from app.infrastructure.database.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from app.infrastructure.database.models.project import ProjectModel, ProjectCaseModel
+    from app.infrastructure.database.models.user import UserModel
 
 
 class AIProvider(str, enum.Enum):
@@ -54,6 +55,12 @@ class AIUsageModel(Base, TimestampMixin):
     # Link to project case (optional)
     case_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("project_cases.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Link to user (optional) - for tracking user-specific usage
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -102,10 +109,15 @@ class AIUsageModel(Base, TimestampMixin):
         "ProjectCaseModel",
         foreign_keys=[case_id],
     )
+    user: Mapped[Optional["UserModel"]] = relationship(
+        "UserModel",
+        foreign_keys=[user_id],
+    )
 
     __table_args__ = (
         Index("ix_ai_usage_logs_project_id", "project_id"),
         Index("ix_ai_usage_logs_case_id", "case_id"),
+        Index("ix_ai_usage_logs_user_id", "user_id"),
         Index("ix_ai_usage_logs_session_id", "session_id"),
         Index("ix_ai_usage_logs_provider", "provider"),
         Index("ix_ai_usage_logs_task_type", "task_type"),

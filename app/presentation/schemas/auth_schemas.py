@@ -36,6 +36,13 @@ class LogoutRequest(BaseModel):
     )
 
 
+class LoginRequest(BaseModel):
+    """Request for username/password login."""
+
+    username: str = Field(..., min_length=1, description="Username or email")
+    password: str = Field(..., min_length=1, description="Password")
+
+
 # ==================== Response Schemas ====================
 
 
@@ -108,3 +115,35 @@ class MessageResponse(BaseModel):
 
     message: str
     success: bool = True
+
+
+# ==================== Admin Schemas ====================
+
+
+class UserListResponse(BaseModel):
+    """List of users for admin."""
+
+    users: List[UserResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class UpdateUserRoleRequest(BaseModel):
+    """Request to update user role."""
+
+    role: str = Field(..., pattern="^(user|admin)$", description="New role: 'user' or 'admin'")
+
+
+class UpdateUserStatusRequest(BaseModel):
+    """Request to update user active status."""
+
+    is_active: bool = Field(..., description="Whether the user account is active")
+
+
+class AdminUserResponse(UserResponse):
+    """Extended user response for admin with additional fields."""
+
+    google_id: Optional[str] = None
+    last_login_ip: Optional[str] = None
+    is_deleted: bool = False

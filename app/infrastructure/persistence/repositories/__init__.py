@@ -30,6 +30,9 @@ from app.infrastructure.persistence.repositories.user_repository import (
     UserRepository,
     UserSessionRepository,
 )
+from app.infrastructure.persistence.repositories.system_settings_repository import (
+    SystemSettingsRepository,
+)
 
 __all__ = [
     # Base
@@ -56,4 +59,6 @@ __all__ = [
     # User/Auth
     "UserRepository",
     "UserSessionRepository",
+    # System Settings
+    "SystemSettingsRepository",
 ]

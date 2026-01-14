@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.persistence.repositories.base import BaseRepository
 from app.infrastructure.database.models.ai_usage import AIUsageModel
+from app.infrastructure.database.models.user import UserModel
 
 
 class AIUsageRepository(BaseRepository[AIUsageModel]):
@@ -246,6 +247,50 @@ class AIUsageRepository(BaseRepository[AIUsageModel]):
         return [
             {
                 "task_type": row.task_type,
+                "request_count": row.request_count,
+                "total_tokens": row.total_tokens or 0,
+                "total_cost_usd": row.total_cost_usd or 0,
+            }
+            for row in result.all()
+        ]
+
+    async def get_usage_by_user(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get usage aggregated by user."""
+        conditions = []
+
+        if start_date is not None:
+            conditions.append(AIUsageModel.requested_at >= start_date)
+        if end_date is not None:
+            conditions.append(AIUsageModel.requested_at <= end_date)
+
+        # Only include records with user_id
+        conditions.append(AIUsageModel.user_id.isnot(None))
+
+        where_clause = and_(*conditions) if conditions else True
+
+        query = select(
+            AIUsageModel.user_id,
+            UserModel.email,
+            UserModel.full_name,
+            func.count().label("request_count"),
+            func.sum(AIUsageModel.total_tokens).label("total_tokens"),
+            func.sum(AIUsageModel.estimated_cost_usd).label("total_cost_usd"),
+        ).join(
+            UserModel, AIUsageModel.user_id == UserModel.id
+        ).where(where_clause).group_by(
+            AIUsageModel.user_id, UserModel.email, UserModel.full_name
+        ).order_by(func.sum(AIUsageModel.total_tokens).desc())
+
+        result = await self.session.execute(query)
+        return [
+            {
+                "user_id": row.user_id,
+                "email": row.email,
+                "full_name": row.full_name,
                 "request_count": row.request_count,
                 "total_tokens": row.total_tokens or 0,
                 "total_cost_usd": row.total_cost_usd or 0,

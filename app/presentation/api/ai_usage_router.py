@@ -16,6 +16,7 @@ from app.presentation.schemas.ai_usage_schemas import (
     AIUsageStatsResponse,
     AIUsageByProviderResponse,
     AIUsageByTaskTypeResponse,
+    AIUsageByUserResponse,
     AIUsageDailyResponse,
     AIUsageDashboardResponse,
 )
@@ -101,6 +102,13 @@ async def get_dashboard(
     )
     by_task_type = [AIUsageByTaskTypeResponse(**t) for t in by_task_type_data]
 
+    # Get usage by user
+    by_user_data = await repo.get_usage_by_user(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    by_user = [AIUsageByUserResponse(**u) for u in by_user_data]
+
     # Get daily usage
     daily_data = await repo.get_daily_usage(
         project_id=project_id,
@@ -121,6 +129,7 @@ async def get_dashboard(
         stats=stats,
         by_provider=by_provider,
         by_task_type=by_task_type,
+        by_user=by_user,
         daily_usage=daily_usage,
         recent_logs=recent_logs,
     )
@@ -242,6 +251,20 @@ async def get_usage_by_task_type(
         end_date=end_date,
     )
     return [AIUsageByTaskTypeResponse(**t) for t in data]
+
+
+@router.get("/by-user")
+async def get_usage_by_user(
+    start_date: Optional[datetime] = Query(None, description="Start date filter"),
+    end_date: Optional[datetime] = Query(None, description="End date filter"),
+    repo: AIUsageRepository = Depends(get_ai_usage_repository),
+):
+    """Get AI usage aggregated by user."""
+    data = await repo.get_usage_by_user(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return [AIUsageByUserResponse(**u) for u in data]
 
 
 @router.get("/daily")

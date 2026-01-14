@@ -49,6 +49,7 @@ from app.presentation.api.fpa import excel_comparison_router
 from app.presentation.api.fpa import gla_variance_router
 from app.presentation.api import ai_usage_router
 from app.presentation.api import auth_router
+from app.presentation.api import system_settings_router
 
 # Import FPA use cases for startup cleanup
 from app.application.fpa.excel_comparison.compare_excel_files import CompareExcelFilesUseCase
@@ -109,6 +110,9 @@ app.include_router(ai_usage_router.router, prefix="/api", tags=["AI Usage"])
 
 # Include Authentication router
 app.include_router(auth_router.router, prefix="/api")
+
+# Include System Settings router
+app.include_router(system_settings_router.router, prefix="/api")
 
 # Get logger for main module
 import logging
