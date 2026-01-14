@@ -738,7 +738,7 @@ class RevenueVarianceAnalyzer:
             }
 
     def _build_comparisons_from_ai(self, monthly_analyses: List[Dict]) -> List[MonthlyComparison]:
-        """Build MonthlyComparison objects from AI analysis results."""
+        """Build MonthlyComparison objects combining AI analysis with actual parsed data."""
         comparisons = []
 
         for i, analysis in enumerate(monthly_analyses):
@@ -752,50 +752,43 @@ class RevenueVarianceAnalyzer:
                 prior_month_name=MONTH_NAMES[prior_month - 1]
             )
 
-            # Extract stream analysis
-            stream = analysis.get("stream_analysis", {})
-            comp.stream_breakdown = [
-                {"stream": "Leasing", "variance": stream.get("leasing", {}).get("variance_b", 0) * 1e9,
-                 "prior": 0, "current": 0, "pct_of_net": 0},
-                {"stream": "Service/Mgmt Fee", "variance": stream.get("service_fee", {}).get("variance_b", 0) * 1e9,
-                 "prior": 0, "current": 0, "pct_of_net": 0},
-                {"stream": "Utilities", "variance": stream.get("utilities", {}).get("variance_b", 0) * 1e9,
-                 "prior": 0, "current": 0, "pct_of_net": 0},
-                {"stream": "Others", "variance": stream.get("others", {}).get("variance_b", 0) * 1e9,
-                 "prior": 0, "current": 0, "pct_of_net": 0},
-            ]
+            # Calculate ACTUAL stream breakdown from parsed revenue data
+            stream_data = self._calculate_stream_breakdown(current_month, prior_month)
+            comp.stream_breakdown = stream_data["breakdown"]
+            comp.net_change = stream_data["net_change"]
+            comp.net_change_pct = stream_data["net_change_pct"]
 
-            # Extract increases/decreases
-            for inc in analysis.get("top_increases", []):
-                comp.leasing_increases.append({
-                    "subsidiary": inc.get("subsidiary", ""),
-                    "tenant": inc.get("tenant", ""),
-                    "prior": 0,
-                    "current": 0,
-                    "variance": inc.get("variance_b", 0) * 1e9,
-                    "ufl_action": inc.get("ufl_match", "-"),
-                    "ufl_month": inc.get("ufl_date", ""),
-                    "gla": inc.get("gla", ""),
-                    "flag": "",
-                    "ai_explanation": inc.get("explanation", "")
-                })
+            # Calculate ACTUAL leasing drill-down with UFL linkage
+            leasing_data = self._calculate_leasing_drilldown(current_month, prior_month)
+            comp.leasing_variance = leasing_data["variance"]
+            comp.leasing_increases = leasing_data["increases"]
+            comp.leasing_decreases = leasing_data["decreases"]
+            comp.total_increases = leasing_data["total_increases"]
+            comp.total_decreases = leasing_data["total_decreases"]
+            comp.flags = leasing_data["flags"]
 
-            for dec in analysis.get("top_decreases", []):
-                comp.leasing_decreases.append({
-                    "subsidiary": dec.get("subsidiary", ""),
-                    "tenant": dec.get("tenant", ""),
-                    "prior": 0,
-                    "current": 0,
-                    "variance": dec.get("variance_b", 0) * 1e9,
-                    "ufl_action": dec.get("ufl_match", "-"),
-                    "term_month": dec.get("termination_date", ""),
-                    "gla": dec.get("gla", ""),
-                    "flag": "",
-                    "ai_explanation": dec.get("explanation", "")
-                })
+            # Enrich with AI explanations if available
+            ai_increases = {inc.get("tenant", "").upper(): inc for inc in analysis.get("top_increases", [])}
+            ai_decreases = {dec.get("tenant", "").upper(): dec for dec in analysis.get("top_decreases", [])}
 
-            # Store AI narrative
-            comp.net_change = sum(s["variance"] for s in comp.stream_breakdown)
+            for inc in comp.leasing_increases:
+                tenant_key = inc.get("tenant", "").upper()
+                if tenant_key in ai_increases:
+                    ai_data = ai_increases[tenant_key]
+                    inc["ai_explanation"] = ai_data.get("explanation", "")
+                    # Use AI's UFL match if it found one and we didn't
+                    if inc.get("ufl_action") == "-" and ai_data.get("ufl_match"):
+                        inc["ufl_action"] = ai_data.get("ufl_match", "-")
+                        inc["ufl_month"] = ai_data.get("ufl_date", "")
+
+            for dec in comp.leasing_decreases:
+                tenant_key = dec.get("tenant", "").upper()
+                if tenant_key in ai_decreases:
+                    ai_data = ai_decreases[tenant_key]
+                    dec["ai_explanation"] = ai_data.get("explanation", "")
+                    if dec.get("ufl_action") == "-" and ai_data.get("ufl_match"):
+                        dec["ufl_action"] = ai_data.get("ufl_match", "-")
+                        dec["term_month"] = ai_data.get("termination_date", "")
 
             comparisons.append(comp)
 
