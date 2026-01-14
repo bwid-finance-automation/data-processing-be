@@ -67,10 +67,13 @@ app = FastAPI(
 # Note: When allow_credentials=True, cannot use allow_origins=["*"]
 # Must specify exact origins for credentials to work
 CORS_ORIGINS = [
+    # Local development
     "http://localhost:3001",
     "http://localhost:5173",
     "http://127.0.0.1:3001",
     "http://127.0.0.1:5173",
+    # Production (Render)
+    "https://bwid-automation.onrender.com",
 ]
 
 app.add_middleware(
