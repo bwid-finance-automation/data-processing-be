@@ -165,6 +165,10 @@ async def startup_event():
         from app.infrastructure.database import init_db
         await init_db()
         logger.info("✅ Database initialized successfully")
+
+        # Seed default data (admin user, etc.)
+        from app.infrastructure.database.seed import run_all_seeds
+        await run_all_seeds()
     except Exception as e:
         logger.warning(f"⚠️ Database initialization skipped: {e}")
         logger.info("   (Database features will be unavailable)")
