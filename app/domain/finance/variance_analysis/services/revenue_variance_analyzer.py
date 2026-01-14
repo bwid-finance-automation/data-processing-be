@@ -1519,10 +1519,29 @@ class RevenueVarianceAnalyzer:
             row += 1
 
             for driver in key_drivers:
-                ws.cell(row=row, column=1, value=driver.get("rank", ""))
-                ws.cell(row=row, column=2, value=driver.get("driver", ""))
-                ws.cell(row=row, column=3, value=driver.get("impact", ""))
-                ws.cell(row=row, column=4, value=driver.get("explanation", ""))
+                # Handle both dict and string drivers
+                if isinstance(driver, dict):
+                    rank = driver.get("rank", "")
+                    driver_text = driver.get("driver", "")
+                    # Impact might be a number or string like "25.0B" or {"impact_b": 25.0}
+                    impact = driver.get("impact", "") or driver.get("impact_b", "")
+                    if isinstance(impact, (int, float)):
+                        impact = f"{impact:.1f}B VND"
+                    explanation = driver.get("explanation", "")
+                    # tenants_involved might be a list
+                    tenants = driver.get("tenants_involved", [])
+                    if tenants and isinstance(tenants, list):
+                        explanation = f"{explanation} (Tenants: {', '.join(str(t) for t in tenants[:3])})"
+                else:
+                    rank = ""
+                    driver_text = str(driver)
+                    impact = ""
+                    explanation = ""
+
+                ws.cell(row=row, column=1, value=str(rank))
+                ws.cell(row=row, column=2, value=str(driver_text)[:50] if driver_text else "")
+                ws.cell(row=row, column=3, value=str(impact))
+                ws.cell(row=row, column=4, value=str(explanation)[:200] if explanation else "")
                 ws.cell(row=row, column=4).alignment = wrap_alignment
                 row += 1
         else:
@@ -1561,7 +1580,19 @@ class RevenueVarianceAnalyzer:
             row += 1
 
             for flag in flag_priorities:
-                priority = flag.get("priority", "")
+                # Handle both dict flags and potential string flags
+                if isinstance(flag, dict):
+                    priority = str(flag.get("priority", ""))
+                    flag_type = str(flag.get("flag_type", ""))
+                    tenant = str(flag.get("tenant", ""))
+                    # AI might use "recommended_action" or "action"
+                    action = str(flag.get("recommended_action", "") or flag.get("action", ""))
+                else:
+                    priority = ""
+                    flag_type = ""
+                    tenant = str(flag)
+                    action = ""
+
                 ws.cell(row=row, column=1, value=priority)
                 # Color code priority
                 if priority == "HIGH":
@@ -1571,9 +1602,9 @@ class RevenueVarianceAnalyzer:
                 else:
                     ws.cell(row=row, column=1).fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
 
-                ws.cell(row=row, column=2, value=flag.get("flag_type", ""))
-                ws.cell(row=row, column=3, value=flag.get("tenant", ""))
-                ws.cell(row=row, column=4, value=flag.get("action", ""))
+                ws.cell(row=row, column=2, value=flag_type)
+                ws.cell(row=row, column=3, value=tenant[:40] if tenant else "")
+                ws.cell(row=row, column=4, value=action[:100] if action else "")
                 row += 1
         else:
             ws.cell(row=row, column=1, value="No priority flags identified")
@@ -1602,9 +1633,15 @@ class RevenueVarianceAnalyzer:
         row += 1
 
         data_notes = ai_insights.get("data_quality_notes", "N/A")
-        ws.cell(row=row, column=1, value=data_notes)
+        # Handle list of notes
+        if isinstance(data_notes, list):
+            data_notes_str = "\n".join(f"• {note}" for note in data_notes) if data_notes else "No data quality issues noted"
+        else:
+            data_notes_str = str(data_notes) if data_notes else "N/A"
+        ws.cell(row=row, column=1, value=data_notes_str)
         ws.cell(row=row, column=1).alignment = wrap_alignment
         ws.merge_cells(f'A{row}:H{row}')
+        ws.row_dimensions[row].height = max(40, len(data_notes) * 20 if isinstance(data_notes, list) else 40)
         row += 2
 
         # Recommendations
@@ -1617,7 +1654,17 @@ class RevenueVarianceAnalyzer:
         recommendations = ai_insights.get("recommendations", [])
         if recommendations:
             for i, rec in enumerate(recommendations, 1):
-                ws.cell(row=row, column=1, value=f"{i}. {rec}")
+                # Handle both string and dict recommendations
+                if isinstance(rec, dict):
+                    priority = rec.get("priority", "")
+                    recommendation = rec.get("recommendation", "")
+                    rationale = rec.get("rationale", "")
+                    rec_text = f"[{priority}] {recommendation}"
+                    if rationale:
+                        rec_text += f" - {rationale}"
+                else:
+                    rec_text = str(rec)
+                ws.cell(row=row, column=1, value=f"{i}. {rec_text}")
                 ws.cell(row=row, column=1).alignment = wrap_alignment
                 ws.merge_cells(f'A{row}:H{row}')
                 row += 1
