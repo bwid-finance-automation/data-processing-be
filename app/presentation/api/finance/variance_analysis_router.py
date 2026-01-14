@@ -515,20 +515,22 @@ async def analyze_account_511_standalone(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Standalone Account 511 (Revenue) AI-powered variance analysis.
+    Revenue Variance Analysis with UFL Linkage.
 
-    Upload RevenueBreakdown and UnitForLeaseList files to analyze Account 511 sub-accounts,
-    project breakdown, tenant matching, and get AI-generated insights.
+    Upload RevenueBreakdown and UnitForLeaseList files to perform comprehensive
+    MoM variance analysis with UFL (Unit for Lease) activity linkage.
 
-    Returns Excel file with 6 sheets:
-    - 511 Summary
-    - 511 Sub-Accounts
-    - 511 By Project
-    - 511 Tenant Matches
-    - 511 Unit Summary
-    - 511 AI Insights
+    Returns Excel file with 13 sheets:
+    - Flags - Unusual Items (mismatches between revenue and UFL)
+    - Executive Summary (monthly revenue overview)
+    - 11 monthly comparison sheets (Dec vs Nov through Feb vs Jan)
+
+    Each monthly sheet includes:
+    - Level 1: Variance by Revenue Stream (Leasing, Service/Mgmt Fee, Utilities, Others)
+    - Level 2: Leasing (511) drill-down with UFL linkage (NEW LEASE, TERMINATED)
+    - Flags for items requiring investigation
     """
-    logger.info(f"Starting standalone Account 511 analysis")
+    logger.info(f"Starting Revenue Variance Analysis")
     logger.info(f"RevenueBreakdown file: {revenue_breakdown_file.filename}")
     logger.info(f"UnitForLeaseList file: {unit_for_lease_file.filename}")
 
@@ -552,42 +554,23 @@ async def analyze_account_511_standalone(
         revenue_bytes = await revenue_breakdown_file.read()
         unit_bytes = await unit_for_lease_file.read()
 
-        # Run Account 511 analysis
-        from app.domain.finance.variance_analysis.services.account_511_analyzer import analyze_account_511
-        from app.domain.finance.variance_analysis.services.variance_detector import _add_account_511_sheets
-        import pandas as pd
-        import tempfile
-        import os
+        # Run Revenue Variance Analysis
+        from app.domain.finance.variance_analysis.services.revenue_variance_analyzer import analyze_revenue_variance
 
-        logger.info("Parsing Account 511 files...")
-        result = analyze_account_511(revenue_bytes, unit_bytes)
+        logger.info("Running revenue variance analysis with UFL linkage...")
+        xlsx_bytes = analyze_revenue_variance(revenue_bytes, unit_bytes)
 
-        if not result or not result.sub_accounts:
-            raise FileProcessingError(
-                "No Account 511 data found in files",
-                details="The RevenueBreakdown file may not contain valid Account 511 data"
-            )
-
-        logger.info(f"Found {len(result.sub_accounts)} sub-accounts, {len(result.by_project)} projects")
-
-        # Create Excel output with 511 sheets
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            _add_account_511_sheets(writer, result)
-
-        xlsx_bytes = output.getvalue()
-
-        logger.info("Account 511 analysis completed successfully")
+        logger.info("Revenue variance analysis completed successfully")
 
         # Save to project if project_uuid provided
         if project_uuid:
             import uuid as uuid_lib
-            session_id = f"acct511_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-            await save_variance_to_project(db, project_uuid, session_id, 2, "ACCOUNT_511")
+            session_id = f"rev_var_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            await save_variance_to_project(db, project_uuid, session_id, 2, "REVENUE_VARIANCE")
 
         # Generate filename with timestamp
         timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        filename = f"account_511_analysis_{timestamp}.xlsx"
+        filename = f"revenue_variance_analysis_{timestamp}.xlsx"
 
         return StreamingResponse(
             iter([xlsx_bytes]),
@@ -598,9 +581,9 @@ async def analyze_account_511_standalone(
     except (FileProcessingError, ValidationError, HTTPException):
         raise
     except Exception as e:
-        logger.error(f"Unexpected error in Account 511 analysis: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error in Revenue Variance Analysis: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"An unexpected error occurred during Account 511 analysis: {str(e)}"
+            detail=f"An unexpected error occurred during Revenue Variance Analysis: {str(e)}"
         )
 
