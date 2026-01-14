@@ -4,14 +4,15 @@
 from functools import lru_cache
 from typing import Optional, AsyncGenerator, TYPE_CHECKING
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer
+from fastapi import Depends, HTTPException, status, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings, Settings
 
-# Security scheme (optional - for future authentication)
+# Security scheme for JWT Bearer token
 security = HTTPBearer(auto_error=False)
+security_required = HTTPBearer(auto_error=True)
 
 
 # =============================================================================
@@ -139,3 +140,122 @@ async def validate_file_upload(file_content: bytes, filename: str, settings: Set
             )
 
     return True
+
+
+# =============================================================================
+# Authentication Dependencies
+# =============================================================================
+
+def get_auth_service(db: AsyncSession = Depends(get_db)):
+    """Get AuthService instance."""
+    from app.application.auth.auth_service import AuthService
+    return AuthService(db)
+
+
+def get_user_repository(db: AsyncSession = Depends(get_db)):
+    """Get UserRepository instance."""
+    from app.infrastructure.persistence.repositories import UserRepository
+    return UserRepository(db)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security_required),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    FastAPI dependency that extracts and validates the current user from JWT token.
+
+    Usage:
+        @router.get("/profile")
+        async def get_profile(current_user: UserModel = Depends(get_current_user)):
+            return current_user
+
+    Raises:
+        HTTPException 401: If token is missing or invalid
+    """
+    from app.application.auth.token_service import get_token_service
+    from app.infrastructure.persistence.repositories import UserRepository
+
+    token_service = get_token_service()
+    user_repo = UserRepository(db)
+
+    # Verify token
+    payload = token_service.verify_access_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Get user from database
+    user_id = int(payload.get("sub", 0))
+    user = await user_repo.get(user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is deactivated",
+        )
+
+    return user
+
+
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Optional authentication - returns user if authenticated, None otherwise.
+
+    Usage for routes that work both authenticated and unauthenticated:
+        @router.get("/items")
+        async def get_items(user: Optional[UserModel] = Depends(get_current_user_optional)):
+            if user:
+                # Show personalized items
+            else:
+                # Show public items
+    """
+    if not credentials:
+        return None
+
+    try:
+        return await get_current_user(credentials, db)
+    except HTTPException:
+        return None
+
+
+def require_role(required_role: str):
+    """
+    Dependency factory for role-based access control.
+
+    Usage:
+        @router.delete("/users/{user_id}")
+        async def delete_user(
+            user_id: int,
+            current_user: UserModel = Depends(require_role("admin"))
+        ):
+            ...
+    """
+    async def role_checker(
+        credentials: HTTPAuthorizationCredentials = Depends(security_required),
+        db: AsyncSession = Depends(get_db),
+    ):
+        user = await get_current_user(credentials, db)
+
+        if user.role != required_role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied. Required role: {required_role}",
+            )
+
+        return user
+
+    return role_checker

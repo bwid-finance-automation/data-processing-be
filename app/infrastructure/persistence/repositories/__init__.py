@@ -26,6 +26,10 @@ from app.infrastructure.persistence.repositories.file_upload_repository import (
 from app.infrastructure.persistence.repositories.ai_usage_repository import (
     AIUsageRepository,
 )
+from app.infrastructure.persistence.repositories.user_repository import (
+    UserRepository,
+    UserSessionRepository,
+)
 
 __all__ = [
     # Base
@@ -49,4 +53,7 @@ __all__ = [
     "FileUploadRepository",
     # AI Usage
     "AIUsageRepository",
+    # User/Auth
+    "UserRepository",
+    "UserSessionRepository",
 ]

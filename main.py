@@ -48,6 +48,7 @@ from app.presentation.api.finance import bank_statement_parser_router
 from app.presentation.api.fpa import excel_comparison_router
 from app.presentation.api.fpa import gla_variance_router
 from app.presentation.api import ai_usage_router
+from app.presentation.api import auth_router
 
 # Import FPA use cases for startup cleanup
 from app.application.fpa.excel_comparison.compare_excel_files import CompareExcelFilesUseCase
@@ -63,9 +64,18 @@ app = FastAPI(
 )
 
 # Allow CORS (optional, if your frontend calls this API)
+# Note: When allow_credentials=True, cannot use allow_origins=["*"]
+# Must specify exact origins for credentials to work
+CORS_ORIGINS = [
+    "http://localhost:3001",
+    "http://localhost:5173",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:5173",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -93,6 +103,9 @@ app.include_router(gla_variance_router.router, prefix="/api")
 
 # Include AI Usage tracking router
 app.include_router(ai_usage_router.router, prefix="/api", tags=["AI Usage"])
+
+# Include Authentication router
+app.include_router(auth_router.router, prefix="/api")
 
 # Get logger for main module
 import logging

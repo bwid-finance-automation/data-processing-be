@@ -31,6 +31,10 @@ from app.infrastructure.database.models.ai_usage import (
     AIProvider,
     AITaskType,
 )
+from app.infrastructure.database.models.user import (
+    UserModel,
+    UserSessionModel,
+)
 
 __all__ = [
     # Project models
@@ -59,4 +63,7 @@ __all__ = [
     "AIUsageModel",
     "AIProvider",
     "AITaskType",
+    # User/Auth models
+    "UserModel",
+    "UserSessionModel",
 ]
