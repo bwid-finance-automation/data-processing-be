@@ -76,7 +76,7 @@ class AIUsageModel(Base, TimestampMixin):
     task_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # File info (for file-based tasks)
-    file_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    file_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     file_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     # Token usage
