@@ -502,24 +502,46 @@ class VCBParser(BaseBankParser):
         transactions = []
         for _, row in data.iterrows():
             # Skip rows with "Tổng" (totals)
-            tx_id = self.to_text(row.get(tx_id_col, "")) if tx_id_col else ""
+            tx_id_raw = row.get(tx_id_col, "") if tx_id_col else ""
+            # Handle case where duplicate column names return a Series
+            if isinstance(tx_id_raw, pd.Series):
+                tx_id_raw = tx_id_raw.iloc[0] if len(tx_id_raw) > 0 else ""
+            tx_id = self.to_text(tx_id_raw)
             if "TỔNG" in tx_id.upper():
                 continue
 
             debit_val = row.get(debit_col) if debit_col else None
             credit_val = row.get(credit_col) if credit_col else None
 
-            if (debit_val is None or pd.isna(debit_val) or debit_val == 0) and \
-               (credit_val is None or pd.isna(credit_val) or credit_val == 0):
+            # Handle case where duplicate column names return a Series
+            if isinstance(debit_val, pd.Series):
+                debit_val = debit_val.iloc[0] if len(debit_val) > 0 else None
+            if isinstance(credit_val, pd.Series):
+                credit_val = credit_val.iloc[0] if len(credit_val) > 0 else None
+
+            # Skip if both debit and credit are empty/zero
+            debit_empty = debit_val is None or (isinstance(debit_val, (int, float)) and (pd.isna(debit_val) or debit_val == 0))
+            credit_empty = credit_val is None or (isinstance(credit_val, (int, float)) and (pd.isna(credit_val) or credit_val == 0))
+            if debit_empty and credit_empty:
                 continue
+
+            # Get date value
+            date_val = row.get(date_col) if date_col else None
+            if isinstance(date_val, pd.Series):
+                date_val = date_val.iloc[0] if len(date_val) > 0 else None
+
+            # Get description value
+            desc_val = row.get(desc_col, "") if desc_col else ""
+            if isinstance(desc_val, pd.Series):
+                desc_val = desc_val.iloc[0] if len(desc_val) > 0 else ""
 
             tx = BankTransaction(
                 bank_name="VCB",
                 acc_no=acc_no or "",
                 debit=credit_val if pd.notna(credit_val) else None,  # SWAPPED
                 credit=debit_val if pd.notna(debit_val) else None,   # SWAPPED
-                date=row.get(date_col) if date_col and pd.notna(row.get(date_col)) else None,
-                description=self.to_text(row.get(desc_col, "")) if desc_col else "",
+                date=date_val if date_val and pd.notna(date_val) else None,
+                description=self.to_text(desc_val),
                 currency=currency or "VND",
                 transaction_id=tx_id,
                 beneficiary_bank="",
@@ -583,24 +605,46 @@ class VCBParser(BaseBankParser):
             # ========== Build Transactions ==========
             for _, row in tx_data.iterrows():
                 # Skip rows with "Tổng số" or "Total"
-                tx_id = self.to_text(row.get(tx_id_col, "")) if tx_id_col else ""
+                tx_id_raw = row.get(tx_id_col, "") if tx_id_col else ""
+                # Handle case where duplicate column names return a Series
+                if isinstance(tx_id_raw, pd.Series):
+                    tx_id_raw = tx_id_raw.iloc[0] if len(tx_id_raw) > 0 else ""
+                tx_id = self.to_text(tx_id_raw)
                 if "TỔNG" in tx_id.upper() or "TOTAL" in tx_id.upper():
                     continue
 
                 debit_val = row.get(debit_col) if debit_col else None
                 credit_val = row.get(credit_col) if credit_col else None
 
-                if (debit_val is None or pd.isna(debit_val) or debit_val == 0) and \
-                   (credit_val is None or pd.isna(credit_val) or credit_val == 0):
+                # Handle case where duplicate column names return a Series
+                if isinstance(debit_val, pd.Series):
+                    debit_val = debit_val.iloc[0] if len(debit_val) > 0 else None
+                if isinstance(credit_val, pd.Series):
+                    credit_val = credit_val.iloc[0] if len(credit_val) > 0 else None
+
+                # Skip if both debit and credit are empty/zero
+                debit_empty = debit_val is None or (isinstance(debit_val, (int, float)) and (pd.isna(debit_val) or debit_val == 0))
+                credit_empty = credit_val is None or (isinstance(credit_val, (int, float)) and (pd.isna(credit_val) or credit_val == 0))
+                if debit_empty and credit_empty:
                     continue
+
+                # Get date value
+                date_val = row.get(date_col) if date_col else None
+                if isinstance(date_val, pd.Series):
+                    date_val = date_val.iloc[0] if len(date_val) > 0 else None
+
+                # Get description value
+                desc_val = row.get(desc_col, "") if desc_col else ""
+                if isinstance(desc_val, pd.Series):
+                    desc_val = desc_val.iloc[0] if len(desc_val) > 0 else ""
 
                 tx = BankTransaction(
                     bank_name="VCB",
                     acc_no=acc_no or "",
                     debit=credit_val if pd.notna(credit_val) else None,  # SWAPPED
                     credit=debit_val if pd.notna(debit_val) else None,   # SWAPPED
-                    date=row.get(date_col) if date_col and pd.notna(row.get(date_col)) else None,
-                    description=self.to_text(row.get(desc_col, "")) if desc_col else "",
+                    date=date_val if date_val and pd.notna(date_val) else None,
+                    description=self.to_text(desc_val),
                     currency=currency or "VND",
                     transaction_id=tx_id,
                     beneficiary_bank="",
