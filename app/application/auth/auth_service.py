@@ -3,9 +3,8 @@
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
-import hashlib
-import secrets
 
+from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth_config import get_auth_config
@@ -27,20 +26,20 @@ logger = get_logger(__name__)
 
 # ==================== Password Utilities ====================
 
+# bcrypt context for secure password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
 def hash_password(password: str) -> str:
-    """Hash a password using SHA-256 with salt."""
-    salt = secrets.token_hex(16)
-    password_hash = hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
-    return f"{salt}${password_hash}"
+    """Hash a password using bcrypt."""
+    return pwd_context.hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """Verify a password against its hash."""
+    """Verify a password against its bcrypt hash."""
     try:
-        salt, stored_hash = password_hash.split("$")
-        computed_hash = hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
-        return secrets.compare_digest(computed_hash, stored_hash)
-    except (ValueError, AttributeError):
+        return pwd_context.verify(password, password_hash)
+    except Exception:
         return False
 
 
