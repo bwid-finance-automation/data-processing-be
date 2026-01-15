@@ -12,6 +12,11 @@ Architecture: N-Layer Monolith
 - Infrastructure Layer: External dependencies (infrastructure/)
 """
 
+# IMPORTANT: Load environment variables FIRST, before any other imports
+# This ensures DATABASE_URL and other env vars are available when config modules are imported
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import asyncio
 
@@ -173,6 +178,18 @@ async def startup_event():
         logger.warning(f"⚠️ Database initialization skipped: {e}")
         logger.info("   (Database features will be unavailable)")
 
+    # Initialize Redis cache connection
+    try:
+        from app.infrastructure.cache.redis_cache import get_cache_service
+        cache = await get_cache_service()
+        if cache.is_connected:
+            logger.info("✅ Redis cache initialized successfully")
+        else:
+            logger.info("⚠️ Redis not available, caching disabled")
+    except Exception as e:
+        logger.warning(f"⚠️ Redis initialization skipped: {e}")
+        logger.info("   (Caching features will be unavailable)")
+
     # Cleanup old files (legacy use cases)
     fpa_use_case = CompareExcelFilesUseCase()
     fpa_use_case.cleanup_old_files()
@@ -224,6 +241,15 @@ async def shutdown_event():
         logger.info("✅ Database connections closed")
     except Exception as e:
         logger.warning(f"⚠️ Error closing database: {e}")
+
+    # Close Redis connection
+    try:
+        from app.infrastructure.cache.redis_cache import RedisCacheService
+        if RedisCacheService._instance:
+            await RedisCacheService._instance.close()
+            logger.info("✅ Redis connection closed")
+    except Exception as e:
+        logger.warning(f"⚠️ Error closing Redis: {e}")
 
     logger.info("👋 Shutdown complete")
 

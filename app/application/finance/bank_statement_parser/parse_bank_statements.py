@@ -520,12 +520,15 @@ class ParseBankStatementsUseCase:
             }
         }
 
-    def execute_from_pdf(
+    async def execute_from_pdf(
         self,
         pdf_inputs: List[Tuple[str, bytes, Optional[str], Optional[str]]]
     ) -> Dict[str, Any]:
         """
-        Parse multiple bank statements from PDF files using Gemini OCR.
+        Parse multiple bank statements from PDF files using Gemini OCR (async).
+
+        This method is async to support non-blocking OCR processing with
+        Redis caching and concurrent API calls.
 
         Args:
             pdf_inputs: List of (file_name, pdf_bytes, bank_code, password) tuples
@@ -543,9 +546,9 @@ class ParseBankStatementsUseCase:
         # Initialize Gemini OCR service
         gemini_service = GeminiOCRService()
 
-        # Step 1: Extract text from all PDFs using Gemini (with password support)
+        # Step 1: Extract text from all PDFs using Gemini (async with caching)
         pdf_files = [(file_name, pdf_bytes, password) for file_name, pdf_bytes, _, password in pdf_inputs]
-        ocr_results, ocr_metrics = gemini_service.extract_text_from_pdf_batch(pdf_files)
+        ocr_results, ocr_metrics = await gemini_service.extract_text_from_pdf_batch(pdf_files)
 
         # Step 2: Build text_inputs for execute_from_text
         text_inputs: List[Tuple[str, str, str]] = []

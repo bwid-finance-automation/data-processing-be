@@ -732,7 +732,7 @@ async def parse_bank_statements(
 
         # Process PDF files (from ZIP)
         if pdf_files:
-            pdf_result = use_case.execute_from_pdf(pdf_files)
+            pdf_result = await use_case.execute_from_pdf(pdf_files)
             combined_result["statements"].extend(pdf_result["statements"])
             combined_result["all_transactions"].extend(pdf_result["all_transactions"])
             combined_result["all_balances"].extend(pdf_result["all_balances"])
@@ -1075,7 +1075,7 @@ async def parse_bank_statements_pdf(
 
         # Parse using use case
         use_case = ParseBankStatementsUseCase()
-        result = use_case.execute_from_pdf(pdf_inputs)
+        result = await use_case.execute_from_pdf(pdf_inputs)
 
         # Add ZIP extraction errors to result
         if zip_errors:

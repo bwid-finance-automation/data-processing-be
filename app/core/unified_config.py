@@ -316,6 +316,33 @@ class SecurityConfig(BaseSettings):
         le=60
     )
 
+
+class RedisConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="REDIS_")
+    """Redis caching configuration section."""
+
+    url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis connection URL"
+    )
+    ocr_cache_ttl: int = Field(
+        default=604800,  # 7 days
+        description="TTL for OCR cache entries in seconds",
+        ge=60,
+        le=2592000  # 30 days max
+    )
+    ai_cache_ttl: int = Field(
+        default=604800,  # 7 days
+        description="TTL for AI analysis cache entries in seconds",
+        ge=60,
+        le=2592000  # 30 days max
+    )
+    enabled: bool = Field(
+        default=True,
+        description="Enable/disable Redis caching"
+    )
+
+
 class ApplicationConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VARIANCE_APP__")
     """Main application configuration section."""
@@ -372,19 +399,30 @@ class DatabaseConfig(BaseSettings):
     Database connection configuration section.
 
     Supports two modes:
-    1. URL mode (for cloud platforms like Render, Heroku, Railway):
+    1. URL mode (for cloud platforms like Render, Heroku, Railway, Neon):
        - Set DATABASE_URL environment variable
     2. Component mode (for local development):
        - Set individual DATABASE__HOST, DATABASE__PORT, etc.
     """
     model_config = SettingsConfigDict(env_prefix="DATABASE__")
 
-    # Direct URL (priority - used by Render, Heroku, Railway, etc.)
+    # Direct URL (priority - used by Render, Heroku, Railway, Neon, etc.)
+    # Note: This is loaded manually in model_validator due to env_prefix conflict
     url: Optional[str] = Field(
         default=None,
         description="Full database URL (e.g., postgres://user:pass@host:port/db)",
-        alias="DATABASE_URL"
     )
+
+    @model_validator(mode='before')
+    @classmethod
+    def load_database_url(cls, values):
+        """Load DATABASE_URL from environment (bypassing env_prefix)."""
+        import os
+        if isinstance(values, dict) and values.get('url') is None:
+            database_url = os.getenv('DATABASE_URL')
+            if database_url:
+                values['url'] = database_url
+        return values
 
     # Component-based configuration (for local development)
     host: str = Field(
@@ -439,34 +477,57 @@ class DatabaseConfig(BaseSettings):
     def _parse_url(self, url: str) -> dict:
         """Parse database URL into components."""
         import re
+        from urllib.parse import urlparse, parse_qs
+
         # Pattern: postgres[ql]://user:password@host:port/database
         pattern = r'postgres(?:ql)?:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)'
         match = re.match(pattern, url)
         if match:
+            db_name = match.group(5).split('?')[0]  # Remove query params
+
+            # Parse query params for SSL mode
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+            ssl_mode = query_params.get('sslmode', [None])[0]
+
             return {
                 'user': match.group(1),
                 'password': match.group(2),
                 'host': match.group(3),
                 'port': int(match.group(4)),
-                'name': match.group(5).split('?')[0],  # Remove query params
+                'name': db_name,
+                'sslmode': ssl_mode,
             }
         return {}
 
     @property
     def async_url(self) -> str:
-        """Generate async database URL for SQLAlchemy."""
+        """Generate async database URL for SQLAlchemy.
+
+        Note: asyncpg doesn't support 'sslmode' parameter directly in the URL.
+        SSL is handled via connect_args in SQLAlchemy engine configuration.
+        This method strips sslmode from the URL to avoid asyncpg errors.
+        """
         if self.url:
             # Convert postgres:// to postgresql+asyncpg://
             parsed = self._parse_url(self.url)
             if parsed:
-                base_url = f"postgresql+asyncpg://{parsed['user']}:{parsed['password']}@{parsed['host']}:{parsed['port']}/{parsed['name']}"
-                # Add SSL for cloud deployments
-                if self.ssl_mode == "require":
-                    return f"{base_url}?ssl=require"
-                return base_url
-            # Fallback: simple replacement
+                # Build clean base URL without SSL parameters
+                # SSL will be handled via connect_args in engine configuration
+                return f"postgresql+asyncpg://{parsed['user']}:{parsed['password']}@{parsed['host']}:{parsed['port']}/{parsed['name']}"
+
+            # Fallback: simple replacement + strip unsupported parameters
+            import re
             url = self.url.replace("postgres://", "postgresql+asyncpg://")
             url = url.replace("postgresql://", "postgresql+asyncpg://")
+            # Remove sslmode parameter (not supported by asyncpg in URL)
+            url = re.sub(r'[?&]sslmode=[^&]*', '', url)
+            # Remove channel_binding parameter (not supported by asyncpg)
+            url = re.sub(r'[?&]channel_binding=[^&]*', '', url)
+            # Clean up URL (fix ?& or && or trailing ? issues)
+            url = url.replace('?&', '?').replace('&&', '&')
+            if url.endswith('?') or url.endswith('&'):
+                url = url[:-1]
             return url
 
         return f"postgresql+asyncpg://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
@@ -526,6 +587,7 @@ class UnifiedConfig(BaseSettings):
     # Configuration sections
     app: ApplicationConfig = Field(default_factory=ApplicationConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
     revenue_analysis: RevenueAnalysisConfig = Field(default_factory=RevenueAnalysisConfig)
     excel_processing: ExcelProcessingConfig = Field(default_factory=ExcelProcessingConfig)
     core_analysis: CoreAnalysisConfig = Field(default_factory=CoreAnalysisConfig)

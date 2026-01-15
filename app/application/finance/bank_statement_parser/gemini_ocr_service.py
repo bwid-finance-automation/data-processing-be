@@ -1,5 +1,14 @@
-"""Gemini OCR Service for extracting text from PDF bank statements."""
+"""Gemini OCR Service for extracting text from PDF bank statements.
 
+This module provides async OCR capabilities using Google's Gemini API.
+Features:
+- Async processing to avoid blocking the event loop
+- Redis caching for OCR results (by file content hash)
+- Concurrent batch processing with semaphore control
+- Password-protected PDF support
+"""
+
+import asyncio
 import os
 import tempfile
 import time
@@ -31,6 +40,7 @@ class OCRUsageMetrics:
     model_name: str = ""
     success: bool = True
     error: Optional[str] = None
+    cache_hit: bool = False
 
 
 @dataclass
@@ -43,6 +53,7 @@ class OCRBatchMetrics:
     files_processed: int = 0
     files_successful: int = 0
     files_failed: int = 0
+    cache_hits: int = 0
     model_name: str = ""
     file_metrics: List[OCRUsageMetrics] = field(default_factory=list)
 
@@ -57,6 +68,7 @@ class OCRBatchMetrics:
             "files_processed": self.files_processed,
             "files_successful": self.files_successful,
             "files_failed": self.files_failed,
+            "cache_hits": self.cache_hits,
             "model_name": self.model_name,
             "file_metrics": [
                 {
@@ -67,6 +79,7 @@ class OCRBatchMetrics:
                     "processing_time_ms": round(m.processing_time_ms, 2),
                     "success": m.success,
                     "error": m.error,
+                    "cache_hit": m.cache_hit,
                 }
                 for m in self.file_metrics
             ]
@@ -74,7 +87,18 @@ class OCRBatchMetrics:
 
 
 class GeminiOCRService:
-    """Service to OCR PDF files using Gemini Flash API."""
+    """Service to OCR PDF files using Gemini Flash API.
+
+    This service provides async methods for extracting text from PDF files
+    using Google's Gemini API. It includes:
+    - Redis caching to avoid redundant API calls
+    - Async processing to prevent blocking the event loop
+    - Concurrent batch processing with rate limiting
+    """
+
+    # Semaphore to limit concurrent Gemini API calls
+    _semaphore: Optional[asyncio.Semaphore] = None
+    MAX_CONCURRENT_REQUESTS = 3
 
     def __init__(self):
         """Initialize Gemini OCR service."""
@@ -97,6 +121,13 @@ class GeminiOCRService:
 
         logger.info(f"GeminiOCRService initialized with model: {self.model_name}")
 
+    @classmethod
+    def _get_semaphore(cls) -> asyncio.Semaphore:
+        """Get or create the semaphore for rate limiting."""
+        if cls._semaphore is None:
+            cls._semaphore = asyncio.Semaphore(cls.MAX_CONCURRENT_REQUESTS)
+        return cls._semaphore
+
     def _decrypt_pdf(self, pdf_bytes: bytes, password: str) -> bytes:
         """
         Decrypt a password-protected PDF.
@@ -117,20 +148,18 @@ class GeminiOCRService:
             pdf = pikepdf.open(input_stream, password=password)
 
             # Save decrypted PDF to bytes
-            # Use preserve_pdfa=True and avoid recompression to keep original structure
-            # This helps ensure OCR produces consistent results
             output_stream = BytesIO()
             pdf.save(
                 output_stream,
-                linearize=False,  # Don't linearize - keeps structure closer to original
-                object_stream_mode=pikepdf.ObjectStreamMode.preserve,  # Preserve object streams
-                compress_streams=False,  # Don't recompress - keeps text streams intact
-                stream_decode_level=pikepdf.StreamDecodeLevel.none,  # Don't decode streams
+                linearize=False,
+                object_stream_mode=pikepdf.ObjectStreamMode.preserve,
+                compress_streams=False,
+                stream_decode_level=pikepdf.StreamDecodeLevel.none,
             )
             pdf.close()
 
             decrypted_bytes = output_stream.getvalue()
-            logger.info(f"Successfully decrypted PDF ({len(decrypted_bytes)} bytes, original: {len(pdf_bytes)} bytes)")
+            logger.info(f"Successfully decrypted PDF ({len(decrypted_bytes)} bytes)")
             return decrypted_bytes
 
         except pikepdf.PasswordError:
@@ -154,17 +183,75 @@ class GeminiOCRService:
             input_stream = BytesIO(pdf_bytes)
             pdf = pikepdf.open(input_stream)
             pdf.close()
-            return False  # Can open without password = not encrypted
+            return False
         except pikepdf.PasswordError:
-            return True  # Needs password = encrypted
+            return True
         except Exception:
-            return False  # Other error, assume not encrypted
+            return False
 
-    def extract_text_from_pdf(
+    def _write_temp_file(self, pdf_bytes: bytes) -> str:
+        """Write PDF bytes to a temporary file.
+
+        This is a sync helper method for use with asyncio.to_thread().
+
+        Args:
+            pdf_bytes: PDF content as bytes
+
+        Returns:
+            Path to the temporary file
+        """
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+            tmp_file.write(pdf_bytes)
+            return tmp_file.name
+
+    def _upload_to_gemini(self, tmp_path: str) -> Any:
+        """Upload file to Gemini (sync, for use with to_thread).
+
+        Args:
+            tmp_path: Path to the temporary file
+
+        Returns:
+            Gemini uploaded file object
+        """
+        return genai.upload_file(path=tmp_path, mime_type="application/pdf")
+
+    def _generate_content(self, prompt: str, uploaded_file: Any) -> Any:
+        """Generate content from Gemini (sync, for use with to_thread).
+
+        Args:
+            prompt: The extraction prompt
+            uploaded_file: Gemini uploaded file object
+
+        Returns:
+            Gemini response object
+        """
+        return self.model.generate_content(
+            [prompt, uploaded_file],
+            request_options={"timeout": 120}
+        )
+
+    def _delete_gemini_file(self, file_name: str) -> None:
+        """Delete file from Gemini (sync, for use with to_thread).
+
+        Args:
+            file_name: Name of the file to delete from Gemini
+        """
+        try:
+            genai.delete_file(file_name)
+        except Exception as e:
+            logger.warning(f"Failed to delete uploaded file from Gemini: {e}")
+
+    async def extract_text_from_pdf(
         self, pdf_bytes: bytes, file_name: str, password: Optional[str] = None
     ) -> Tuple[str, OCRUsageMetrics]:
         """
-        Extract text from a PDF file using Gemini Flash.
+        Extract text from a PDF file using Gemini Flash (async version).
+
+        This method:
+        1. Checks Redis cache for existing results
+        2. Decrypts PDF if password-protected
+        3. Uses asyncio.to_thread() for blocking Gemini SDK calls
+        4. Caches successful results in Redis
 
         Args:
             pdf_bytes: PDF file content as bytes
@@ -186,26 +273,33 @@ class GeminiOCRService:
         )
 
         try:
+            # Check cache first
+            from app.infrastructure.cache.redis_cache import get_cache_service, RedisCacheService
+            cache = await get_cache_service()
+            file_hash = RedisCacheService.hash_content(pdf_bytes)
+
+            cached_text = await cache.get_ocr_result(file_hash)
+            if cached_text:
+                logger.info(f"Cache hit for {file_name} (hash: {file_hash[:16]}...)")
+                metrics.processing_time_ms = (time.time() - start_time) * 1000
+                metrics.success = True
+                metrics.cache_hit = True
+                return cached_text, metrics
+
             # Check if PDF is encrypted and decrypt if needed
             if self._is_pdf_encrypted(pdf_bytes):
                 if not password:
                     logger.error(f"PDF {file_name} is encrypted but no password provided")
                     raise ValueError(f"PDF file '{file_name}' is password-protected. Please provide the password.")
                 logger.info(f"PDF {file_name} is encrypted, decrypting...")
-                pdf_bytes = self._decrypt_pdf(pdf_bytes, password)
+                pdf_bytes = await asyncio.to_thread(self._decrypt_pdf, pdf_bytes, password)
 
-            # Write PDF bytes to a temporary file (required by Gemini API)
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
-                tmp_file.write(pdf_bytes)
-                tmp_path = tmp_file.name
+            # Write PDF bytes to a temporary file (async via to_thread)
+            tmp_path = await asyncio.to_thread(self._write_temp_file, pdf_bytes)
 
             try:
-                # Upload file to Gemini
-                uploaded_file = genai.upload_file(
-                    path=tmp_path,
-                    mime_type="application/pdf"
-                )
-
+                # Upload file to Gemini (async via to_thread)
+                uploaded_file = await asyncio.to_thread(self._upload_to_gemini, tmp_path)
                 logger.info(f"File uploaded to Gemini: {uploaded_file.uri}")
 
                 # Extract text using Gemini
@@ -222,28 +316,30 @@ Instructions:
 
 Output the extracted text:"""
 
-                # Add timeout to prevent infinite waiting (120 seconds for PDF OCR)
-                response = self.model.generate_content(
-                    [prompt, uploaded_file],
-                    request_options={"timeout": 120}
-                )
+                # Generate content (async via to_thread with semaphore for rate limiting)
+                async with self._get_semaphore():
+                    response = await asyncio.to_thread(
+                        self._generate_content, prompt, uploaded_file
+                    )
 
                 # Extract usage metadata from response
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:
                     usage = response.usage_metadata
                     metrics.input_tokens = getattr(usage, 'prompt_token_count', 0) or 0
                     metrics.output_tokens = getattr(usage, 'candidates_token_count', 0) or 0
-                    metrics.total_tokens = getattr(usage, 'total_token_count', 0) or (metrics.input_tokens + metrics.output_tokens)
+                    metrics.total_tokens = getattr(usage, 'total_token_count', 0) or (
+                        metrics.input_tokens + metrics.output_tokens
+                    )
 
-                # Clean up uploaded file from Gemini
-                try:
-                    genai.delete_file(uploaded_file.name)
-                except Exception as e:
-                    logger.warning(f"Failed to delete uploaded file from Gemini: {e}")
+                # Clean up uploaded file from Gemini (async via to_thread)
+                await asyncio.to_thread(self._delete_gemini_file, uploaded_file.name)
 
                 extracted_text = response.text
                 metrics.processing_time_ms = (time.time() - start_time) * 1000
                 metrics.success = True
+
+                # Cache the result
+                await cache.set_ocr_result(file_hash, extracted_text)
 
                 logger.info(
                     f"Successfully extracted {len(extracted_text)} chars from {file_name} "
@@ -254,9 +350,9 @@ Output the extracted text:"""
                 return extracted_text, metrics
 
             finally:
-                # Clean up temporary file
+                # Clean up temporary file (async via to_thread)
                 try:
-                    os.unlink(tmp_path)
+                    await asyncio.to_thread(os.unlink, tmp_path)
                 except Exception as e:
                     logger.warning(f"Failed to delete temp file: {e}")
 
@@ -267,12 +363,15 @@ Output the extracted text:"""
             logger.error(f"Error extracting text from PDF {file_name}: {e}")
             raise
 
-    def extract_text_from_pdf_batch(
+    async def extract_text_from_pdf_batch(
         self,
         pdf_files: List[Tuple[str, bytes, Optional[str]]]
     ) -> Tuple[List[Tuple[str, str, Optional[str]]], OCRBatchMetrics]:
         """
-        Extract text from multiple PDF files.
+        Extract text from multiple PDF files concurrently.
+
+        This method processes multiple PDFs in parallel using asyncio.gather(),
+        with a semaphore to limit concurrent Gemini API calls.
 
         Args:
             pdf_files: List of (file_name, pdf_bytes, password) tuples
@@ -281,39 +380,52 @@ Output the extracted text:"""
         Returns:
             Tuple of:
             - List of (file_name, extracted_text, error) tuples
-              - error is None if successful
-              - extracted_text is empty string if failed
             - OCRBatchMetrics with aggregated usage statistics
         """
-        results = []
         batch_metrics = OCRBatchMetrics(model_name=self.model_name)
 
-        for file_name, pdf_bytes, password in pdf_files:
-            batch_metrics.files_processed += 1
+        async def process_single(
+            file_name: str, pdf_bytes: bytes, password: Optional[str]
+        ) -> Tuple[str, str, Optional[str], OCRUsageMetrics]:
+            """Process a single PDF file."""
             try:
-                text, metrics = self.extract_text_from_pdf(pdf_bytes, file_name, password)
-                results.append((file_name, text, None))
-
-                # Aggregate metrics
-                batch_metrics.total_input_tokens += metrics.input_tokens
-                batch_metrics.total_output_tokens += metrics.output_tokens
-                batch_metrics.total_tokens += metrics.total_tokens
-                batch_metrics.total_processing_time_ms += metrics.processing_time_ms
-                batch_metrics.files_successful += 1
-                batch_metrics.file_metrics.append(metrics)
-
+                text, metrics = await self.extract_text_from_pdf(pdf_bytes, file_name, password)
+                return (file_name, text, None, metrics)
             except Exception as e:
                 logger.error(f"Failed to extract text from {file_name}: {e}")
-                results.append((file_name, "", str(e)))
-
-                # Record failed file metrics
                 failed_metrics = OCRUsageMetrics(
                     file_name=file_name,
                     model_name=self.model_name,
                     success=False,
                     error=str(e)
                 )
+                return (file_name, "", str(e), failed_metrics)
+
+        # Process all files concurrently
+        tasks = [
+            process_single(file_name, pdf_bytes, password)
+            for file_name, pdf_bytes, password in pdf_files
+        ]
+
+        processed = await asyncio.gather(*tasks)
+
+        # Aggregate results
+        results = []
+        for file_name, text, error, metrics in processed:
+            batch_metrics.files_processed += 1
+            results.append((file_name, text, error))
+            batch_metrics.file_metrics.append(metrics)
+
+            if error:
                 batch_metrics.files_failed += 1
-                batch_metrics.file_metrics.append(failed_metrics)
+            else:
+                batch_metrics.files_successful += 1
+                batch_metrics.total_input_tokens += metrics.input_tokens
+                batch_metrics.total_output_tokens += metrics.output_tokens
+                batch_metrics.total_tokens += metrics.total_tokens
+                batch_metrics.total_processing_time_ms += metrics.processing_time_ms
+
+                if metrics.cache_hit:
+                    batch_metrics.cache_hits += 1
 
         return results, batch_metrics
