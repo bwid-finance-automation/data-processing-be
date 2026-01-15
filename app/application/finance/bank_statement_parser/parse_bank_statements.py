@@ -111,7 +111,9 @@ class ParseBankStatementsUseCase:
             closing = bal.closing_balance or 0.0
             total_debit = totals["debit"]
             total_credit = totals["credit"]
-            net_change = total_credit - total_debit
+            # For bank accounts (Asset): Debit increases balance, Credit decreases
+            # Net change = Debit - Credit (money in minus money out)
+            net_change = total_debit - total_credit
 
             calculated_closing = opening + net_change
             calculated_opening = closing - net_change
@@ -269,6 +271,9 @@ class ParseBankStatementsUseCase:
 
         for file_name, ocr_text, bank_code in text_inputs:
             try:
+                logger.info(f"Processing file: {file_name} (bank_code={bank_code})")
+                # Debug: Log first 500 chars of OCR text
+                logger.debug(f"OCR text preview for {file_name}: {ocr_text[:500]}...")
                 parser = None
 
                 # If bank_code provided, get parser by name
@@ -303,9 +308,11 @@ class ParseBankStatementsUseCase:
 
                 # Parse transactions from text
                 transactions = parser.parse_transactions_from_text(ocr_text, file_name)
+                logger.info(f"  -> Detected bank: {parser.bank_name}, transactions: {len(transactions)}")
 
                 # Parse ALL balances from text (supports multiple accounts per PDF)
                 balances = parser.parse_all_balances_from_text(ocr_text, file_name)
+                logger.info(f"  -> Balances: {len(balances)}, acc_no: {balances[0].acc_no if balances else 'N/A'}")
 
                 # Create statement (use first balance for backward compatibility)
                 statement = BankStatement(
@@ -320,6 +327,7 @@ class ParseBankStatementsUseCase:
                 all_balances.extend(balances)
 
                 successful += 1
+                logger.info(f"  -> Success! Total transactions so far: {len(all_transactions)}")
 
             except Exception as e:
                 failed += 1
@@ -327,7 +335,9 @@ class ParseBankStatementsUseCase:
                     "file_name": file_name,
                     "error": str(e)
                 })
+                logger.error(f"  -> Exception parsing {file_name}: {e}")
 
+        logger.info(f"Batch processing complete: {successful} successful, {failed} failed, {len(all_transactions)} total transactions")
         reconciled_balances = self._reconcile_balances_with_transactions(all_balances, all_transactions)
         self._update_statement_balances(statements, reconciled_balances)
 

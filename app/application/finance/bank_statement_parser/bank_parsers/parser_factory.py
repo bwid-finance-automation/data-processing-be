@@ -23,12 +23,14 @@ class ParserFactory:
     # Register all available parsers here
     # NOTE: Order matters! More specific parsers should come before generic ones
     # - VCB must come early (VCBACCOUNTDETAIL sheet name is unique, but has bilingual "Opening balance :" that matches Woori)
+    # - UOB must come before KBANK ("Account Activities" is unique to UOB)
     # - OCB and Woori must come before MBB (MBB has broad detection that can match others)
     # - Banks with unique markers (ACB, VIB, KBANK) can be in any order
     _parsers: List[BaseBankParser] = [
         ACBParser(),
         VIBParser(),
         VCBParser(),      # Must be early (has "Opening balance :" that can match Woori)
+        UOBParser(),      # Must be before KBANK ("Account Activities" is unique to UOB)
         TCBParser(),      # Must be before KBANK (KBANK has broad "transaction date + debit + credit" detection)
         SCBParser(),      # Must be before KBANK (Standard Chartered)
         KBANKParser(),    # Has broader detection patterns for PDF
@@ -38,7 +40,6 @@ class ParserFactory:
         MBBParser(),      # Has broader detection patterns
         BIDVParser(),
         VTBParser(),
-        UOBParser(),
         # Add more parsers here as they are implemented
     ]
 
