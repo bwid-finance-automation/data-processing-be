@@ -494,8 +494,68 @@ class UOBParser(BaseBankParser):
             # ========== Format A: DD/MM/YYYY (standalone date) ==========
             format_a_match = re.match(r'^(\d{1,2}/\d{1,2}/\d{4})$', line)
 
-            # ========== Format B: DD/MM/YYYY HH:MM:SS (date+time, no AM/PM) ==========
+            # ========== Format B: DD/MM/YYYY HH:MM:SS (date+time, no AM/PM on same line) ==========
             format_b_match = re.match(r'^(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}:\d{2}:\d{2})$', line)
+
+            # ========== Format C: Tabular - entire transaction on ONE line ==========
+            # Pattern: DD/MM/YYYY DD/MM/YYYY HH:MM:SS AM/PM MISC CREDIT/DEBIT ... amounts
+            format_c_match = re.match(
+                r'^(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}:\d{2}:\d{2})\s*(AM|PM)?\s+(MISC\s+(?:CREDIT|DEBIT))\s+(.+?)\s+([\d,]+(?:\.\d+)?)\s+([\d,]+(?:\.\d+)?)\s+([\d,]+(?:\.\d+)?)$',
+                line,
+                re.IGNORECASE
+            )
+
+            if format_c_match:
+                # Format C: Parse entire transaction from single line
+                statement_date = format_c_match.group(1)
+                tx_type = format_c_match.group(5).upper().replace("  ", " ")
+                middle_part = format_c_match.group(6).strip()
+                deposit = self._parse_ocr_amount(format_c_match.group(7))
+                withdrawal = self._parse_ocr_amount(format_c_match.group(8))
+
+                # Parse TX ID and description from middle part
+                # Format: "2025120500001971 MIR512052484C01 BDG PLC REPAYMENT SHL INTEREST TO"
+                tx_id = ""
+                description_parts = []
+                parts = middle_part.split()
+                for part in parts:
+                    if re.match(r'^20\d{14,}$', part):
+                        tx_id = part
+                    else:
+                        description_parts.append(part)
+
+                description = f"{tx_type} | {' '.join(description_parts)}" if description_parts else tx_type
+
+                # Skip if both amounts are 0
+                if (deposit is None or deposit == 0) and (withdrawal is None or withdrawal == 0):
+                    i += 1
+                    continue
+
+                # Set None for zero amounts
+                if deposit == 0:
+                    deposit = None
+                if withdrawal == 0:
+                    withdrawal = None
+
+                date_val = self._parse_date_uob(statement_date)
+
+                tx = BankTransaction(
+                    bank_name="UOB",
+                    acc_no=acc_no or "",
+                    debit=deposit,
+                    credit=withdrawal,
+                    date=date_val,
+                    description=description,
+                    currency=currency,
+                    transaction_id=tx_id,
+                    beneficiary_bank="",
+                    beneficiary_acc_no="",
+                    beneficiary_acc_name=""
+                )
+                transactions.append(tx)
+                logger.debug(f"UOB Parser (Format C): Found tx #{len(transactions)}: date={statement_date}, debit={deposit}, credit={withdrawal}")
+                i += 1
+                continue
 
             if format_a_match or format_b_match:
                 # Initialize transaction data
