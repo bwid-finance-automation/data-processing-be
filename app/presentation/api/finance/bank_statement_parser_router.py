@@ -26,6 +26,7 @@ from app.presentation.schemas.bank_statement_schemas import (
 from app.application.finance.bank_statement_parser.parse_bank_statements import ParseBankStatementsUseCase
 from app.application.finance.bank_statement_parser.bank_parsers.parser_factory import ParserFactory
 from app.application.finance.bank_statement_parser.bank_statement_db_service import BankStatementDbService
+from app.application.finance.bank_statement_parser.gemini_ocr_service import GeminiOCRService
 from app.core.dependencies import get_bank_statement_db_service, get_ai_usage_repository
 from app.infrastructure.persistence.repositories import AIUsageRepository
 from app.shared.utils.logging_config import get_logger
@@ -398,6 +399,152 @@ def get_supported_banks():
     )
 
 
+def _check_pdf_encrypted_in_memory(pdf_bytes: bytes) -> bool:
+    """Check if a PDF is password-protected using pikepdf."""
+    try:
+        import pikepdf
+        from io import BytesIO
+        input_stream = BytesIO(pdf_bytes)
+        pdf = pikepdf.open(input_stream)
+        pdf.close()
+        return False  # Can open without password = not encrypted
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "password" in error_msg or "encrypted" in error_msg:
+            return True  # Needs password = encrypted
+        return False  # Other error, assume not encrypted
+
+
+def _analyze_zip_contents(
+    zip_bytes: bytes,
+    zip_filename: str,
+    zip_password: Optional[str] = None
+) -> dict:
+    """
+    Analyze contents of a ZIP file without extracting fully.
+    Returns list of files with their encryption status.
+    """
+    result = {
+        "zip_filename": zip_filename,
+        "zip_encrypted": False,
+        "zip_password_correct": True,
+        "files": [],
+        "total_files": 0,
+        "pdf_count": 0,
+        "excel_count": 0,
+        "encrypted_pdf_count": 0,
+        "error": None
+    }
+
+    try:
+        with zipfile.ZipFile(BytesIO(zip_bytes), 'r') as zf:
+            pwd_bytes = zip_password.encode('utf-8') if zip_password else None
+
+            for file_info in zf.infolist():
+                # Skip directories and hidden files
+                if file_info.is_dir():
+                    continue
+                filename = file_info.filename
+                basename = filename.split('/')[-1]
+                if basename.startswith('.') or basename.startswith('__MACOSX'):
+                    continue
+
+                lower_name = filename.lower()
+
+                # Skip unsupported file types
+                if not (lower_name.endswith('.pdf') or lower_name.endswith(('.xlsx', '.xls'))):
+                    continue
+
+                file_entry = {
+                    "filename": basename,
+                    "full_path": filename,
+                    "file_type": "pdf" if lower_name.endswith('.pdf') else "excel",
+                    "size": file_info.file_size,
+                    "is_encrypted": False,
+                    "password_required": False,
+                    "error": None
+                }
+
+                result["total_files"] += 1
+
+                # Check if ZIP itself is encrypted
+                if file_info.flag_bits & 0x1:
+                    result["zip_encrypted"] = True
+                    if not zip_password:
+                        file_entry["error"] = "ZIP file is encrypted, password required"
+                        file_entry["password_required"] = True
+                        result["zip_password_correct"] = False
+                        result["files"].append(file_entry)
+                        continue
+
+                # Try to read the file
+                try:
+                    content = zf.read(filename, pwd=pwd_bytes)
+
+                    # For PDF files, check if they are password-protected
+                    if lower_name.endswith('.pdf'):
+                        result["pdf_count"] += 1
+                        is_encrypted = _check_pdf_encrypted_in_memory(content)
+                        file_entry["is_encrypted"] = is_encrypted
+                        if is_encrypted:
+                            result["encrypted_pdf_count"] += 1
+                            file_entry["password_required"] = True
+                    else:
+                        result["excel_count"] += 1
+
+                except RuntimeError as e:
+                    error_msg = str(e).lower()
+                    if "encrypted" in error_msg or "password" in error_msg or "bad password" in error_msg:
+                        result["zip_encrypted"] = True
+                        result["zip_password_correct"] = False
+                        file_entry["error"] = "ZIP password required or incorrect"
+                        file_entry["password_required"] = True
+                    else:
+                        file_entry["error"] = f"Failed to read: {str(e)}"
+                except Exception as e:
+                    file_entry["error"] = f"Failed to read: {str(e)}"
+
+                result["files"].append(file_entry)
+
+    except zipfile.BadZipFile:
+        result["error"] = "Invalid ZIP file or corrupted archive"
+    except Exception as e:
+        result["error"] = f"Failed to analyze ZIP: {str(e)}"
+
+    return result
+
+
+@router.post("/analyze-zip", summary="Analyze ZIP Contents")
+async def analyze_zip_contents(
+    file: UploadFile = File(..., description="ZIP file to analyze"),
+    password: Optional[str] = Form(None, description="Password for encrypted ZIP file"),
+):
+    """
+    Analyze the contents of a ZIP file before parsing.
+
+    Returns a list of files inside the ZIP with:
+    - File names and types (PDF/Excel)
+    - Which PDF files are password-protected
+    - Total counts
+
+    Use this endpoint to determine which files need passwords before calling parse-pdf.
+    """
+    try:
+        content = await file.read()
+        result = _analyze_zip_contents(content, file.filename, password)
+
+        if result["error"]:
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error analyzing ZIP contents: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to analyze ZIP: {str(e)}")
+
+
 @router.post("/verify-zip-password", summary="Verify ZIP Password")
 async def verify_zip_password(
     file: UploadFile = File(..., description="ZIP file to verify password"),
@@ -447,6 +594,7 @@ async def verify_zip_password(
 async def parse_bank_statements(
     files: List[UploadFile] = File(..., description="Bank statement files (.xlsx, .xls, .zip containing Excel/PDF)"),
     zip_passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted ZIP files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted ZIPs."),
+    zip_pdf_passwords: Optional[str] = Form(None, description="JSON object mapping PDF filenames inside ZIP to passwords (e.g., '{\"file1.pdf\": \"pass1\", \"file2.pdf\": \"pass2\"}'). Use this for password-protected PDFs inside ZIP files."),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
     ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
@@ -461,6 +609,10 @@ async def parse_bank_statements(
     When a ZIP file is uploaded, all Excel and PDF files inside will be extracted
     and processed automatically. Excel files are parsed directly, PDF files are
     processed using Gemini OCR.
+
+    For password-protected PDFs inside ZIP:
+    1. First call /analyze-zip to see which PDFs need passwords
+    2. Pass the passwords in zip_pdf_passwords as JSON: {"filename.pdf": "password"}
     """
     try:
         # Validate files
@@ -471,6 +623,17 @@ async def parse_bank_statements(
         zip_password_list = []
         if zip_passwords:
             zip_password_list = [pwd.strip() if pwd.strip() else None for pwd in zip_passwords.split(",")]
+
+        # Parse zip_pdf_passwords JSON if provided (passwords for PDFs inside ZIP files)
+        zip_pdf_password_map = {}
+        if zip_pdf_passwords:
+            try:
+                import json
+                zip_pdf_password_map = json.loads(zip_pdf_passwords)
+                logger.info(f"Loaded {len(zip_pdf_password_map)} PDF passwords for ZIP contents")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse zip_pdf_passwords JSON: {e}")
+                # Don't fail, just ignore invalid JSON
 
         # Separate files by type
         excel_files: List[Tuple[str, bytes]] = []
@@ -495,7 +658,10 @@ async def parse_bank_statements(
                 # Extract files from ZIP
                 extracted_excel, extracted_pdf, errors, needs_password = _extract_files_from_zip(content, filename, zip_password)
                 excel_files.extend(extracted_excel)
-                pdf_files.extend([(name, data, None, None) for name, data in extracted_pdf])
+                # Add extracted PDFs with passwords from zip_pdf_password_map if available
+                for name, data in extracted_pdf:
+                    pdf_password = zip_pdf_password_map.get(name)  # Get password by filename
+                    pdf_files.append((name, data, None, pdf_password))
                 zip_errors.extend(errors)
 
                 # Track extraction info for this ZIP
@@ -792,6 +958,7 @@ async def parse_bank_statements_pdf(
     bank_codes: Optional[str] = Form(None, description="Comma-separated bank codes for each file (e.g., 'VIB,ACB,VCB'). Leave empty for auto-detection."),
     passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted PDF files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted PDFs."),
     zip_passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted ZIP files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted ZIPs."),
+    zip_pdf_passwords: Optional[str] = Form(None, description="JSON object mapping PDF filenames inside ZIP to passwords (e.g., '{\"file1.pdf\": \"pass1\", \"file2.pdf\": \"pass2\"}'). Use this for password-protected PDFs inside ZIP files."),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
     ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
@@ -804,7 +971,10 @@ async def parse_bank_statements_pdf(
     - ZIP files containing PDF files (.zip) (including password-protected ZIPs)
 
     When a ZIP file is uploaded, all PDF files inside will be extracted and processed.
-    Note: bank_codes and passwords apply only to directly uploaded PDFs, not to PDFs inside ZIPs.
+
+    For password-protected PDFs inside ZIP:
+    1. First call /analyze-zip to see which PDFs need passwords
+    2. Pass the passwords in zip_pdf_passwords as JSON: {"filename.pdf": "password"}
     """
     try:
         # Validate files
@@ -825,6 +995,17 @@ async def parse_bank_statements_pdf(
         zip_password_list = []
         if zip_passwords:
             zip_password_list = [pwd.strip() if pwd.strip() else None for pwd in zip_passwords.split(",")]
+
+        # Parse zip_pdf_passwords JSON if provided (passwords for PDFs inside ZIP files)
+        zip_pdf_password_map = {}
+        if zip_pdf_passwords:
+            try:
+                import json
+                zip_pdf_password_map = json.loads(zip_pdf_passwords)
+                logger.info(f"Loaded {len(zip_pdf_password_map)} PDF passwords for ZIP contents")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse zip_pdf_passwords JSON: {e}")
+                # Don't fail, just ignore invalid JSON
 
         # Read files into memory
         pdf_inputs = []
@@ -847,8 +1028,10 @@ async def parse_bank_statements_pdf(
 
                 # Extract PDFs from ZIP
                 extracted_excel, extracted_pdfs, errors, needs_password = _extract_files_from_zip(content, filename, zip_password)
-                # Add extracted PDFs without bank_code/password (not applicable for ZIP contents)
-                pdf_inputs.extend([(name, data, None, None) for name, data in extracted_pdfs])
+                # Add extracted PDFs with passwords from zip_pdf_password_map if available
+                for name, data in extracted_pdfs:
+                    pdf_password = zip_pdf_password_map.get(name)  # Get password by filename
+                    pdf_inputs.append((name, data, None, pdf_password))
                 zip_errors.extend(errors)
 
                 # Track extraction info for this ZIP (for PDF endpoint, we only process PDFs)
