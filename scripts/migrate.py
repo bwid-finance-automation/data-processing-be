@@ -148,7 +148,7 @@ async def execute_sql(db_url: str, sql: str):
 
     try:
         await conn.execute(sql)
-        print(f"    ✓ Executed: {sql[:60]}...")
+        print(f"    Executed: {sql[:60]}...")
     finally:
         await conn.close()
 
@@ -279,11 +279,11 @@ async def fix_missing_schema(db_url: str, existing_tables: list):
             fixes_applied.append("Added analysis_sessions.case_id")
 
     if fixes_applied:
-        print(f"\n✓ Applied {len(fixes_applied)} schema fixes:")
+        print(f"\nApplied {len(fixes_applied)} schema fixes:")
         for fix in fixes_applied:
             print(f"  - {fix}")
     else:
-        print("  ✓ Schema is up to date")
+        print("  Schema is up to date")
 
     return fixes_applied
 
@@ -335,41 +335,41 @@ def main():
 
         # Determine action
         if current_version:
-            print(f"\n✓ Alembic version is set to: {current_version}")
+            print(f"\nAlembic version is set to: {current_version}")
             print("  Running upgrade to head...")
             command.upgrade(alembic_cfg, "head")
-            print("  ✓ Migrations complete!")
+            print("  Migrations complete!")
 
         elif any(tables_exist.values()):
             stamp_revision = determine_stamp_revision(existing_tables)
 
             if stamp_revision:
-                print(f"\n⚠ Tables exist but Alembic version not set!")
+                print(f"\nTables exist but Alembic version not set!")
                 print(f"  Stamping database at revision: {stamp_revision}")
                 command.stamp(alembic_cfg, stamp_revision)
-                print(f"  ✓ Stamped!")
+                print(f"  Stamped!")
 
                 if stamp_revision != "head":
                     print(f"  Running remaining migrations to head...")
                     command.upgrade(alembic_cfg, "head")
-                    print("  ✓ Migrations complete!")
+                    print("  Migrations complete!")
             else:
-                print("\n✗ Could not determine appropriate stamp revision")
+                print("\nCould not determine appropriate stamp revision")
                 sys.exit(1)
 
         else:
             print("\n→ Fresh database detected")
             print("  Running all migrations...")
             command.upgrade(alembic_cfg, "head")
-            print("  ✓ Migrations complete!")
+            print("  Migrations complete!")
 
         # Verify final state
         _, final_version = asyncio.run(check_database_state(db_url))
-        print(f"\n✓ Final Alembic version: {final_version}")
+        print(f"\nFinal Alembic version: {final_version}")
         print("=" * 60)
 
     except Exception as e:
-        print(f"\n✗ Migration failed: {e}")
+        print(f"\nMigration failed: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

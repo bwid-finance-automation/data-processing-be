@@ -413,17 +413,17 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
 
         # Print summary banner
         print("\n" + "="*80)
-        print("✅ BATCH EXPORT COMPLETE - SUMMARY")
+        print("BATCH EXPORT COMPLETE - SUMMARY")
         print("="*80)
-        print(f"📄 Contracts processed: {len(successful_results)} successful, {len(results) - len(successful_results)} failed")
-        print(f"📊 Total contracts exported: {len(results)}")
+        print(f"Contracts processed: {len(successful_results)} successful, {len(results) - len(successful_results)} failed")
+        print(f"Total contracts exported: {len(results)}")
         print("")
-        print("📊 TOKEN USAGE:")
+        print("TOKEN USAGE:")
         print(f"   • Input tokens:      {total_prompt_tokens:,}")
         print(f"   • Output tokens:     {total_completion_tokens:,}")
         print(f"   • TOTAL TOKENS:      {total_tokens:,}")
         print("")
-        print(f"📁 Output file: contract_extractions_{len(results)}_contracts.xlsx")
+        print(f"Output file: contract_extractions_{len(results)}_contracts.xlsx")
         print("="*80 + "\n")
 
         # Return the Excel file
@@ -733,17 +733,17 @@ async def export_contract_with_units_to_excel(
         # Print summary with token usage
         if result['base_result'] and result['base_result'].token_usage:
             print("\n" + "="*80)
-            print("✅ EXPORT COMPLETE - SUMMARY")
+            print("EXPORT COMPLETE - SUMMARY")
             print("="*80)
-            print(f"📄 Units exported: {len(unit_contracts)}")
-            print(f"📊 Total rows in Excel: {len(unit_contracts) * len(result['base_result'].data.rate_periods) if result['base_result'].data.rate_periods else len(unit_contracts)}")
+            print(f"Units exported: {len(unit_contracts)}")
+            print(f"Total rows in Excel: {len(unit_contracts) * len(result['base_result'].data.rate_periods) if result['base_result'].data.rate_periods else len(unit_contracts)}")
             print("")
-            print("📊 TOKEN USAGE:")
+            print("TOKEN USAGE:")
             print(f"   • Input tokens:      {result['base_result'].token_usage.prompt_tokens:,}")
             print(f"   • Output tokens:     {result['base_result'].token_usage.completion_tokens:,}")
             print(f"   • TOTAL TOKENS:      {result['base_result'].token_usage.total_tokens:,}")
             print("")
-            print(f"📁 Output file: contract_with_units_{len(unit_contracts)}_units.xlsx")
+            print(f"Output file: contract_with_units_{len(unit_contracts)}_units.xlsx")
             print("="*80 + "\n")
 
         # Clean up input temp files

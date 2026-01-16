@@ -141,7 +141,7 @@ class UnitBreakdownReader:
 
             # Print summary
             print("\n" + "="*80)
-            print("📊 UNIT BREAKDOWN SUMMARY:")
+            print("UNIT BREAKDOWN SUMMARY:")
             print("="*80)
             print(f"Total units: {len(units)}")
             print(f"Total GFA: {total_gfa:,.2f} sqm")
@@ -205,20 +205,20 @@ class UnitBreakdownReader:
         }
 
         if is_valid:
-            logger.info(f"✓ GFA validation passed: Contract GLA ({contract_gla}) matches "
+            logger.info(f"GFA validation passed: Contract GLA ({contract_gla}) matches "
                        f"unit breakdown total ({total_gfa}) within {tolerance*100}% tolerance")
             print("\n" + "="*80)
-            print("✓ GFA VALIDATION PASSED")
+            print("GFA VALIDATION PASSED")
             print("="*80)
             print(f"Contract GLA: {contract_gla:,.2f} sqm")
             print(f"Unit breakdown total: {total_gfa:,.2f} sqm")
             print(f"Difference: {difference:,.2f} sqm ({difference_pct:.2f}%)")
             print("="*80 + "\n")
         else:
-            logger.warning(f"✗ GFA validation failed: Contract GLA ({contract_gla}) does not match "
+            logger.warning(f"GFA validation failed: Contract GLA ({contract_gla}) does not match "
                           f"unit breakdown total ({total_gfa}). Difference: {difference} ({difference_pct:.2f}%)")
             print("\n" + "="*80)
-            print("✗ GFA VALIDATION FAILED")
+            print("GFA VALIDATION FAILED")
             print("="*80)
             print(f"Contract GLA: {contract_gla:,.2f} sqm")
             print(f"Unit breakdown total: {total_gfa:,.2f} sqm")

@@ -1339,7 +1339,7 @@ def _add_month_to_month_analysis_to_sheet(ws, revenue_analysis: dict, variance_a
         return "N/A"
 
     # Read row 4 to find "End of [Month]" text and determine which month to analyze
-    logger.info("🔍 Reading row 4 to find 'End of [Month]' text...")
+    logger.info("Reading row 4 to find 'End of [Month]' text...")
 
     try:
         # Load the Excel file using pandas
@@ -1350,7 +1350,7 @@ def _add_month_to_month_analysis_to_sheet(ws, revenue_analysis: dict, variance_a
         _, pl_sheet = detect_sheets_from_bytes(xl_bytes)
 
         if not pl_sheet:
-            logger.warning("⚠️  Could not detect PL sheet for month-to-month analysis")
+            logger.warning("Could not detect PL sheet for month-to-month analysis")
             # Fall back to default sheet name
             pl_sheet = "PL Breakdown"
 
@@ -1358,7 +1358,7 @@ def _add_month_to_month_analysis_to_sheet(ws, revenue_analysis: dict, variance_a
 
         # Read row 4 (index 3 in pandas, 0-indexed)
         row_4_values = pl_df.iloc[3].fillna('').astype(str).tolist()
-        logger.info(f"🔍 Row 4 values (first 10): {row_4_values[:10]}")
+        logger.info(f"Row 4 values (first 10): {row_4_values[:10]}")
 
         # Find month pattern in row 4
         # Can be either "End of [Month]" or "From ... to [Month]"
@@ -1375,8 +1375,8 @@ def _add_month_to_month_analysis_to_sheet(ws, revenue_analysis: dict, variance_a
                 for month_tok in MONTH_TOKENS:
                     if month_tok in cell_str:
                         target_month_name = month_tok
-                        logger.info(f"✅ Found 'End of' text in row 4: '{cell_str}'")
-                        logger.info(f"✅ Extracted target month: {target_month_name}")
+                        logger.info(f"Found 'End of' text in row 4: '{cell_str}'")
+                        logger.info(f"Extracted target month: {target_month_name}")
                         break
             # Check for "to [Month]" pattern (e.g., "From Jan 2025 to May 2025")
             elif "to" in cell_lower:
@@ -1387,15 +1387,15 @@ def _add_month_to_month_analysis_to_sheet(ws, revenue_analysis: dict, variance_a
                     for month_tok in MONTH_TOKENS:
                         if month_tok in after_to:
                             target_month_name = month_tok
-                            logger.info(f"✅ Found 'to [Month]' text in row 4: '{cell_str}'")
-                            logger.info(f"✅ Extracted target month: {target_month_name}")
+                            logger.info(f"Found 'to [Month]' text in row 4: '{cell_str}'")
+                            logger.info(f"Extracted target month: {target_month_name}")
                             break
 
             if target_month_name:
                 break
 
         if not target_month_name:
-            logger.error("⚠️  Could not find month pattern in row 4")
+            logger.error("Could not find month pattern in row 4")
             logger.error(f"   Searched for 'End of [Month]' or 'to [Month]' patterns")
             ws[f"A1"] = "ERROR: Could not find month information in row 4"
             ws[f"A1"].font = Font(bold=True, color="FF0000", size=14)
@@ -1404,18 +1404,18 @@ def _add_month_to_month_analysis_to_sheet(ws, revenue_analysis: dict, variance_a
         # Find the previous month
         target_month_idx = MONTH_ORDER.index(target_month_name)
         if target_month_idx == 0:
-            logger.error("⚠️  Target month is January - no previous month in same year")
+            logger.error("Target month is January - no previous month in same year")
             ws[f"A1"] = "ERROR: Cannot analyze month-to-month for January (no previous month)"
             ws[f"A1"].font = Font(bold=True, color="FF0000", size=14)
             return
 
         prev_month_name = MONTH_ORDER[target_month_idx - 1]
-        logger.info(f"✅ Previous month: {prev_month_name}")
+        logger.info(f"Previous month: {prev_month_name}")
 
         # Now match these month names to the actual month strings in revenue_analysis
         # The months_analyzed will have format like "Jan 2025", "Feb 2025", etc.
         all_months = revenue_analysis.get('months_analyzed', [])
-        logger.info(f"🔍 Available months in analysis: {all_months}")
+        logger.info(f"Available months in analysis: {all_months}")
 
         curr_month = None
         prev_month = None
@@ -1427,23 +1427,23 @@ def _add_month_to_month_analysis_to_sheet(ws, revenue_analysis: dict, variance_a
                 prev_month = month_str
 
         if not curr_month or not prev_month:
-            logger.error(f"⚠️  Could not match extracted months to analysis data")
+            logger.error(f"Could not match extracted months to analysis data")
             logger.error(f"   Looking for: {prev_month_name} and {target_month_name}")
             logger.error(f"   Available: {all_months}")
             ws[f"A1"] = f"ERROR: Could not find {prev_month_name} and {target_month_name} in analysis data"
             ws[f"A1"].font = Font(bold=True, color="FF0000", size=14)
             return
 
-        logger.info(f"✅ Matched months for analysis: {prev_month} → {curr_month}")
+        logger.info(f"Matched months for analysis: {prev_month} → {curr_month}")
 
     except Exception as e:
-        logger.error(f"⚠️  Error reading row 4 from Excel: {e}", exc_info=True)
+        logger.error(f"Error reading row 4 from Excel: {e}", exc_info=True)
         ws[f"A1"] = f"ERROR: Failed to read row 4 from Excel file: {str(e)}"
         ws[f"A1"].font = Font(bold=True, color="FF0000", size=14)
         return
 
     target_months = [prev_month, curr_month]
-    logger.info(f"✅ Selected months for Month to Month Analysis: {prev_month} → {curr_month}")
+    logger.info(f"Selected months for Month to Month Analysis: {prev_month} → {curr_month}")
 
     row = 1
 

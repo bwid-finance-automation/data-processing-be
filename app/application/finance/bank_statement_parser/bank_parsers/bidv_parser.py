@@ -21,12 +21,10 @@ class BIDVParser(BaseBankParser):
         """
         Detect if file is BIDV bank statement.
 
-        Logic from fxLooksLike_BIDV:
-        - Read first 80 rows
-        - Look for any of these markers:
-          * "NGÂN HÀNG TMCP ĐẦU TƯ VÀ PHÁT TRIỂN VIỆT NAM"
-          * "BÁO CÁO CHI TIẾT SỐ DƯ TÀI KHOẢN"
-          * "BIDV"
+        Supports both Vietnamese and English BIDV statements:
+        - Vietnamese: "NGÂN HÀNG TMCP ĐẦU TƯ VÀ PHÁT TRIỂN VIỆT NAM", "BÁO CÁO CHI TIẾT SỐ DƯ TÀI KHOẢN"
+        - English: "BANK FOR INVESTMENT AND DEVELOPMENT OF VIETNAM", "ACCOUNT BALANCE DETAILS"
+        - Common: "BIDV"
         """
         try:
             xls = self.get_excel_file(file_bytes)
@@ -42,9 +40,11 @@ class BIDVParser(BaseBankParser):
 
             txt = " ".join(all_text)
 
-            # Check for BIDV markers
+            # Check for BIDV markers (Vietnamese and English)
             is_bidv = "NGÂN HÀNG TMCP ĐẦU TƯ VÀ PHÁT TRIỂN VIỆT NAM" in txt or \
                      "BÁO CÁO CHI TIẾT SỐ DƯ TÀI KHOẢN" in txt or \
+                     "BANK FOR INVESTMENT AND DEVELOPMENT OF VIETNAM" in txt or \
+                     "ACCOUNT BALANCE DETAILS" in txt or \
                      "BIDV" in txt
 
             return is_bidv
@@ -80,8 +80,8 @@ class BIDVParser(BaseBankParser):
             data.columns = data.iloc[0]
             data = data[1:].reset_index(drop=True)
 
-            # ========== Find Columns (Bilingual) ==========
-            date_col = self._find_any_column(data, ["NGÀY HIỆU LỰC", "DATE"])
+            # ========== Find Columns (Bilingual Vietnamese/English) ==========
+            date_col = self._find_any_column(data, ["NGÀY HIỆU LỰC", "EFFECTIVE DATE", "DATE"])
             credit_col = self._find_any_column(data, ["GHI NỢ", "DEBIT"])  # Money out = Credit
             debit_col = self._find_any_column(data, ["GHI CÓ", "CREDIT"])  # Money in = Debit
             desc_col = self._find_any_column(data, ["MÔ TẢ", "DESCRIPTION"])
@@ -184,7 +184,7 @@ class BIDVParser(BaseBankParser):
                 data.columns = data.iloc[0]
                 data = data[1:].reset_index(drop=True)
 
-                date_col = self._find_any_column(data, ["NGÀY HIỆU LỰC", "DATE"])
+                date_col = self._find_any_column(data, ["NGÀY HIỆU LỰC", "EFFECTIVE DATE", "DATE"])
                 credit_col = self._find_any_column(data, ["GHI NỢ", "DEBIT"])
                 debit_col = self._find_any_column(data, ["GHI CÓ", "CREDIT"])
                 balance_col = self._find_any_column(data, ["SỐ DƯ", "BALANCE"])
@@ -244,17 +244,25 @@ class BIDVParser(BaseBankParser):
 
     def _find_header_row_bidv(self, top_df: pd.DataFrame) -> int:
         """
-        Find header row containing:
-        "NGÀY HIỆU LỰC" + "GHI NỢ" + "GHI CÓ"
+        Find header row containing date + debit + credit columns.
+        Supports both Vietnamese and English headers.
         """
         for idx, row in top_df.iterrows():
             row_text = "|".join([self.to_text(cell).upper() for cell in row])
 
-            has_date = "NGÀY HIỆU LỰC" in row_text
-            has_debit = "GHI NỢ" in row_text
-            has_credit = "GHI CÓ" in row_text
+            # Vietnamese headers
+            has_date_vn = "NGÀY HIỆU LỰC" in row_text
+            has_debit_vn = "GHI NỢ" in row_text
+            has_credit_vn = "GHI CÓ" in row_text
 
-            if has_date and has_debit and has_credit:
+            # English headers
+            has_date_en = "EFFECTIVE DATE" in row_text
+            has_debit_en = "DEBIT" in row_text
+            has_credit_en = "CREDIT" in row_text
+
+            # Match if all 3 columns found (either language)
+            if (has_date_vn and has_debit_vn and has_credit_vn) or \
+               (has_date_en and has_debit_en and has_credit_en):
                 return int(idx)
 
         return 11  # Default fallback
@@ -274,15 +282,19 @@ class BIDVParser(BaseBankParser):
 
     def _extract_account_number_bidv(self, top_df: pd.DataFrame) -> Optional[str]:
         """
-        Extract account number from "SỐ TÀI KHOẢN" line.
-        IMPORTANT: Exclude lines with "CŨ" (old) or "OLD".
+        Extract account number from "SỐ TÀI KHOẢN" or "ACCOUNT NUMBER" line.
+        IMPORTANT: Exclude lines with "CŨ" (old) or "OLD ACCOUNT".
         Looks for 10-13 digit sequences.
         """
         for _, row in top_df.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            # Must contain "SỐ TÀI KHOẢN" but NOT "CŨ" or "OLD"
-            if "SỐ TÀI KHOẢN" in row_text and "CŨ" not in row_text and "OLD" not in row_text:
+            # Vietnamese: "SỐ TÀI KHOẢN" but NOT "CŨ"
+            # English: "ACCOUNT NUMBER" but NOT "OLD ACCOUNT"
+            is_account_line_vn = "SỐ TÀI KHOẢN" in row_text and "CŨ" not in row_text
+            is_account_line_en = "ACCOUNT NUMBER" in row_text and "OLD ACCOUNT" not in row_text
+
+            if is_account_line_vn or is_account_line_en:
                 # Split by punctuation and spaces
                 tokens = re.split(r'[ ,.;:|(){}\\[\\]<>\\-_/]+', row_text)
                 tokens = [t for t in tokens if t]
@@ -298,15 +310,24 @@ class BIDVParser(BaseBankParser):
     def _extract_currency_bidv(self, top_df: pd.DataFrame) -> Optional[str]:
         """
         Extract currency from header area.
+        Supports both Vietnamese and English labels.
         Robust detection for VND, USD, EUR, JPY, CNY, HKD, SGD, THB, KRW, GBP, AUD, MYR, IDR, PHP, LAK.
         """
         known_currencies = ["VND", "VNĐ", "USD", "EUR", "JPY", "CNY", "HKD", "SGD", "THB", "KRW", "GBP", "AUD", "MYR", "IDR", "PHP", "LAK"]
 
-        # Look for currency in "LOẠI TIỀN" or "ĐƠN VỊ TIỀN TỆ" or "TIỀN TỆ" rows first
+        # Look for currency in specific rows (Vietnamese or English labels)
         for _, row in top_df.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "LOẠI TIỀN" in row_text or "ĐƠN VỊ TIỀN TỆ" in row_text or "TIỀN TỆ" in row_text:
+            # Vietnamese: "LOẠI TIỀN", "ĐƠN VỊ TIỀN TỆ", "TIỀN TỆ"
+            # English: "CURRENCY:"
+            has_currency_label = "LOẠI TIỀN" in row_text or \
+                                 "ĐƠN VỊ TIỀN TỆ" in row_text or \
+                                 "TIỀN TỆ" in row_text or \
+                                 "CURRENCY:" in row_text or \
+                                 "CURRENCY " in row_text
+
+            if has_currency_label:
                 for currency_code in known_currencies:
                     if currency_code in row_text:
                         return "VND" if currency_code == "VNĐ" else currency_code
@@ -329,13 +350,18 @@ class BIDVParser(BaseBankParser):
 
     def _extract_opening_balance_bidv(self, top_df: pd.DataFrame) -> Optional[float]:
         """
-        Extract opening balance from "DƯ ĐẦU" row.
+        Extract opening balance from "DƯ ĐẦU" or "ORIGINAL BALANCE" row.
         Returns last number found in that row.
         """
         for idx, row in top_df.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "DƯ ĐẦU" in row_text and "CUỐI" not in row_text:
+            # Vietnamese: "DƯ ĐẦU" (but not "CUỐI")
+            # English: "ORIGINAL BALANCE"
+            is_opening_vn = "DƯ ĐẦU" in row_text and "CUỐI" not in row_text
+            is_opening_en = "ORIGINAL BALANCE" in row_text
+
+            if is_opening_vn or is_opening_en:
                 # Extract all numbers from this row
                 nums = []
                 for cell in row:
@@ -350,13 +376,19 @@ class BIDVParser(BaseBankParser):
 
     def _extract_closing_balance_bidv(self, top_df: pd.DataFrame) -> Optional[float]:
         """
-        Extract closing balance from "DƯ CUỐI" or "CUỐI NGÀY" row.
+        Extract closing balance from "DƯ CUỐI", "CUỐI NGÀY" or "END OF DAY BALANCE" row.
         Returns last number found in that row.
         """
         for idx, row in top_df.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "DƯ CUỐI" in row_text or "CUỐI NGÀY" in row_text:
+            # Vietnamese: "DƯ CUỐI" or "CUỐI NGÀY"
+            # English: "END OF DAY BALANCE"
+            is_closing = "DƯ CUỐI" in row_text or \
+                         "CUỐI NGÀY" in row_text or \
+                         "END OF DAY BALANCE" in row_text
+
+            if is_closing:
                 # Extract all numbers from this row
                 nums = []
                 for cell in row:
@@ -408,7 +440,7 @@ class BIDVParser(BaseBankParser):
 
         # Try as Excel date number first
         try:
-            return pd.to_datetime(value).date()
+            return pd.to_datetime(value, dayfirst=True).date()
         except:
             pass
 

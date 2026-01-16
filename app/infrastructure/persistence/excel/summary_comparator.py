@@ -54,7 +54,7 @@ class SummaryComparator:
             new_name = os.path.splitext(os.path.basename(summary_new_path))[0]
             log_file_path = f"summary_comparison_{old_name}_vs_{new_name}_{timestamp}.log"
         
-        print(f"📝 Generating detailed change log: {log_file_path}")
+        print(f"Generating detailed change log: {log_file_path}")
         
         try:
             # Load both files
@@ -161,13 +161,13 @@ class SummaryComparator:
             with open(log_file_path, 'w', encoding='utf-8') as f:
                 f.write(log_content)
             
-            print(f"   ✅ Change log generated: {log_file_path}")
-            print(f"   📊 Summary: {summary_stats['changed_rows']} modified, {summary_stats['new_rows']} new rows")
+            print(f"   Change log generated: {log_file_path}")
+            print(f"   Summary: {summary_stats['changed_rows']} modified, {summary_stats['new_rows']} new rows")
             
             return log_file_path
             
         except Exception as e:
-            print(f"   ❌ Error generating change log: {e}")
+            print(f"   Error generating change log: {e}")
             raise
     
     def _generate_log_content(self, old_path: str, new_path: str, changes: list, stats: dict) -> str:
@@ -482,7 +482,7 @@ class SummaryComparator:
             - 'changed_rows': set of row indices (for backward compatibility)
             - 'entity_mapping': dict mapping entities between old and new files
         """
-        print(f"🔧 Comparing Summary files using Document Number logic:")
+        print(f"Comparing Summary files using Document Number logic:")
         print(f"   Previous: {summary_old_path}")
         print(f"   Current:  {summary_new_path}")
         
@@ -494,11 +494,11 @@ class SummaryComparator:
         
         # Check if Document Number column exists
         if self.document_number_column not in new_df.columns:
-            print(f"   ⚠️ Warning: '{self.document_number_column}' column not found in new file. Using fallback logic.")
+            print(f"   Warning: '{self.document_number_column}' column not found in new file. Using fallback logic.")
             return self.compare_summary_files(summary_old_path, summary_new_path)
         
         if self.document_number_column not in old_df.columns:
-            print(f"   ⚠️ Warning: '{self.document_number_column}' column not found in old file. Treating all as new.")
+            print(f"   Warning: '{self.document_number_column}' column not found in old file. Treating all as new.")
             # All rows in new file are considered new
             new_document_numbers = set(range(2, len(new_df) + 2))  # Excel row numbers
             return {
@@ -562,7 +562,7 @@ class SummaryComparator:
                 if changed_columns:
                     changed_rows.add(row_num)
                     changed_cells[row_num] = changed_columns
-                    print(f"   📝 Document Number '{doc_num}' has changes in row {row_num}")
+                    print(f"   Document Number '{doc_num}' has changes in row {row_num}")
             
             else:
                 # New Document Number - highlight entire row
@@ -575,7 +575,7 @@ class SummaryComparator:
                 all_columns = {col for col in all_columns if col in new_df.columns}
                 changed_cells[row_num] = all_columns
                 
-                print(f"   🆕 New Document Number '{doc_num}' in row {row_num}")
+                print(f"   New Document Number '{doc_num}' in row {row_num}")
                 
                 # Track entity mapping for this new Document Number
                 if entity_key and entity_key != '||':
@@ -591,9 +591,9 @@ class SummaryComparator:
                         }
                     entity_mapping[entity_key]['new_document_numbers'].append(doc_num)
         
-        print(f"   🎯 Found {len(new_document_numbers)} newly added Document Numbers")
-        print(f"   📊 Found {len(changed_rows)} total rows with changes")
-        print(f"   🏢 Mapped {len(entity_mapping)} entities with new Document Numbers")
+        print(f"   Found {len(new_document_numbers)} newly added Document Numbers")
+        print(f"   Found {len(changed_rows)} total rows with changes")
+        print(f"   Mapped {len(entity_mapping)} entities with new Document Numbers")
         
         return {
             'new_document_numbers': new_document_numbers,
@@ -1309,13 +1309,13 @@ class SummaryComparator:
                         row_range = sheet.range((row_num, 1), (row_num, len(header_row)))
                         row_range.color = (255, 255, 180)  # Light yellow for new Document Numbers
                         highlighted_rows += 1
-                        print(f"   🆕 Highlighted entire row {row_num} (new Document Number)")
+                        print(f"   Highlighted entire row {row_num} (new Document Number)")
                     except Exception as e:
                         print(f"   Failed to highlight row {row_num}: {e}")
                 
                 # Save the file
                 wb.save()
-                print(f"   ✅ Saved Summary file with {highlighted_rows} highlighted rows")
+                print(f"   Saved Summary file with {highlighted_rows} highlighted rows")
                 
                 return True
                 
@@ -1324,7 +1324,7 @@ class SummaryComparator:
                 app.quit()
                 
         except Exception as e:
-            print(f"   ❌ Error applying Document Number highlighting to Summary file: {e}")
+            print(f"   Error applying Document Number highlighting to Summary file: {e}")
             return False
 
     
@@ -1357,7 +1357,7 @@ class SummaryComparator:
                 print(f"   Current file not found: {summary_new_path}")
                 return False
             
-            print(f"🔧 Starting Document Number-based comparison workflow")
+            print(f"Starting Document Number-based comparison workflow")
             
             # Use the new Document Number-based comparison logic
             comparison_results = self.compare_summary_files_by_document_number(summary_old_path, summary_new_path)
@@ -1372,23 +1372,23 @@ class SummaryComparator:
                 log_path = self.generate_document_number_change_log(
                     summary_old_path, summary_new_path, comparison_results, log_file_path
                 )
-                print(f"   📝 Detailed log saved: {log_path}")
+                print(f"   Detailed log saved: {log_path}")
             
             # Apply Document Number-based highlighting
             success = self.apply_document_number_highlighting_to_summary(summary_new_path, comparison_results)
             
             if success:
-                print(f"   🎉 Document Number-based comparison completed successfully!")
-                print(f"   🆕 Newly added Document Numbers: {len(new_document_numbers)}")
-                print(f"   📊 Total rows with changes: {len(changed_rows)}")
-                print(f"   🏢 Entities with new Document Numbers: {len(entity_mapping)}")
+                print(f"   Document Number-based comparison completed successfully!")
+                print(f"   Newly added Document Numbers: {len(new_document_numbers)}")
+                print(f"   Total rows with changes: {len(changed_rows)}")
+                print(f"   Entities with new Document Numbers: {len(entity_mapping)}")
                 if generate_log:
-                    print(f"   📝 Detailed change log: {log_path}")
+                    print(f"   Detailed change log: {log_path}")
             
             return success
             
         except Exception as e:
-            print(f"   ❌ Error in Document Number-based comparison process: {e}")
+            print(f"   Error in Document Number-based comparison process: {e}")
             return False
 
     
@@ -1414,7 +1414,7 @@ class SummaryComparator:
             new_name = os.path.splitext(os.path.basename(summary_new_path))[0]
             log_file_path = f"document_number_comparison_{old_name}_vs_{new_name}_{timestamp}.log"
         
-        print(f"📝 Generating Document Number-based change log: {log_file_path}")
+        print(f"Generating Document Number-based change log: {log_file_path}")
         
         try:
             # Load files for detailed analysis
@@ -1527,12 +1527,12 @@ class SummaryComparator:
             with open(log_file_path, 'w', encoding='utf-8') as f:
                 f.write("\n".join(content))
             
-            print(f"   ✅ Document Number change log generated: {log_file_path}")
+            print(f"   Document Number change log generated: {log_file_path}")
             
             return log_file_path
             
         except Exception as e:
-            print(f"   ❌ Error generating Document Number change log: {e}")
+            print(f"   Error generating Document Number change log: {e}")
             raise
     
     def process_summary_comparison(self, summary_old_path: str, summary_new_path: str, generate_log: bool = True, log_file_path: str = None) -> bool:

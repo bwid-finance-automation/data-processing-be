@@ -106,10 +106,10 @@ class BillingProcessor:
                 subsidiary_units[config.UNIT_COLUMNS['unit_name']] == matched_unit_name
             ].iloc[0]
 
-            logger.info(f"✓ Matched unit '{cs_unit_name}' → '{matched_unit_name}' (score: {result[1]})")
+            logger.info(f"Matched unit '{cs_unit_name}' → '{matched_unit_name}' (score: {result[1]})")
             return ufl_record
 
-        logger.warning(f"✗ Unit '{cs_unit_name}' not matched (best score: {result[1] if result else 0})")
+        logger.warning(f"Unit '{cs_unit_name}' not matched (best score: {result[1] if result else 0})")
         return None
 
     @staticmethod
@@ -298,10 +298,10 @@ class BillingProcessor:
                 df['_source_file'] = file_path.name
 
                 all_data.append(df)
-                logger.info(f"  ✓ Successfully loaded {len(df)} records")
+                logger.info(f"  Successfully loaded {len(df)} records")
 
             except Exception as e:
-                logger.error(f"  ✗ Error reading {file_path.name}: {e}")
+                logger.error(f"  Error reading {file_path.name}: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
                 continue

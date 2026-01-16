@@ -108,8 +108,8 @@ class ContractOCRService:
         model_info = f"Contract OCR Service initialized with {ocr_name} OCR + {provider_name} {self.model} (validation: {enable_validation})"
         logger.info(model_info)
         print("\n" + "="*80)
-        print(f"📷 OCR ENGINE: {ocr_name}")
-        print(f"🤖 AI MODEL: {self.model} ({provider_name})")
+        print(f"OCR ENGINE: {ocr_name}")
+        print(f"AI MODEL: {self.model} ({provider_name})")
         print("="*80 + "\n")
 
     def _chunk_text(self, text: str) -> List[str]:
@@ -331,7 +331,7 @@ class ContractOCRService:
 
             # Print OCR output to terminal
             print("\n" + "="*80)
-            print("📄 OCR EXTRACTED TEXT FROM IMAGE:")
+            print("OCR EXTRACTED TEXT FROM IMAGE:")
             print("="*80)
             print(text)
             print("="*80 + "\n")
@@ -369,7 +369,7 @@ class ContractOCRService:
         """
         logger.info(f"Extracting text from PDF using Gemini Flash: {pdf_path}")
         print("\n" + "="*80)
-        print("📷 Using Gemini Flash for OCR...")
+        print("Using Gemini Flash for OCR...")
         print("="*80 + "\n")
 
         try:
@@ -413,7 +413,7 @@ Output the extracted text:"""
 
             # Print extracted text
             print("\n" + "="*80)
-            print(f"📋 GEMINI EXTRACTED TEXT ({len(extracted_text)} characters):")
+            print(f"GEMINI EXTRACTED TEXT ({len(extracted_text)} characters):")
             print("="*80)
             print(extracted_text[:2000] + "..." if len(extracted_text) > 2000 else extracted_text)
             print("="*80 + "\n")
@@ -422,7 +422,7 @@ Output the extracted text:"""
 
         except Exception as e:
             logger.error(f"Gemini OCR failed: {e}, falling back to Tesseract")
-            print(f"⚠️ Gemini OCR failed: {e}")
+            print(f"Gemini OCR failed: {e}")
             print("Falling back to Tesseract OCR...")
             return self._extract_text_from_pdf_tesseract(pdf_path)
 
@@ -463,7 +463,7 @@ Output the extracted text:"""
 
                 # Print OCR output to terminal
                 print("\n" + "="*80)
-                print(f"📄 OCR EXTRACTED TEXT FROM PDF PAGE {page_num + 1}:")
+                print(f"OCR EXTRACTED TEXT FROM PDF PAGE {page_num + 1}:")
                 print("="*80)
                 print(page_text)
                 print("="*80 + "\n")
@@ -472,7 +472,7 @@ Output the extracted text:"""
 
                 # Print direct text extraction to terminal
                 print("\n" + "="*80)
-                print(f"📄 DIRECT TEXT EXTRACTION FROM PDF PAGE {page_num + 1}:")
+                print(f"DIRECT TEXT EXTRACTION FROM PDF PAGE {page_num + 1}:")
                 print("="*80)
                 print(page_text)
                 print("="*80 + "\n")
@@ -486,7 +486,7 @@ Output the extracted text:"""
 
         # Print complete combined text
         print("\n" + "="*80)
-        print(f"📋 COMPLETE COMBINED TEXT ({len(combined_text)} characters):")
+        print(f"COMPLETE COMBINED TEXT ({len(combined_text)} characters):")
         print("="*80)
         print(combined_text)
         print("="*80 + "\n")
@@ -520,7 +520,7 @@ Output the extracted text:"""
 
         # Print prompt for debugging
         print("\n" + "="*80)
-        print("📝 PROMPT SENT TO AI (for debugging):")
+        print("PROMPT SENT TO AI (for debugging):")
         print("="*80)
         print(prompt[:500] + "..." if len(prompt) > 500 else prompt)
         print(f"\n[Full prompt length: {len(prompt)} characters]")
@@ -529,7 +529,7 @@ Output the extracted text:"""
         # Log AI call
         provider_name = "Anthropic" if self.is_claude else "OpenAI"
         logger.info(f"Calling {provider_name} API with model: {self.model}")
-        print(f"🤖 Calling AI model: {self.model} ({provider_name})")
+        print(f"Calling AI model: {self.model} ({provider_name})")
 
         # Initialize usage info
         usage_info = {
@@ -617,12 +617,12 @@ Output the extracted text:"""
             logger.info(f"Token usage - Prompt: {usage_info['prompt_tokens']}, "
                        f"Completion: {usage_info['completion_tokens']}, "
                        f"Total: {usage_info['total_tokens']}")
-            print(f"   📊 Token usage: Prompt={usage_info['prompt_tokens']}, "
+            print(f"   Token usage: Prompt={usage_info['prompt_tokens']}, "
                   f"Completion={usage_info['completion_tokens']}, "
                   f"Total={usage_info['total_tokens']}")
 
             if not content:
-                print(f"   ⚠️ WARNING: Empty response content from {self.model}")
+                print(f"   WARNING: Empty response content from {self.model}")
                 logger.warning(f"Empty response from {self.model}")
                 return {}, usage_info
 
@@ -630,13 +630,13 @@ Output the extracted text:"""
 
             # Print AI response for debugging
             print("\n" + "="*80)
-            print("🤖 AI RESPONSE (for debugging):")
+            print("AI RESPONSE (for debugging):")
             print("="*80)
             print(content)
             print("="*80 + "\n")
 
         except Exception as e:
-            print(f"   ❌ ERROR calling {self.model}: {str(e)}")
+            print(f"   ERROR calling {self.model}: {str(e)}")
             logger.error(f"Error calling {self.model}: {str(e)}")
             raise
 
@@ -685,9 +685,9 @@ Output the extracted text:"""
                 # Check if we have all fields
                 if self._are_all_fields_extracted(merged_data):
                     num_periods = len(merged_data.get('rate_periods', []))
-                    logger.info(f"✓ All required fields found with {num_periods} rate period(s) after processing {i}/{len(chunks)} chunks. Stopping early.")
+                    logger.info(f"All required fields found with {num_periods} rate period(s) after processing {i}/{len(chunks)} chunks. Stopping early.")
                     print("\n" + "="*80)
-                    print(f"✓ ALL FIELDS EXTRACTED - {num_periods} RATE PERIOD(S) (stopped at chunk {i}/{len(chunks)})")
+                    print(f"ALL FIELDS EXTRACTED - {num_periods} RATE PERIOD(S) (stopped at chunk {i}/{len(chunks)})")
                     print("="*80 + "\n")
                     break
                 else:
@@ -709,7 +709,7 @@ Output the extracted text:"""
         # Final check
         if self._are_all_fields_extracted(merged_data):
             num_periods = len(merged_data.get('rate_periods', []))
-            logger.info(f"✓ Successfully extracted all required fields with {num_periods} rate period(s)")
+            logger.info(f"Successfully extracted all required fields with {num_periods} rate period(s)")
         else:
             missing = []
             for f in ['type', 'tenant', 'gla_for_lease']:
@@ -717,15 +717,15 @@ Output the extracted text:"""
                     missing.append(f)
             if 'rate_periods' not in merged_data or not merged_data.get('rate_periods'):
                 missing.append('rate_periods (no valid periods found)')
-            logger.warning(f"⚠ Processed all chunks but still missing fields: {missing}")
+            logger.warning(f"Processed all chunks but still missing fields: {missing}")
 
         # Log total token usage for this contract
-        logger.info(f"📊 Total token usage for this contract - Prompt: {total_usage['prompt_tokens']}, "
+        logger.info(f"Total token usage for this contract - Prompt: {total_usage['prompt_tokens']}, "
                    f"Completion: {total_usage['completion_tokens']}, "
                    f"Total: {total_usage['total_tokens']}")
 
         print("\n" + "="*80)
-        print(f"📊 TOKEN USAGE:")
+        print(f"TOKEN USAGE:")
         print(f"   • Input tokens:  {total_usage['prompt_tokens']:,}")
         print(f"   • Output tokens: {total_usage['completion_tokens']:,}")
         print(f"   • TOTAL TOKENS:  {total_usage['total_tokens']:,}")
@@ -894,7 +894,7 @@ Output the extracted text:"""
                 # Log validation summary
                 summary = self.validator.get_validation_summary(validation_result)
                 print("\n" + "="*80)
-                print("📋 VALIDATION SUMMARY:")
+                print("VALIDATION SUMMARY:")
                 print("="*80)
                 print(summary)
                 print("="*80 + "\n")
@@ -1060,7 +1060,7 @@ Output the extracted text:"""
 
         # Print summary
         print("\n" + "="*80)
-        print(f"📋 CREATED {len(unit_contracts)} UNIT-SPECIFIC CONTRACTS:")
+        print(f"CREATED {len(unit_contracts)} UNIT-SPECIFIC CONTRACTS:")
         print("="*80)
         for i, (unit, contract) in enumerate(zip(unit_breakdown_result.units, unit_contracts), 1):
             print(f"{i}. Unit: {contract.unit_for_lease} | GFA: {contract.gfa} sqm")

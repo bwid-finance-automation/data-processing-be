@@ -405,7 +405,7 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
                 month_cols = temp_month_cols
                 month_col_indices = temp_month_indices
                 month_row_found = row_idx
-                print(f"DEBUG: ✓✓✓ FOUND {len(month_cols)} month columns in ROW {row_idx}")
+                print(f"DEBUG: FOUND {len(month_cols)} month columns in ROW {row_idx}")
                 print(f"DEBUG: Month columns: {month_cols[:8]}")
                 print(f"DEBUG: Column indices: {month_col_indices[:8]}")
                 print(f"DEBUG: Full row {row_idx}: {sample_vals}")
@@ -416,7 +416,7 @@ def process_financial_tab(xl_file, sheet_name, mode, subsidiary):
                     print(f"DEBUG: Row {row_idx:2d} [{len(temp_month_cols)} months]: {sample_vals}")
 
         if not month_cols:
-            print(f"DEBUG: ✗✗✗ NO MONTH COLUMNS FOUND in {sheet_name}")
+            print(f"DEBUG: NO MONTH COLUMNS FOUND in {sheet_name}")
             print(f"DEBUG: Dumping detailed first 20 rows for manual inspection:")
             for idx in range(min(20, len(df_raw))):
                 row_sample = [str(df_raw.iloc[idx, col]).strip() for col in range(min(15, len(df_raw.columns)))]
