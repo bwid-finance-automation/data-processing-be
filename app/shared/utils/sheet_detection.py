@@ -96,5 +96,5 @@ def detect_sheets_from_bytes(xl_bytes: bytes) -> tuple[Optional[str], Optional[s
         return bs_sheet, pl_sheet
 
     except Exception as e:
-        print(f"⚠️  Error detecting sheets: {str(e)}")
+        print(f"Error detecting sheets: {str(e)}")
         return None, None

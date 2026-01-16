@@ -67,9 +67,10 @@ class BIDVParser(BaseBankParser):
             xls = self.get_excel_file(file_bytes)
             sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
-            # ========== Extract Account Number from Header ==========
-            top_40 = sheet.head(40)
-            acc_no = self._extract_account_number_bidv(top_40)
+            # ========== Extract Account Number and Currency from Header ==========
+            top_80 = sheet.head(80)
+            acc_no = self._extract_account_number_bidv(top_80)
+            currency = self._extract_currency_bidv(top_80)
 
             # ========== Find Header Row ==========
             header_idx = self._find_header_row_bidv(sheet.head(80))
@@ -136,7 +137,7 @@ class BIDVParser(BaseBankParser):
                     credit=credit_val if pd.notna(credit_val) else None,
                     date=row.get("Date") if "Date" in row and pd.notna(row.get("Date")) else None,
                     description=self.to_text(row.get("Description", "")) if "Description" in row else "",
-                    currency="VND",
+                    currency=currency or "VND",
                     transaction_id="",
                     beneficiary_bank="",
                     beneficiary_acc_no="",

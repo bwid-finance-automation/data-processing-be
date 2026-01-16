@@ -375,22 +375,22 @@ class RevenueVarianceAnalyzer:
             raise ValueError("AI analysis requires API key. Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.")
 
         # Step 1: Parse revenue data (Python - structured XML parsing)
-        logger.info("\n📊 STEP 1: Parsing Revenue Data...")
+        logger.info("\nSTEP 1: Parsing Revenue Data...")
         self.revenue_records = self._parse_revenue_data(revenue_bytes)
-        logger.info(f"   ✅ Parsed {len(self.revenue_records)} revenue records")
+        logger.info(f"   Parsed {len(self.revenue_records)} revenue records")
 
         # Step 2: Parse UFL data (Python - structured XML parsing)
-        logger.info("\n📊 STEP 2: Parsing UFL Data...")
+        logger.info("\nSTEP 2: Parsing UFL Data...")
         self.ufl_records = self._parse_ufl_data(ufl_bytes)
-        logger.info(f"   ✅ Parsed {len(self.ufl_records)} UFL records")
+        logger.info(f"   Parsed {len(self.ufl_records)} UFL records")
 
         # Step 3: Calculate monthly totals for context
-        logger.info("\n📊 STEP 3: Calculating Monthly Totals...")
+        logger.info("\nSTEP 3: Calculating Monthly Totals...")
         monthly_totals = self._calculate_monthly_totals()
-        logger.info(f"   ✅ Calculated totals for 12 months")
+        logger.info(f"   Calculated totals for 12 months")
 
         # Step 4: AI ANALYZES EACH MONTHLY COMPARISON
-        logger.info("\n🤖 STEP 4: AI Analyzing Each Monthly Variance...")
+        logger.info("\nSTEP 4: AI Analyzing Each Monthly Variance...")
         logger.info("   AI will analyze each month-over-month comparison with UFL linkage")
         monthly_ai_analyses = []
         all_ai_flags = []
@@ -400,7 +400,7 @@ class RevenueVarianceAnalyzer:
             current_name = MONTH_NAMES[month - 1]
             prior_name = MONTH_NAMES[prior_month - 1]
 
-            logger.info(f"   🔄 AI analyzing {current_name} vs {prior_name}...")
+            logger.info(f"   AI analyzing {current_name} vs {prior_name}...")
 
             # Build context for this month's analysis
             monthly_context = self._build_monthly_context(month, prior_month, monthly_totals)
@@ -419,10 +419,10 @@ class RevenueVarianceAnalyzer:
                         **flag
                     })
 
-            logger.info(f"   ✅ {current_name} vs {prior_name}: {len(ai_result.get('flags', []))} flags identified")
+            logger.info(f"   {current_name} vs {prior_name}: {len(ai_result.get('flags', []))} flags identified")
 
         # Step 5: Check for UFL NO REVENUE flags (large handovers without revenue)
-        logger.info("\n📊 STEP 5: Checking for UFL NO REVENUE flags...")
+        logger.info("\nSTEP 5: Checking for UFL NO REVENUE flags...")
         ufl_no_revenue_flags = self._check_ufl_no_revenue()
         for flag in ufl_no_revenue_flags:
             all_ai_flags.append({
@@ -433,22 +433,22 @@ class RevenueVarianceAnalyzer:
                 "variance_b": flag.variance,
                 "reason": flag.detail
             })
-        logger.info(f"   ✅ Found {len(ufl_no_revenue_flags)} UFL NO REVENUE flags")
+        logger.info(f"   Found {len(ufl_no_revenue_flags)} UFL NO REVENUE flags")
 
         # Step 6: AI ANALYZES ALL FLAGS
-        logger.info(f"\n🤖 STEP 6: AI Analyzing All {len(all_ai_flags)} Flags...")
+        logger.info(f"\nSTEP 6: AI Analyzing All {len(all_ai_flags)} Flags...")
         flag_analysis = self._ai_analyze_all_flags(all_ai_flags)
-        logger.info(f"   ✅ Flag analysis complete")
+        logger.info(f"   Flag analysis complete")
 
         # Step 7: AI GENERATES EXECUTIVE SUMMARY
-        logger.info("\n🤖 STEP 7: AI Generating Executive Summary...")
+        logger.info("\nSTEP 7: AI Generating Executive Summary...")
         executive_summary = self._ai_generate_executive_summary(
             monthly_totals, monthly_ai_analyses, flag_analysis
         )
-        logger.info(f"   ✅ Executive summary generated")
+        logger.info(f"   Executive summary generated")
 
         # Step 8: Build comparison objects from AI analyses
-        logger.info("\n📊 STEP 8: Building Output Structures...")
+        logger.info("\nSTEP 8: Building Output Structures...")
         comparisons = self._build_comparisons_from_ai(monthly_ai_analyses)
         all_flags = self._build_flags_from_ai(all_ai_flags)
 
@@ -467,7 +467,7 @@ class RevenueVarianceAnalyzer:
         }
 
         # Step 10: Generate Excel output with AI Insights
-        logger.info("\n📊 STEP 9: Generating Excel Output...")
+        logger.info("\nSTEP 9: Generating Excel Output...")
         xlsx_bytes = self._generate_excel(comparisons, all_flags, monthly_totals, ai_insights)
 
         logger.info("\n" + "=" * 60)

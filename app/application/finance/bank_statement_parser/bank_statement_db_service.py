@@ -338,11 +338,6 @@ class BankStatementDbService:
         if statement.balance:
             await self._save_balance(db_statement.id, statement.balance)
 
-        logger.info(
-            f"Saved bank statement: {statement.bank_name} - {statement.file_name} "
-            f"(ID: {db_statement.id}, Transactions: {len(statement.transactions)}, Case: {case_id})"
-        )
-
         return db_statement
 
     async def save_statements_batch(

@@ -24,7 +24,7 @@ try:
     AI_AVAILABLE = True
 except ImportError:
     AI_AVAILABLE = False
-    logger.warning("⚠️  AI analyzer not available - AI mode will be disabled")
+    logger.warning("AI analyzer not available - AI mode will be disabled")
 
 def build_corr_anoms(
     sub: str,
@@ -195,7 +195,7 @@ def build_anoms_ai_mode(
     anomalies: list[dict] = []
 
     if not AI_AVAILABLE:
-        logger.error(f"❌ AI analysis requested but AI analyzer not available for '{sub}'")
+        logger.error(f"AI analysis requested but AI analyzer not available for '{sub}'")
         return pd.DataFrame([{
             "Subsidiary": sub,
             "Account": "AI_NOT_AVAILABLE",
@@ -208,16 +208,16 @@ def build_anoms_ai_mode(
             "Notes": "Check if llm_analyzer.py is available and dependencies are installed",
         }])
 
-    logger.info(f"🧠 Starting AI analysis for '{sub}'...")
+    logger.info(f"Starting AI analysis for '{sub}'...")
     try:
         llm_analyzer = LLMFinancialAnalyzer(CONFIG.get("llm_model", "gpt-4o"), progress_callback=progress_callback, initial_progress=initial_progress)
-        logger.info(f"✅ AI analyzer initialized with model: {CONFIG.get('llm_model', 'gpt-4o')}")
+        logger.info(f"AI analyzer initialized with model: {CONFIG.get('llm_model', 'gpt-4o')}")
 
-        logger.info("🔍 Running AI analysis on complete raw Excel file...")
+        logger.info("Running AI analysis on complete raw Excel file...")
         llm_anomalies = llm_analyzer.analyze_raw_excel_file(excel_bytes, filename, sub, CONFIG)
-        logger.info(f"✅ AI analysis completed, processing {len(llm_anomalies)} results")
+        logger.info(f"AI analysis completed, processing {len(llm_anomalies)} results")
 
-        logger.info(f"📋 Converting {len(llm_anomalies)} AI results to report format...")
+        logger.info(f"Converting {len(llm_anomalies)} AI results to report format...")
         for idx, anom in enumerate(llm_anomalies, 1):
             logger.debug(f"   • Processing anomaly {idx}: Account {anom.get('account_code', 'Unknown')}")
 
@@ -252,9 +252,9 @@ def build_anoms_ai_mode(
                 "Priority": priority_emoji,
                 "Notes": anom["details"],
             })
-        logger.info("✅ Successfully converted all AI results to report format")
+        logger.info("Successfully converted all AI results to report format")
 
-        logger.info(f"✅ AI anomaly detection completed for '{sub}' - returning {len(anomalies)} records")
+        logger.info(f"AI anomaly detection completed for '{sub}' - returning {len(anomalies)} records")
 
         # Create DataFrame and filter out zero changes
         result_df = pd.DataFrame(anomalies)
@@ -271,12 +271,12 @@ def build_anoms_ai_mode(
             # Keep only rows where at least one of the change fields is non-zero
             mask = ~(result_df["Pct Change"].apply(is_zero_or_empty) & result_df["Abs Change (VND)"].apply(is_zero_or_empty))
             result_df = result_df[mask].reset_index(drop=True)
-            logger.info(f"✅ After filtering zero changes: {len(result_df)} records remaining")
+            logger.info(f"After filtering zero changes: {len(result_df)} records remaining")
 
         return result_df
 
     except Exception as e:
-        logger.error(f"❌ AI analysis failed for '{sub}': {e}", exc_info=True)
+        logger.error(f"AI analysis failed for '{sub}': {e}", exc_info=True)
         error_record = pd.DataFrame([{
             "Subsidiary": sub,
             "Account": "AI_ERROR",
@@ -288,7 +288,7 @@ def build_anoms_ai_mode(
             "Status": "Error",
             "Notes": "Check if OpenAI is running and model is available",
         }])
-        logger.warning("⚠️  Returning error record to continue processing other files")
+        logger.warning("Returning error record to continue processing other files")
         return error_record
 
 # -----------------------------------------------------------------------------

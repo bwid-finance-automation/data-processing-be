@@ -75,8 +75,8 @@ class LLMFinancialAnalyzer:
         self.current_progress = initial_progress  # Start from the current progress
         self.progress_increment = 1  # Default 1% increment per API call
         # Debug information for cloud deployments
-        logger.info(f"🔧 Python version: {sys.version}")
-        logger.info(f"🔧 Environment: {'RENDER' if os.getenv('RENDER') else 'LOCAL'}")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Environment: {'RENDER' if os.getenv('RENDER') else 'LOCAL'}")
 
         # Determine AI provider from environment (openai or anthropic)
         self.ai_provider = os.getenv("AI_PROVIDER", "openai").lower()
@@ -118,11 +118,11 @@ class LLMFinancialAnalyzer:
         # Debug: Show if API key was loaded
         provider_name = "Anthropic" if self.is_claude else "OpenAI"
         if self.api_key:
-            logger.info(f"✅ {provider_name} API key loaded: {self.api_key[:10]}...{self.api_key[-4:]}")
+            logger.info(f"{provider_name} API key loaded: {self.api_key[:10]}...{self.api_key[-4:]}")
         else:
-            logger.error(f"❌ {provider_name} API key not found in environment variables")
-            logger.info(f"🔍 .env file path: {env_path}")
-            logger.info(f"🔍 .env file exists: {env_path.exists()}")
+            logger.error(f"{provider_name} API key not found in environment variables")
+            logger.info(f".env file path: {env_path}")
+            logger.info(f".env file exists: {env_path.exists()}")
 
         key_env_var = "ANTHROPIC_API_KEY" if self.is_claude else "OPENAI_API_KEY"
         if not self.api_key or self.api_key.startswith("your_"):
@@ -140,14 +140,14 @@ class LLMFinancialAnalyzer:
             if not ANTHROPIC_AVAILABLE:
                 raise RuntimeError("Anthropic library not installed. Run: pip install anthropic")
             try:
-                print(f"🔄 Attempting Anthropic client initialization...")
+                print(f"Attempting Anthropic client initialization...")
                 self.anthropic_client = anthropic.Anthropic(api_key=self.api_key)
-                print(f"✅ Anthropic client initialized successfully")
+                print(f"Anthropic client initialized successfully")
             except Exception as e:
                 raise RuntimeError(f"Failed to initialize Anthropic client: {e}")
-            logger.info(f"🤖 Using Claude model: {self.model}")
-            logger.info(f"🔑 API key configured: {self.api_key[:8]}...{self.api_key[-4:]}")
-            logger.info(f"🚀 Claude mode enabled")
+            logger.info(f"Using Claude model: {self.model}")
+            logger.info(f"API key configured: {self.api_key[:8]}...{self.api_key[-4:]}")
+            logger.info(f"Claude mode enabled")
             logger.info(f"   • Max context tokens: {self.max_context_tokens:,}")
         else:
             # Initialize OpenAI client with comprehensive error handling for deployment environments
@@ -166,14 +166,14 @@ class LLMFinancialAnalyzer:
 
             for attempt_num, init_func in enumerate(initialization_attempts, 1):
                 try:
-                    print(f"🔄 Attempting OpenAI client initialization (attempt {attempt_num})...")
+                    print(f"Attempting OpenAI client initialization (attempt {attempt_num})...")
                     self.openai_client = init_func()
-                    print(f"✅ OpenAI client initialized successfully on attempt {attempt_num}")
+                    print(f"OpenAI client initialized successfully on attempt {attempt_num}")
                     break
                 except TypeError as e:
                     last_error = e
                     error_msg = str(e).lower()
-                    print(f"⚠️  Attempt {attempt_num} failed: {e}")
+                    print(f"Attempt {attempt_num} failed: {e}")
 
                     if "proxies" in error_msg:
                         print("   → Issue related to proxy parameter - trying next approach")
@@ -186,17 +186,17 @@ class LLMFinancialAnalyzer:
                         continue
                 except Exception as e:
                     last_error = e
-                    print(f"⚠️  Attempt {attempt_num} failed with unexpected error: {e}")
+                    print(f"Attempt {attempt_num} failed with unexpected error: {e}")
                     continue
 
             if self.openai_client is None:
                 raise RuntimeError(f"Failed to initialize OpenAI client after {len(initialization_attempts)} attempts. Last error: {last_error}")
-            logger.info(f"🤖 Using OpenAI model: {self.model}")
-            logger.info(f"🔑 API key configured: {self.api_key[:8]}...{self.api_key[-4:]}")
+            logger.info(f"Using OpenAI model: {self.model}")
+            logger.info(f"API key configured: {self.api_key[:8]}...{self.api_key[-4:]}")
 
             # Log GPT-5 specific configuration
             if self.is_gpt5:
-                logger.info(f"🚀 GPT-5 mode enabled")
+                logger.info(f"GPT-5 mode enabled")
                 logger.info(f"   • reasoning_effort: {self.reasoning_effort}")
                 logger.info(f"   • service_tier: {self.service_tier}")
                 logger.info(f"   • Max context tokens: {self.max_context_tokens:,}")
@@ -316,7 +316,7 @@ class LLMFinancialAnalyzer:
             total_chars = len(system_prompt) + len(user_prompt)
             estimated_tokens = total_chars // 4
 
-            print(f"   🔄 Making OpenAI API call...")
+            print(f" Making OpenAI API call...")
             print(f"      • Model: {self.openai_model}")
             print(f"      • GPT-5 mode: {self.is_gpt5}")
             print(f"      • System prompt: {len(system_prompt):,} chars")
@@ -370,7 +370,7 @@ class LLMFinancialAnalyzer:
                 else:
                     raise
 
-            print(f"   ✅ OpenAI API call completed successfully")
+            print(f" OpenAI API call completed successfully")
             print(f"      • max_completion_tokens requested: 32,000")
 
             # Update progress by increment after successful API call (200 response)
@@ -466,7 +466,7 @@ class LLMFinancialAnalyzer:
                     except:
                         pass
 
-                print(f"   ⚠️  Rate limit hit. Waiting {wait_time:.1f}s before retry {retry_count + 1}/{max_retries}...")
+                print(f"  Rate limit hit. Waiting {wait_time:.1f}s before retry {retry_count + 1}/{max_retries}...")
                 time.sleep(wait_time)
 
                 # Recursive retry
@@ -475,7 +475,7 @@ class LLMFinancialAnalyzer:
             # Handle timeout errors with retry logic
             if isinstance(e, APITimeoutError) and retry_count < max_retries:
                 wait_time = 5  # Short wait for timeouts
-                print(f"   ⚠️  Request timed out. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
+                print(f"  Request timed out. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
                 time.sleep(wait_time)
 
                 # Recursive retry
@@ -496,7 +496,7 @@ class LLMFinancialAnalyzer:
             total_chars = len(system_prompt) + len(user_prompt)
             estimated_tokens = total_chars // 4
 
-            print(f"   🔄 Making Anthropic API call (streaming)...")
+            print(f" Making Anthropic API call (streaming)...")
             print(f"      • Model: {self.model}")
             print(f"      • System prompt: {len(system_prompt):,} chars")
             print(f"      • User prompt: {len(user_prompt):,} chars")
@@ -529,7 +529,7 @@ class LLMFinancialAnalyzer:
             content = "".join(content_parts)
             total_tokens = prompt_tokens + completion_tokens
 
-            print(f"   ✅ Anthropic API call completed successfully")
+            print(f" Anthropic API call completed successfully")
 
             # Update progress by increment after successful API call
             if self.progress_callback:
@@ -556,14 +556,14 @@ class LLMFinancialAnalyzer:
             # Handle rate limit errors with retry logic
             if "rate_limit" in error_msg.lower() and retry_count < max_retries:
                 wait_time = 15
-                print(f"   ⚠️  Rate limit hit. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
+                print(f"  Rate limit hit. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
                 time.sleep(wait_time)
                 return self._call_anthropic(system_prompt, user_prompt, retry_count + 1, max_retries)
 
             # Handle timeout errors
             if "timeout" in error_msg.lower() and retry_count < max_retries:
                 wait_time = 5
-                print(f"   ⚠️  Request timed out. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
+                print(f"  Request timed out. Retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries})...")
                 time.sleep(wait_time)
                 return self._call_anthropic(system_prompt, user_prompt, retry_count + 1, max_retries)
 
@@ -592,26 +592,26 @@ class LLMFinancialAnalyzer:
         config: dict
     ) -> List[Dict[str, Any]]:
         """Analyze raw Excel file focusing on BS Breakdown and PL Breakdown sheets."""
-        logger.info(f"🔍 ===== STARTING RAW EXCEL ANALYSIS FOR {subsidiary} =====")
-        logger.info(f"📄 File: {filename}")
-        logger.info(f"📏 File Size: {len(excel_bytes):,} bytes ({len(excel_bytes)/1024:.1f} KB)")
-        logger.info(f"🤖 Model: {self.openai_model}")
+        logger.info(f"===== STARTING RAW EXCEL ANALYSIS FOR {subsidiary} =====")
+        logger.info(f"File: {filename}")
+        logger.info(f"File Size: {len(excel_bytes):,} bytes ({len(excel_bytes)/1024:.1f} KB)")
+        logger.info(f"Model: {self.openai_model}")
 
         try:
-            print(f"\n📋 STEP 1: Loading Raw Excel Sheets")
+            print(f"\nSTEP 1: Loading Raw Excel Sheets")
             # Get all sheet names and use fuzzy matching
-            print(f"   🔄 Reading Excel file structure...")
+            print(f" Reading Excel file structure...")
             excel_file = pd.ExcelFile(io.BytesIO(excel_bytes))
             sheet_names = excel_file.sheet_names
-            print(f"   📋 Found {len(sheet_names)} sheets: {sheet_names}")
+            print(f" Found {len(sheet_names)} sheets: {sheet_names}")
 
             # Use fuzzy matching to identify BS and PL sheets (no AI needed!)
-            print(f"   🔍 Using fuzzy matching to identify BS and PL sheets...")
+            print(f" Using fuzzy matching to identify BS and PL sheets...")
             from app.shared.utils.sheet_detection import find_sheet_fuzzy
             bs_sheet = find_sheet_fuzzy(sheet_names, is_balance_sheet=True)
             pl_sheet = find_sheet_fuzzy(sheet_names, is_balance_sheet=False)
 
-            print(f"   ✅ Fuzzy matching identified sheets:")
+            print(f" Fuzzy matching identified sheets:")
             print(f"      • BS Sheet: '{bs_sheet}'")
             print(f"      • PL Sheet: '{pl_sheet}'")
 
@@ -619,16 +619,16 @@ class LLMFinancialAnalyzer:
                 raise ValueError(f"Could not identify BS and PL sheets from: {sheet_names}. Please ensure sheets contain 'BS' or 'Balance' and 'PL' or 'Profit' in their names.")
 
             # Now read the identified sheets
-            print(f"   🔄 Reading BS sheet: '{bs_sheet}'...")
+            print(f" Reading BS sheet: '{bs_sheet}'...")
             bs_raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=bs_sheet, header=None, dtype=str)
-            print(f"   ✅ BS sheet loaded: {len(bs_raw)} rows, {len(bs_raw.columns)} columns")
+            print(f" BS sheet loaded: {len(bs_raw)} rows, {len(bs_raw.columns)} columns")
 
-            print(f"   🔄 Reading PL sheet: '{pl_sheet}'...")
+            print(f" Reading PL sheet: '{pl_sheet}'...")
             pl_raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=pl_sheet, header=None, dtype=str)
-            print(f"   ✅ PL sheet loaded: {len(pl_raw)} rows, {len(pl_raw.columns)} columns")
+            print(f" PL sheet loaded: {len(pl_raw)} rows, {len(pl_raw.columns)} columns")
 
-            print(f"\n📝 STEP 2: Converting to CSV for AI Analysis")
-            print(f"   🔄 Converting raw Excel data to CSV format...")
+            print(f"\nSTEP 2: Converting to CSV for AI Analysis")
+            print(f" Converting raw Excel data to CSV format...")
 
             # Convert raw DataFrames to CSV - keep all rows but optimize format
             # Remove completely empty rows and columns to reduce token usage
@@ -636,7 +636,7 @@ class LLMFinancialAnalyzer:
             pl_clean = pl_raw.dropna(how='all').dropna(axis=1, how='all')
 
             # OPTIMIZE: Filter only relevant account rows to reduce tokens
-            print(f"   🔧 Filtering relevant accounts to reduce token usage...")
+            print(f" Filtering relevant accounts to reduce token usage...")
             bs_filtered = self._filter_relevant_accounts(bs_clean, is_balance_sheet=True)
             pl_filtered = self._filter_relevant_accounts(pl_clean, is_balance_sheet=False)
 
@@ -647,51 +647,51 @@ class LLMFinancialAnalyzer:
             bs_csv = bs_filtered.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
             pl_csv = pl_filtered.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
 
-            print(f"   ✅ CSV conversion complete (optimized format):")
+            print(f" CSV conversion complete (optimized format):")
             print(f"      • BS CSV: {len(bs_csv):,} characters (from {len(bs_raw)} rows to {len(bs_filtered)} filtered rows)")
             print(f"      • PL CSV: {len(pl_csv):,} characters (from {len(pl_raw)} rows to {len(pl_filtered)} filtered rows)")
-            print(f"   📊 Sample of filtered BS accounts (first 5 non-header rows):")
+            print(f" Sample of filtered BS accounts (first 5 non-header rows):")
             for idx, row in bs_filtered.iloc[10:15].iterrows():
                 print(f"      Row {idx}: {list(row[:3])}...")
 
             # Debug: Show sample of CSV data
-            print(f"   🔍 Debug: BS CSV sample (first 500 chars):")
+            print(f" Debug: BS CSV sample (first 500 chars):")
             print(f"      {bs_csv[:500]}...")
-            print(f"   🔍 Debug: PL CSV sample (first 500 chars):")
+            print(f" Debug: PL CSV sample (first 500 chars):")
             print(f"      {pl_csv[:500]}...")
 
-            print(f"\n📝 STEP 3: Creating AI Analysis Prompt")
+            print(f"\nSTEP 3: Creating AI Analysis Prompt")
 
             # Check if data will exceed token limits and chunk if necessary
             estimated_prompt_length = len(bs_csv) + len(pl_csv) + 10000  # Add system prompt overhead
             estimated_tokens = estimated_prompt_length // 4
 
-            print(f"   📊 Token estimation:")
+            print(f" Token estimation:")
             print(f"      • Estimated prompt length: {estimated_prompt_length:,} characters")
             print(f"      • Estimated input tokens: {estimated_tokens:,}")
 
             # GPT-4o has 128k context window, but we have 30K TPM limit
             # For 22-rule analysis, we use three-step AI process for large data
             if estimated_tokens > 25000:  # Stay under 30K TPM limit
-                print(f"   ⚠️  Data large ({estimated_tokens:,} tokens), using three-step AI process...")
-                print(f"   📋 Step 1: AI will extract accounts from raw CSV in chunks (< 30K tokens each)")
-                print(f"   📋 Step 2: AI will consolidate and validate all extracted accounts")
-                print(f"   📋 Step 3: AI will apply 22 rules to validated account data")
+                print(f"  Data large ({estimated_tokens:,} tokens), using three-step AI process...")
+                print(f" Step 1: AI will extract accounts from raw CSV in chunks (< 30K tokens each)")
+                print(f" Step 2: AI will consolidate and validate all extracted accounts")
+                print(f" Step 3: AI will apply 22 rules to validated account data")
                 return self._analyze_with_three_step_process(bs_csv, pl_csv, subsidiary, filename, config)
 
             prompt = self._create_raw_excel_prompt(bs_csv, pl_csv, subsidiary, filename, config)
             prompt_length = len(prompt)
-            print(f"   ✅ Prompt generation complete:")
+            print(f" Prompt generation complete:")
             print(f"      • Total prompt length: {prompt_length:,} characters")
 
-            print(f"\n🤖 STEP 4: AI Model Processing")
+            print(f"\nSTEP 4: AI Model Processing")
             response = None
             options = None
             attempt = 1
 
             try:
                 print(f"   🚀 Attempt {attempt}: OpenAI GPT-4o processing")
-                print(f"   🔄 Sending complete raw Excel data to AI...")
+                print(f" Sending complete raw Excel data to AI...")
 
                 response = self._call_ai(
                     system_prompt=self._get_raw_excel_system_prompt(),
@@ -703,12 +703,12 @@ class LLMFinancialAnalyzer:
                     input_tokens = response.get('total_tokens', 0)
                     output_tokens = response.get('eval_count', 0)
                     total_tokens = response.get('total_tokens', 0)
-                    print(f"   📊 Token Usage:")
+                    print(f" Token Usage:")
                     print(f"      • Input tokens: {input_tokens:,}")
                     print(f"      • Output tokens: {output_tokens:,}")
                     print(f"      • Total tokens: {total_tokens:,}")
 
-                print(f"   ✅ AI analysis successful on attempt {attempt}")
+                print(f" AI analysis successful on attempt {attempt}")
 
             except Exception as e:
                 print(f"   ❌ AI analysis failed: {str(e)}")
@@ -726,9 +726,9 @@ class LLMFinancialAnalyzer:
                     "sheet_type": "Error"
                 }]
 
-            print(f"\n📄 STEP 5: Processing AI Response")
-            print(f"   🔍 Debug: Response type: {type(response)}")
-            print(f"   🔍 Debug: Response keys: {list(response.keys()) if response else 'None'}")
+            print(f"\nSTEP 5: Processing AI Response")
+            print(f" Debug: Response type: {type(response)}")
+            print(f" Debug: Response keys: {list(response.keys()) if response else 'None'}")
 
             if not response:
                 print(f"   ❌ Response is None or empty")
@@ -758,10 +758,10 @@ class LLMFinancialAnalyzer:
             total_output_tokens = response.get('eval_count', 0)
             total_tokens_used = response.get('total_tokens', 0)
 
-            print(f"   ✅ Response received successfully:")
+            print(f" Response received successfully:")
             print(f"      • Response length: {response_length:,} characters")
             if total_tokens_used > 0:
-                print(f"   📊 TOKEN USAGE:")
+                print(f" TOKEN USAGE:")
                 print(f"      • Input tokens:  {total_input_tokens:,}")
                 print(f"      • Output tokens: {total_output_tokens:,}")
                 print(f"      • TOTAL TOKENS:  {total_tokens_used:,}")
@@ -777,7 +777,7 @@ class LLMFinancialAnalyzer:
             print(f"\n🔍 STEP 6: JSON Parsing & Validation")
             anomalies = self._parse_llm_response(result, subsidiary)
 
-            print(f"   ✅ Parsing completed successfully:")
+            print(f" Parsing completed successfully:")
             print(f"      • Anomalies detected: {len(anomalies)}")
 
             print(f"\n🎉 ===== RAW EXCEL AI ANALYSIS COMPLETE FOR {subsidiary} =====")
@@ -823,8 +823,8 @@ class LLMFinancialAnalyzer:
         subsidiary: str,
         config: dict
     ) -> List[Dict[str, Any]]:
-        logger.info(f"🔍 ===== STARTING AI ANALYSIS FOR {subsidiary} =====")
-        logger.info("📊 Input Data Validation:")
+        logger.info(f"===== STARTING AI ANALYSIS FOR {subsidiary} =====")
+        logger.info("Input Data Validation:")
         logger.info(f"   • Balance Sheet: {len(bs_df)} rows, {len(bs_df.columns)} columns")
         logger.info(f"   • Profit & Loss: {len(pl_df)} rows, {len(pl_df.columns)} columns")
         logger.info(f"   • Model: {self.openai_model}")
@@ -842,25 +842,25 @@ class LLMFinancialAnalyzer:
         Returns a list of anomaly dictionaries.
         """
         # Step 1: Convert DataFrames to simple CSV format for AI
-        print(f"\n📋 STEP 1: Raw Data Preparation")
-        print(f"   🔄 Converting Excel data to CSV format for AI analysis...")
+        print(f"\nSTEP 1: Raw Data Preparation")
+        print(f" Converting Excel data to CSV format for AI analysis...")
 
         # Convert to simple CSV strings that AI can easily read
         bs_csv = bs_df.to_csv(index=False)
         pl_csv = pl_df.to_csv(index=False)
 
-        print(f"   ✅ Data conversion complete:")
+        print(f" Data conversion complete:")
         print(f"      • Balance Sheet: {len(bs_df)} rows, {len(bs_df.columns)} columns")
         print(f"      • P&L: {len(pl_df)} rows, {len(pl_df.columns)} columns")
         print(f"      • Full raw data passed to AI for comprehensive analysis")
 
         # Step 2: Create analysis prompt with raw data
-        print(f"\n📝 STEP 2: Prompt Generation")
-        print(f"   🔄 Building AI analysis prompt with full Excel data...")
+        print(f"\nSTEP 2: Prompt Generation")
+        print(f" Building AI analysis prompt with full Excel data...")
         prompt = self._create_raw_data_prompt(bs_csv, pl_csv, subsidiary, config)
         prompt_length = len(prompt)
         estimated_tokens = prompt_length // 4  # Rough estimate: 4 chars per token
-        print(f"   ✅ Prompt generation complete:")
+        print(f" Prompt generation complete:")
         print(f"      • Prompt length: {prompt_length:,} characters")
         print(f"      • Estimated input tokens: {estimated_tokens:,}")
 
@@ -872,7 +872,7 @@ class LLMFinancialAnalyzer:
 
         try:
             print(f"   🚀 Attempt {attempt}: OpenAI GPT processing")
-            print(f"   🔄 Sending request to OpenAI...")
+            print(f" Sending request to OpenAI...")
 
             response = self._call_ai(
                 system_prompt=self._get_system_prompt(),
@@ -884,19 +884,19 @@ class LLMFinancialAnalyzer:
                 input_tokens = response.get('total_tokens', 0)
                 output_tokens = response.get('eval_count', 0)
                 total_tokens = response.get('total_tokens', 0)
-                print(f"   📊 Token Usage:")
+                print(f" Token Usage:")
                 print(f"      • Input tokens: {input_tokens:,}")
                 print(f"      • Output tokens: {output_tokens:,}")
                 print(f"      • Total tokens: {total_tokens:,}")
 
-            print(f"   ✅ AI analysis successful on attempt {attempt}")
+            print(f" AI analysis successful on attempt {attempt}")
 
         except Exception as e1:
             attempt = 2
-            print(f"   ⚠️ Attempt 1 failed: {str(e1)[:100]}...")
+            print(f" Attempt 1 failed: {str(e1)[:100]}...")
             print(f"   🚀 Attempt {attempt}: Retry with OpenAI GPT-4o")
             try:
-                print(f"   🔄 Retrying with OpenAI API...")
+                print(f" Retrying with OpenAI API...")
 
                 response = self._call_ai(
                     system_prompt=self._get_raw_excel_system_prompt(),
@@ -908,19 +908,19 @@ class LLMFinancialAnalyzer:
                     input_tokens = response.get('total_tokens', 0)
                     output_tokens = response.get('eval_count', 0)
                     total_tokens = response.get('total_tokens', 0)
-                    print(f"   📊 Token Usage:")
+                    print(f" Token Usage:")
                     print(f"      • Input tokens: {input_tokens:,}")
                     print(f"      • Output tokens: {output_tokens:,}")
                     print(f"      • Total tokens: {total_tokens:,}")
 
-                print(f"   ✅ AI analysis successful on attempt {attempt}")
+                print(f" AI analysis successful on attempt {attempt}")
 
             except Exception as e2:
                 attempt = 3
-                print(f"   ⚠️ Attempt 2 failed: {str(e2)[:100]}...")
+                print(f" Attempt 2 failed: {str(e2)[:100]}...")
                 print(f"   🚀 Attempt {attempt}: Final retry with OpenAI GPT-4o")
                 try:
-                    print(f"   🔄 Final retry with OpenAI API...")
+                    print(f" Final retry with OpenAI API...")
 
                     response = self._call_ai(
                         system_prompt=self._get_raw_excel_system_prompt(),
@@ -932,12 +932,12 @@ class LLMFinancialAnalyzer:
                         input_tokens = response.get('total_tokens', 0)
                         output_tokens = response.get('eval_count', 0)
                         total_tokens = input_tokens + output_tokens
-                        print(f"   📊 Token Usage:")
+                        print(f" Token Usage:")
                         print(f"      • Input tokens: {input_tokens:,}")
                         print(f"      • Output tokens: {output_tokens:,}")
                         print(f"      • Total tokens: {total_tokens:,}")
 
-                    print(f"   ✅ AI analysis successful on attempt {attempt}")
+                    print(f" AI analysis successful on attempt {attempt}")
 
                 except Exception as e3:
                     print(f"   ❌ All attempts failed!")
@@ -973,13 +973,13 @@ class LLMFinancialAnalyzer:
             total_output_tokens = response.get('eval_count', 0)
             total_tokens_used = total_input_tokens + total_output_tokens
 
-            print(f"   ✅ Response received successfully:")
+            print(f" Response received successfully:")
             print(f"      • Response length: {response_length:,} characters")
             print(f"      • Estimated output tokens: {estimated_output_tokens:,}")
             print(f"      • Configuration used: ctx={options.get('num_ctx') if options else 'n/a'}, predict={options.get('num_predict') if options else 'n/a'}")
 
             if total_tokens_used > 0:
-                print(f"   📊 FINAL TOKEN SUMMARY:")
+                print(f" FINAL TOKEN SUMMARY:")
                 print(f"      • Total Input Tokens: {total_input_tokens:,}")
                 print(f"      • Total Output Tokens: {total_output_tokens:,}")
                 print(f"      • TOTAL TOKENS USED: {total_tokens_used:,}")
@@ -989,14 +989,14 @@ class LLMFinancialAnalyzer:
             # Debug: Check if response looks like JSON
             stripped = result.strip()
             if stripped.startswith('[') and stripped.endswith(']'):
-                print(f"   ✅ Response appears to be JSON array format")
+                print(f" Response appears to be JSON array format")
             elif '{' in stripped and '}' in stripped:
-                print(f"   ⚠️  Response contains JSON objects but may need format correction")
+                print(f"  Response contains JSON objects but may need format correction")
             else:
                 print(f"   🚨 Response does not appear to be JSON format - parsing may fail")
 
             print(f"\n🔍 STEP 5: JSON Parsing & Validation")
-            print(f"   🔄 Parsing AI response into structured anomaly data...")
+            print(f" Parsing AI response into structured anomaly data...")
 
             # Debug: Print the full AI response
             print(f"\n📄 ===== FULL AI RESPONSE =====")
@@ -1005,7 +1005,7 @@ class LLMFinancialAnalyzer:
 
             anomalies = self._parse_llm_response(result, subsidiary)
 
-            print(f"   ✅ Parsing completed successfully:")
+            print(f" Parsing completed successfully:")
             print(f"      • Anomalies detected: {len(anomalies)}")
             if anomalies:
                 print(f"      • Anomaly types: {', '.join(set(a.get('severity', 'Unknown') for a in anomalies))}")
@@ -1062,7 +1062,7 @@ class LLMFinancialAnalyzer:
 
         # Process BS chunks
         for i, bs_chunk in enumerate(bs_chunks, 1):
-            print(f"   🔄 Processing BS chunk {i}/{len(bs_chunks)}...")
+            print(f" Processing BS chunk {i}/{len(bs_chunks)}...")
             chunk_prompt = self._create_chunk_extraction_prompt(bs_chunk, "", subsidiary, filename, f"BS Chunk {i}")
 
             chunk_response = self._call_ai(
@@ -1078,7 +1078,7 @@ class LLMFinancialAnalyzer:
 
         # Process PL chunks
         for i, pl_chunk in enumerate(pl_chunks, 1):
-            print(f"   🔄 Processing PL chunk {i}/{len(pl_chunks)}...")
+            print(f" Processing PL chunk {i}/{len(pl_chunks)}...")
             chunk_prompt = self._create_chunk_extraction_prompt("", pl_chunk, subsidiary, filename, f"PL Chunk {i}")
 
             chunk_response = self._call_ai(
@@ -1092,23 +1092,23 @@ class LLMFinancialAnalyzer:
                 step1_total_tokens += chunk_response.get('total_tokens', 0)
                 print(f"      ✅ Extracted {len(extracted.get('accounts', []))} accounts")
 
-        print(f"   ✅ Step 1 complete: {len(all_extracted_accounts)} account entries from {len(bs_chunks) + len(pl_chunks)} chunks")
+        print(f" Step 1 complete: {len(all_extracted_accounts)} account entries from {len(bs_chunks) + len(pl_chunks)} chunks")
         print(f"      • Total Step 1 tokens: {step1_total_tokens:,}")
 
         # DEBUG: Show sample of extracted accounts
         if all_extracted_accounts:
-            print(f"   🔍 Debug: Sample extracted accounts (first 3):")
+            print(f" Debug: Sample extracted accounts (first 3):")
             for acc in all_extracted_accounts[:3]:
                 print(f"      {acc}")
         else:
-            print(f"   ⚠️  Warning: No accounts were extracted from any chunks!")
+            print(f"  Warning: No accounts were extracted from any chunks!")
 
         # ============================================================
         # STEP 2: CONSOLIDATION & VALIDATION
         # ============================================================
         print(f"\n   🔍 STEP 2: Consolidation & Validation")
         print(f"   ─────────────────────────────────────────")
-        print(f"   🔄 Consolidating {len(all_extracted_accounts)} extracted account entries...")
+        print(f" Consolidating {len(all_extracted_accounts)} extracted account entries...")
 
         consolidation_prompt = self._create_consolidation_prompt(all_extracted_accounts, subsidiary, filename)
 
@@ -1124,15 +1124,15 @@ class LLMFinancialAnalyzer:
             consolidated_text = step2_response['message']['content']
 
             # DEBUG: Show what AI returned
-            print(f"   🔍 Debug: Step 2 response length: {len(consolidated_text)} chars")
-            print(f"   🔍 Debug: Step 2 response preview (first 1000 chars):")
+            print(f" Debug: Step 2 response length: {len(consolidated_text)} chars")
+            print(f" Debug: Step 2 response preview (first 1000 chars):")
             print(f"      {consolidated_text[:1000]}")
 
             grouped_accounts = self._parse_extraction_response(consolidated_text)
 
             step2_tokens = step2_response.get('total_tokens', 0)
 
-            print(f"   ✅ Step 2 complete: Validated account groups")
+            print(f" Step 2 complete: Validated account groups")
             bs_accounts = grouped_accounts.get('bs_accounts', {})
             pl_accounts = grouped_accounts.get('pl_accounts', {})
             print(f"      • BS accounts: {len(bs_accounts)}")
@@ -1177,7 +1177,7 @@ class LLMFinancialAnalyzer:
         # ============================================================
         print(f"\n   🎯 STEP 3: Applying 22 Variance Analysis Rules")
         print(f"   ─────────────────────────────────────────")
-        print(f"   🔄 Sending consolidated accounts to AI for rule analysis...")
+        print(f" Sending consolidated accounts to AI for rule analysis...")
 
         step3_prompt = self._create_rule_application_prompt(grouped_accounts, subsidiary, filename, config)
 
@@ -1195,7 +1195,7 @@ class LLMFinancialAnalyzer:
 
             step3_tokens = step3_response.get('total_tokens', 0)
 
-            print(f"   ✅ Step 3 complete: {len(variances)} variance flags detected")
+            print(f" Step 3 complete: {len(variances)} variance flags detected")
             print(f"      • Step 3 tokens: {step3_tokens:,}")
 
             # Print detailed variance breakdown
@@ -1412,29 +1412,29 @@ The "analysis_type" field should match the rule ID and name from the 22 rules ab
         try:
             # Step 1: Load and prepare Excel data
             print(f"\n📊 STEP 1: Excel Data Loading & Preparation")
-            print(f"   🔄 Loading Excel file from bytes...")
+            print(f" Loading Excel file from bytes...")
 
             bs_raw, pl_raw = self._load_excel_sheets(excel_bytes)
             bs_clean, pl_clean = self._clean_data_for_ai(bs_raw, pl_raw, subsidiary)
 
             # Step 2: Convert to CSV for AI analysis
-            print(f"\n📝 STEP 2: CSV Conversion for AI Processing")
+            print(f"\nSTEP 2: CSV Conversion for AI Processing")
             bs_csv = bs_clean.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
             pl_csv = pl_clean.to_csv(index=False, header=True, quoting=1, float_format='%.0f')
 
-            print(f"   ✅ CSV conversion complete:")
+            print(f" CSV conversion complete:")
             print(f"      • BS CSV: {len(bs_csv):,} characters")
             print(f"      • PL CSV: {len(pl_csv):,} characters")
 
             # Step 3: Create specialized revenue analysis prompt
-            print(f"\n📝 STEP 3: Creating Comprehensive Revenue Analysis Prompt")
+            print(f"\nSTEP 3: Creating Comprehensive Revenue Analysis Prompt")
             prompt = self._create_revenue_analysis_prompt(bs_csv, pl_csv, subsidiary, filename, config)
             prompt_length = len(prompt)
-            print(f"   ✅ Prompt generation complete:")
+            print(f" Prompt generation complete:")
             print(f"      • Total prompt length: {prompt_length:,} characters")
 
             # Step 4: AI Model Processing
-            print(f"\n🤖 STEP 4: AI Revenue Analysis Processing")
+            print(f"\nSTEP 4: AI Revenue Analysis Processing")
             try:
                 print(f"   🚀 Sending comprehensive revenue analysis request to AI...")
 
@@ -1448,12 +1448,12 @@ The "analysis_type" field should match the rule ID and name from the 22 rules ab
                     input_tokens = response.get('total_tokens', 0)
                     output_tokens = response.get('eval_count', 0)
                     total_tokens = response.get('total_tokens', 0)
-                    print(f"   📊 Token Usage:")
+                    print(f" Token Usage:")
                     print(f"      • Input tokens: {input_tokens:,}")
                     print(f"      • Output tokens: {output_tokens:,}")
                     print(f"      • Total tokens: {total_tokens:,}")
 
-                print(f"   ✅ AI revenue analysis successful")
+                print(f" AI revenue analysis successful")
 
             except Exception as e:
                 print(f"   ❌ AI revenue analysis failed: {str(e)}")
@@ -1471,7 +1471,7 @@ The "analysis_type" field should match the rule ID and name from the 22 rules ab
                 }]
 
             # Step 5: Process AI Response
-            print(f"\n📄 STEP 5: Processing AI Revenue Analysis Response")
+            print(f"\nSTEP 5: Processing AI Revenue Analysis Response")
 
             if not response or 'message' not in response or not response['message'] or 'content' not in response['message']:
                 print(f"   ❌ Invalid response structure from OpenAI")
@@ -1480,7 +1480,7 @@ The "analysis_type" field should match the rule ID and name from the 22 rules ab
             result = response['message']['content'] or ""
             response_length = len(result)
 
-            print(f"   ✅ Response received successfully:")
+            print(f" Response received successfully:")
             print(f"      • Response length: {response_length:,} characters")
 
             # Debug: Print the full AI response
@@ -1491,7 +1491,7 @@ The "analysis_type" field should match the rule ID and name from the 22 rules ab
             # Parse the comprehensive revenue analysis response
             revenue_analysis = self._parse_revenue_analysis_response(result, subsidiary)
 
-            print(f"   ✅ Parsing completed successfully:")
+            print(f" Parsing completed successfully:")
             print(f"      • Analysis items generated: {len(revenue_analysis)}")
 
             print(f"\n🎉 ===== COMPREHENSIVE REVENUE ANALYSIS COMPLETE =====")
@@ -1944,7 +1944,7 @@ Return detailed JSON analysis with specific investigation steps and management q
                 base_explanation = anom.get("explanation", "") or ""
 
                 # Debug: Log what fields the AI actually returned
-                print(f"   🔍 Debug anomaly {i+1}: Available fields: {list(anom.keys())}")
+                print(f" Debug anomaly {i+1}: Available fields: {list(anom.keys())}")
                 print(f"       • current_value: {anom.get('current_value', 'MISSING')}")
                 print(f"       • previous_value: {anom.get('previous_value', 'MISSING')}")
                 print(f"       • change_amount: {anom.get('change_amount', 'MISSING')}")
@@ -2235,7 +2235,7 @@ Contains Analysis: {'Yes' if has_insights else 'No'}
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             print(f"   ❌ JSON parsing failed: {str(e)}")
-            print(f"   🔍 Response sample: {response[:500]}...")
+            print(f" Response sample: {response[:500]}...")
             return self._create_fallback_revenue_analysis(subsidiary)
 
     def _create_fallback_revenue_analysis(self, subsidiary: str) -> List[Dict[str, Any]]:
@@ -2257,3 +2257,4 @@ Contains Analysis: {'Yes' if has_insights else 'No'}
             }
         }]
 
+          

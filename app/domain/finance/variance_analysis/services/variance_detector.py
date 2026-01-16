@@ -2509,12 +2509,12 @@ def process_variance_analysis(
     if loan_interest_file:
         try:
             loan_filename, loan_bytes = loan_interest_file
-            print(f"📊 Parsing loan interest rate file: {loan_filename}")
+            print(f"Parsing loan interest rate file: {loan_filename}")
             loan_df = parse_loan_interest_file(loan_bytes)
             loan_rate_lookup = build_entity_rate_lookup(loan_df)
-            print(f"✅ Loaded interest rates for {len(loan_rate_lookup)} entities")
+            print(f"Loaded interest rates for {len(loan_rate_lookup)} entities")
         except Exception as e:
-            print(f"⚠️ Warning: Could not parse loan interest file: {e}")
+            print(f"Warning: Could not parse loan interest file: {e}")
             print("   Continuing with basic A2 analysis...")
             loan_rate_lookup = None
 
@@ -2576,7 +2576,7 @@ def process_variance_analysis(
                 file_obj.seek(0)
                 entity_name = extract_entity_from_file(file_obj)
                 if entity_name:
-                    print(f"📌 Extracted entity: {entity_name}")
+                    print(f"Extracted entity: {entity_name}")
 
             # Run variance rules (pass both entity-specific and full BS dataframes)
             # If loan_rate_lookup is available, enhanced A2 will be used
@@ -2604,7 +2604,7 @@ def process_variance_analysis(
 
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ Error processing file '{filename}': {error_msg}")
+            print(f"Error processing file '{filename}': {error_msg}")
 
             # Provide user-friendly error messages based on error type
             if "find sheet" in error_msg.lower() or "sheet" in error_msg.lower():
@@ -2647,8 +2647,8 @@ def process_variance_analysis(
         )
 
         # Always run 511 analysis when files are provided (user explicitly uploaded them)
-        print(f"📊 Account 511 drill-down: Revenue flag detected = {has_revenue_flag}")
-        print(f"📊 Running Account 511 analysis (files provided)...")
+        print(f"Account 511 drill-down: Revenue flag detected = {has_revenue_flag}")
+        print(f"Running Account 511 analysis (files provided)...")
 
         try:
             rev_filename, rev_bytes = revenue_breakdown_file
@@ -2660,13 +2660,13 @@ def process_variance_analysis(
                 revenue_breakdown_bytes=rev_bytes,
                 unit_for_lease_bytes=unit_bytes
             )
-            print(f"✅ Account 511 analysis complete:")
+            print(f"Account 511 analysis complete:")
             print(f"   • {len(account_511_result.sub_accounts)} sub-accounts analyzed")
             print(f"   • {len(account_511_result.by_project)} projects")
             print(f"   • {len(account_511_result.tenant_matches)} tenant matches")
             print(f"   • Total variance: {account_511_result.total_variance:,.0f} VND ({account_511_result.total_variance_pct:+.2f}%)")
         except Exception as e:
-            print(f"⚠️ Warning: Account 511 analysis failed: {e}")
+            print(f"Warning: Account 511 analysis failed: {e}")
             print("   Continuing without 511 drill-down...")
             account_511_result = None
 

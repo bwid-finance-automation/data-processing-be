@@ -38,7 +38,7 @@ async def seed_admin_user():
             existing_user = result.scalar_one_or_none()
 
             if existing_user:
-                logger.info(f"✅ Admin user '{username}' already exists, skipping seed")
+                logger.info(f"Admin user '{username}' already exists, skipping seed")
                 return False
 
             # Create new admin user
@@ -54,19 +54,19 @@ async def seed_admin_user():
             db.add(admin)
             await db.commit()
 
-            logger.info(f"✅ Created default admin user: {username} ({email})")
+            logger.info(f"Created default admin user: {username} ({email})")
             return True
 
         except Exception as e:
-            logger.error(f"❌ Failed to seed admin user: {e}")
+            logger.error(f"Failed to seed admin user: {e}")
             return False
 
 
 async def run_all_seeds():
     """Run all database seeds."""
-    logger.info("🌱 Running database seeds...")
+    logger.info("Running database seeds...")
 
     # Seed admin user
     await seed_admin_user()
 
-    logger.info("✅ Database seeding complete")
+    logger.info("Database seeding complete")

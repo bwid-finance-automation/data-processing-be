@@ -129,7 +129,7 @@ async def scheduled_cleanup_job():
     Scheduled job to clean up old files daily.
     Runs at 3AM every day to minimize impact on users.
     """
-    logger.info("🧹 Starting scheduled cleanup job...")
+    logger.info("Starting scheduled cleanup job...")
 
     try:
         from app.infrastructure.database.session import get_db
@@ -139,13 +139,13 @@ async def scheduled_cleanup_job():
             db_service = BankStatementDbService(db)
             stats = await db_service.cleanup_old_files(retention_days=7)
             logger.info(
-                f"✅ Scheduled cleanup completed: "
+                f"Scheduled cleanup completed: "
                 f"{stats['files_deleted']} files deleted, "
                 f"{stats.get('disk_space_freed', 0) / 1024 / 1024:.2f} MB freed"
             )
             break
     except Exception as e:
-        logger.error(f"❌ Scheduled cleanup failed: {e}")
+        logger.error(f"Scheduled cleanup failed: {e}")
 
     # Also cleanup FPA files
     try:
@@ -154,28 +154,28 @@ async def scheduled_cleanup_job():
 
         gla_use_case = GLAVarianceUseCase()
         gla_use_case.cleanup_old_files()
-        logger.info("✅ FPA file cleanup completed")
+        logger.info("FPA file cleanup completed")
     except Exception as e:
-        logger.warning(f"⚠️ FPA cleanup warning: {e}")
+        logger.warning(f"FPA cleanup warning: {e}")
 
 
 # Startup event for cleanup and database initialization
 @app.on_event("startup")
 async def startup_event():
     """Run cleanup and initialize database on startup"""
-    logger.info("🚀 Application starting up...")
+    logger.info("Application starting up...")
 
     # Initialize database connection
     try:
         from app.infrastructure.database import init_db
         await init_db()
-        logger.info("✅ Database initialized successfully")
+        logger.info("Database initialized successfully")
 
         # Seed default data (admin user, etc.)
         from app.infrastructure.database.seed import run_all_seeds
         await run_all_seeds()
     except Exception as e:
-        logger.warning(f"⚠️ Database initialization skipped: {e}")
+        logger.warning(f"Database initialization skipped: {e}")
         logger.info("   (Database features will be unavailable)")
 
     # Initialize Redis cache connection
@@ -183,11 +183,11 @@ async def startup_event():
         from app.infrastructure.cache.redis_cache import get_cache_service
         cache = await get_cache_service()
         if cache.is_connected:
-            logger.info("✅ Redis cache initialized successfully")
+            logger.info("Redis cache initialized successfully")
         else:
-            logger.info("⚠️ Redis not available, caching disabled")
+            logger.info("Redis not available, caching disabled")
     except Exception as e:
-        logger.warning(f"⚠️ Redis initialization skipped: {e}")
+        logger.warning(f"Redis initialization skipped: {e}")
         logger.info("   (Caching features will be unavailable)")
 
     # Cleanup old files (legacy use cases)
@@ -219,39 +219,39 @@ async def startup_event():
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("📅 Scheduled daily cleanup job at 3:00 AM")
+    logger.info("Scheduled daily cleanup job at 3:00 AM")
 
-    logger.info("✅ Startup complete")
+    logger.info("Startup complete")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    logger.info("🛑 Application shutting down...")
+    logger.info("Application shutting down...")
 
     # Stop the scheduler
     if scheduler.running:
         scheduler.shutdown(wait=False)
-        logger.info("⏹️ Scheduler stopped")
+        logger.info("Scheduler stopped")
 
     # Close database connections
     try:
         from app.infrastructure.database import close_db
         await close_db()
-        logger.info("✅ Database connections closed")
+        logger.info("Database connections closed")
     except Exception as e:
-        logger.warning(f"⚠️ Error closing database: {e}")
+        logger.warning(f"Error closing database: {e}")
 
     # Close Redis connection
     try:
         from app.infrastructure.cache.redis_cache import RedisCacheService
         if RedisCacheService._instance:
             await RedisCacheService._instance.close()
-            logger.info("✅ Redis connection closed")
+            logger.info("Redis connection closed")
     except Exception as e:
-        logger.warning(f"⚠️ Error closing Redis: {e}")
+        logger.warning(f"Error closing Redis: {e}")
 
-    logger.info("👋 Shutdown complete")
+    logger.info("Shutdown complete")
 
 # Root health check
 @app.get("/", tags=["Root"])
