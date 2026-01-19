@@ -434,3 +434,97 @@ def get_file_structure_user_prompt(file_data: Dict[str, Any]) -> str:
                 prompt_lines.append(f"  Column {dc['column_index']}: {dc['year']}-{dc['month']:02d}")
 
     return "\n".join(prompt_lines) + "\n\nAnalyze this structure and return the complete JSON response."
+
+
+# =============================================================================
+# NTM EBITDA VARIANCE ANALYSIS PROMPTS
+# =============================================================================
+
+NTM_EBITDA_SYSTEM_PROMPT = """You are a senior financial analyst specializing in industrial real estate in Vietnam.
+You are analyzing NTM (Next Twelve Months) EBITDA variance data for BW Industrial Development.
+
+Your role is to:
+1. Analyze changes in Contracted Revenue NTM between periods
+2. Identify key drivers of EBITDA variance (new signings, terminations, timing shifts)
+3. Provide business explanations for significant variances
+4. Identify portfolio trends and risks
+
+Key concepts:
+- NTM = Next Twelve Months projected revenue/EBITDA
+- Positive variance = NTM increased (new leases, expansions)
+- Negative variance = NTM decreased (terminations, expirations)
+- Significant variance threshold is typically 5%
+
+Common reasons for NTM changes:
+- New tenant signings
+- Lease terminations (early or normal expiry)
+- Lease renewals (may change unit price)
+- Timing shifts (handover dates moving)
+- Contract expansions
+- Price escalations
+
+When analyzing, focus on:
+- Materiality (changes > 5% of project NTM are significant)
+- Lease-level drivers with tenant names and GLA
+- Timing implications (when changes take effect)
+- Risk assessment (concentration, expiry profiles)"""
+
+
+NTM_COMMENTARY_SYSTEM_PROMPT = """You are generating concise professional commentary for NTM EBITDA variance.
+
+YOUR TASK:
+1. Analyze lease-level changes for each project
+2. Generate a single-line commentary explaining the variance
+3. Focus on: new signings, terminations, renewals, timing shifts
+
+COMMENTARY FORMAT:
+- Be concise (max 100 characters per project)
+- Include GLA in 'k sqm' format (e.g., "12k sqm")
+- Include tenant names
+- Include lease term for new signings (e.g., "10Y lease")
+- Include timing (e.g., "starting from Mar'26")
+
+EXAMPLES:
+- "New sign 12k sqm MP Material, 10Y lease starting from Mar'26"
+- "8k sqm will expire in Jul'26 (3k Yuxing, 3k Alltop, 2k Dain)"
+- "New tenants start from Nov'25: 12k sqm Precision, 2k sqm Wooin"
+- "20k sqm IFS early terminated by Sep'26"
+- "14k sqm Gemadept renewed with higher unit price from Nov'25"
+
+Return JSON array:
+[{"project_name": "X", "commentary": "..."}]
+
+Keep commentaries professional, specific, and actionable."""
+
+
+def get_ntm_commentary_prompt(results: List) -> str:
+    """
+    Create prompt for generating NTM EBITDA commentary.
+
+    Args:
+        results: List of NTMVarianceResult objects
+
+    Returns:
+        User prompt string for commentary generation
+    """
+    lines = ["Generate commentary for these NTM EBITDA variances:", ""]
+
+    for r in results:
+        lines.append(f"=== {r.project_name} ===")
+        lines.append(f"EBITDA Variance: {r.ebitda_variance/1e9:+.2f} Bn VND ({r.ebitda_variance_pct:+.1%})")
+        lines.append(f"Revenue: {r.revenue_previous/1e9:.2f} -> {r.revenue_current/1e9:.2f} Bn VND")
+
+        # Lease changes
+        if r.lease_changes:
+            lines.append("Lease Changes:")
+            for lc in r.lease_changes[:5]:  # Top 5 changes
+                lines.append(f"  - {lc.change_type.value.upper()}: {lc.tenant_name} ({lc.gla_sqm:,.0f} sqm)")
+                if lc.lease_start:
+                    lines.append(f"    Start: {lc.lease_start.strftime('%b %Y')}")
+                if lc.term_months:
+                    lines.append(f"    Term: {lc.term_months} months")
+
+        lines.append("")
+
+    lines.append("Return JSON array with project_name and commentary for each project.")
+    return "\n".join(lines)
