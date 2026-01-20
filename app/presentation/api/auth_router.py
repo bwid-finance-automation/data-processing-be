@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, get_auth_service, get_current_user
 from app.core.auth_config import get_auth_config
 from app.application.auth.auth_service import AuthService, AuthenticationError
+from app.application.auth.brute_force_service import AccountLockedError
 from app.infrastructure.database.models.user import UserModel
 from app.presentation.schemas.auth_schemas import (
     GoogleCallbackRequest,
@@ -77,6 +78,7 @@ async def login(
     Login with username and password.
 
     For admin accounts that have a local password set.
+    Returns HTTP 429 Too Many Requests if account is locked due to brute force protection.
     """
     try:
         result = await auth_service.authenticate_with_password(
@@ -94,6 +96,12 @@ async def login(
             user=UserResponse.model_validate(result.user),
         )
 
+    except AccountLockedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=e.message,
+            headers={"Retry-After": str(e.remaining_seconds)},
+        )
     except AuthenticationError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

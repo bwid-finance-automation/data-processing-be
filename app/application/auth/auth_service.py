@@ -19,6 +19,10 @@ from app.infrastructure.external.google_oauth import (
     get_google_oauth_client,
 )
 from app.application.auth.token_service import TokenService, get_token_service
+from app.application.auth.brute_force_service import (
+    get_brute_force_service,
+    AccountLockedError,
+)
 from app.shared.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -115,13 +119,29 @@ class AuthService:
 
         Raises:
             AuthenticationError: If authentication fails
+            AccountLockedError: If account is locked due to too many failed attempts
         """
+        # Get brute force service
+        bf_service = await get_brute_force_service()
+
+        # Check if account is locked BEFORE attempting authentication
+        if await bf_service.is_locked(username):
+            remaining = await bf_service.get_remaining_lockout_time(username)
+            remaining_minutes = (remaining // 60) + 1 if remaining else 15
+            raise AccountLockedError(
+                f"Account temporarily locked due to too many failed login attempts. "
+                f"Please try again in {remaining_minutes} minutes.",
+                remaining_seconds=remaining or 900,
+            )
+
         # Find user by username or email
         user = await self.user_repo.get_by_username(username)
         if not user:
             user = await self.user_repo.get_by_email(username)
 
         if not user:
+            # Record failed attempt even for non-existent users (prevents enumeration)
+            await bf_service.record_failed_attempt(username)
             raise AuthenticationError(
                 "Invalid username or password",
                 "INVALID_CREDENTIALS",
@@ -136,10 +156,23 @@ class AuthService:
 
         # Verify password
         if not verify_password(password, user.password_hash):
-            raise AuthenticationError(
-                "Invalid username or password",
-                "INVALID_CREDENTIALS",
-            )
+            # Record failed attempt
+            attempts = await bf_service.record_failed_attempt(username)
+            max_attempts = bf_service.config.max_failed_attempts
+            remaining = max_attempts - attempts
+
+            if remaining > 0:
+                raise AuthenticationError(
+                    f"Invalid username or password. {remaining} attempts remaining.",
+                    "INVALID_CREDENTIALS",
+                )
+            else:
+                # Account just got locked
+                raise AccountLockedError(
+                    f"Account locked due to too many failed login attempts. "
+                    f"Please try again in {bf_service.config.lockout_duration_minutes} minutes.",
+                    remaining_seconds=bf_service.config.lockout_duration_minutes * 60,
+                )
 
         # Check if user is active
         if not user.is_active:
@@ -147,6 +180,9 @@ class AuthService:
                 "Your account has been deactivated",
                 "ACCOUNT_DEACTIVATED",
             )
+
+        # SUCCESSFUL LOGIN - Reset brute force counter
+        await bf_service.reset_attempts(username)
 
         # Update last login
         await self.user_repo.update_last_login(user.id, ip_address)

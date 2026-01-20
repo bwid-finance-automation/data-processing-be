@@ -27,8 +27,9 @@ from app.application.finance.bank_statement_parser.parse_bank_statements import 
 from app.application.finance.bank_statement_parser.bank_parsers.parser_factory import ParserFactory
 from app.application.finance.bank_statement_parser.bank_statement_db_service import BankStatementDbService
 from app.application.finance.bank_statement_parser.gemini_ocr_service import GeminiOCRService
-from app.core.dependencies import get_bank_statement_db_service, get_ai_usage_repository
+from app.core.dependencies import get_bank_statement_db_service, get_ai_usage_repository, get_current_user
 from app.infrastructure.persistence.repositories import AIUsageRepository
+from app.infrastructure.database.models.user import UserModel
 from app.shared.utils.logging_config import get_logger
 from uuid import UUID as PyUUID
 
@@ -518,6 +519,7 @@ def _analyze_zip_contents(
 async def analyze_zip_contents(
     file: UploadFile = File(..., description="ZIP file to analyze"),
     password: Optional[str] = Form(None, description="Password for encrypted ZIP file"),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Analyze the contents of a ZIP file before parsing.
@@ -549,6 +551,7 @@ async def analyze_zip_contents(
 async def verify_zip_password(
     file: UploadFile = File(..., description="ZIP file to verify password"),
     password: str = Form(..., description="Password to verify"),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Verify if the provided password is correct for an encrypted ZIP file.
@@ -600,6 +603,7 @@ async def parse_bank_statements(
     max_concurrent: Optional[int] = Form(None, description="Maximum number of concurrent PDF file processing (default: 3). Only used when sequential=false."),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
     ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Parse multiple bank statement files in batch.
@@ -970,6 +974,7 @@ async def parse_bank_statements_pdf(
     max_concurrent: Optional[int] = Form(None, description="Maximum number of concurrent file processing (default: 3). Only used when sequential=false. Set to 1 for pseudo-sequential processing."),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
     ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Parse multiple bank statement PDF files using Gemini Flash OCR.
@@ -1293,7 +1298,10 @@ async def parse_bank_statements_pdf(
 
 
 @router.get("/download/{session_id}", summary="Download Excel Output")
-def download_excel(session_id: str):
+async def download_excel(
+    session_id: str,
+    current_user: UserModel = Depends(get_current_user),
+):
     if session_id not in _file_storage:
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
@@ -1313,6 +1321,7 @@ def download_excel(session_id: str):
 async def download_excel_from_history(
     session_id: str,
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     # ... (giữ nguyên code cũ)
     from app.domain.finance.bank_statement_parser.models.bank_transaction import BankTransaction
@@ -1415,6 +1424,7 @@ async def download_excel_from_history(
 @router.get("/storage/stats", summary="Get Storage Statistics")
 async def get_storage_stats(
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """Get storage statistics for uploaded files."""
     try:
@@ -1432,6 +1442,7 @@ async def get_storage_stats(
 async def cleanup_old_files(
     retention_days: int = 7,
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """Manually trigger cleanup of old uploaded files (default: 7 days)."""
     try:
@@ -1449,6 +1460,7 @@ async def cleanup_old_files(
 async def list_uploaded_files_by_session(
     session_id: str,
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """List all uploaded files for a specific session."""
     try:
@@ -1478,6 +1490,7 @@ async def list_uploaded_files_by_session(
 async def get_session_details(
     session_id: str,
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get detailed information about a parsing session.
@@ -1625,6 +1638,7 @@ async def get_session_details(
 async def download_uploaded_file(
     file_id: int,
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """Download a previously uploaded file by ID."""
     try:

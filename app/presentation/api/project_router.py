@@ -6,7 +6,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.application.project.project_service import ProjectService
-from app.core.dependencies import get_project_service
+from app.core.dependencies import get_project_service, get_current_user
+from app.infrastructure.database.models.user import UserModel
 from app.presentation.schemas.project_schemas import (
     ProjectCreateRequest,
     ProjectUpdateRequest,
@@ -32,6 +33,7 @@ async def debug_project_hash(
     project_uuid: UUID,
     test_password: str = Query(..., description="Password to test"),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """Debug endpoint to check password hash."""
     project = await service.get_project(project_uuid)
@@ -54,6 +56,7 @@ async def debug_project_hash(
 async def create_project(
     request: ProjectCreateRequest,
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Create a new project.
@@ -77,6 +80,7 @@ async def list_projects(
     limit: int = Query(50, ge=1, le=100, description="Maximum number of records"),
     search: Optional[str] = Query(None, description="Search by project name"),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     List all projects with pagination.
@@ -97,6 +101,7 @@ async def search_projects(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(10, ge=1, le=50, description="Maximum results"),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Quick search projects by name.
@@ -118,6 +123,7 @@ async def search_projects(
 async def get_project(
     project_uuid: UUID,
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get project details including all cases.
@@ -146,6 +152,7 @@ async def update_project(
     project_uuid: UUID,
     request: ProjectUpdateRequest,
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Update project details.
@@ -186,6 +193,7 @@ async def delete_project(
     project_uuid: UUID,
     request: ProjectDeleteRequest,
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Delete a project and all its cases.
@@ -228,6 +236,7 @@ async def set_project_password(
     project_uuid: UUID,
     request: ProjectSetPasswordRequest,
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Set or remove project password.
@@ -266,6 +275,7 @@ async def verify_project_password(
     project_uuid: UUID,
     request: ProjectVerifyPasswordRequest,
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Verify project password.
@@ -304,6 +314,7 @@ async def verify_project_password(
 async def get_project_cases(
     project_uuid: UUID,
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get all cases for a project.
@@ -325,6 +336,7 @@ async def get_bank_statement_case(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get bank statement parse sessions for a project.
@@ -364,6 +376,7 @@ async def get_contract_case(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get contract OCR processing sessions for a project.
@@ -403,6 +416,7 @@ async def get_gla_case(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get GLA variance analysis sessions for a project.
@@ -441,6 +455,7 @@ async def get_variance_case(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get variance analysis sessions for a project.
@@ -479,6 +494,7 @@ async def get_utility_billing_case(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get utility billing sessions for a project.
@@ -517,6 +533,7 @@ async def get_excel_comparison_case(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     service: ProjectService = Depends(get_project_service),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get excel comparison sessions for a project.

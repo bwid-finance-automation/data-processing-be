@@ -287,6 +287,28 @@ class FileProcessingConfig(BaseSettings):
         description="Required sheet names in Excel files"
     )
 
+class BruteForceConfig(BaseSettings):
+    """Brute force protection configuration section."""
+    model_config = SettingsConfigDict(env_prefix="BRUTE_FORCE_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable/disable brute force protection"
+    )
+    max_failed_attempts: int = Field(
+        default=5,
+        description="Maximum failed login attempts before lockout",
+        ge=1,
+        le=100
+    )
+    lockout_duration_minutes: int = Field(
+        default=15,
+        description="Account lockout duration in minutes",
+        ge=1,
+        le=1440  # 24 hours max
+    )
+
+
 class SecurityConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VARIANCE_SECURITY__")
     """Security and session management configuration section."""
@@ -595,6 +617,7 @@ class UnifiedConfig(BaseSettings):
     file_processing: FileProcessingConfig = Field(default_factory=FileProcessingConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     data_processing: DataProcessingConfig = Field(default_factory=DataProcessingConfig)
+    brute_force: BruteForceConfig = Field(default_factory=BruteForceConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="VARIANCE_",
