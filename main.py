@@ -52,6 +52,7 @@ from app.presentation.api.finance import contract_ocr_router
 from app.presentation.api.finance import bank_statement_parser_router
 from app.presentation.api.fpa import excel_comparison_router
 from app.presentation.api.fpa import gla_variance_router
+from app.presentation.api.fpa import ntm_ebitda_router
 from app.presentation.api import ai_usage_router
 from app.presentation.api import auth_router
 from app.presentation.api import system_settings_router
@@ -59,6 +60,7 @@ from app.presentation.api import system_settings_router
 # Import FPA use cases for startup cleanup
 from app.application.fpa.excel_comparison.compare_excel_files import CompareExcelFilesUseCase
 from app.application.fpa.gla_variance.gla_variance_use_case import GLAVarianceUseCase
+from app.application.fpa.ntm_ebitda.ntm_ebitda_use_case import NTMEBITDAUseCase
 
 # Create the root application
 app = FastAPI(
@@ -109,6 +111,7 @@ app.include_router(bank_statement_parser_router.router, prefix="/api/finance")
 # Include FP&A Department routers with /api prefix (already have /fpa prefix in routers)
 app.include_router(excel_comparison_router.router, prefix="/api")
 app.include_router(gla_variance_router.router, prefix="/api")
+app.include_router(ntm_ebitda_router.router, prefix="/api")
 
 # Include AI Usage tracking router
 app.include_router(ai_usage_router.router, prefix="/api", tags=["AI Usage"])
@@ -154,6 +157,9 @@ async def scheduled_cleanup_job():
 
         gla_use_case = GLAVarianceUseCase()
         gla_use_case.cleanup_old_files()
+
+        ntm_use_case = NTMEBITDAUseCase()
+        ntm_use_case.cleanup_old_files()
         logger.info("FPA file cleanup completed")
     except Exception as e:
         logger.warning(f"FPA cleanup warning: {e}")
@@ -196,6 +202,9 @@ async def startup_event():
 
     gla_use_case = GLAVarianceUseCase()
     gla_use_case.cleanup_old_files()
+
+    ntm_use_case = NTMEBITDAUseCase()
+    ntm_use_case.cleanup_old_files()
 
     # Cleanup old bank statement uploads (7 days retention)
     try:
@@ -284,7 +293,7 @@ def root():
                 ]
             },
             "fpa": {
-                "description": "FP&A Excel Comparison & GLA Variance Analysis",
+                "description": "FP&A Excel Comparison, GLA Variance & NTM EBITDA Analysis",
                 "endpoints": [
                     "/api/fpa/health",
                     "/api/fpa/compare",
@@ -293,7 +302,12 @@ def root():
                     "/api/fpa/gla-variance/health",
                     "/api/fpa/gla-variance/analyze",
                     "/api/fpa/gla-variance/files",
-                    "/api/fpa/gla-variance/download/{filename}"
+                    "/api/fpa/gla-variance/download/{filename}",
+                    "/api/fpa/ntm-ebitda/health",
+                    "/api/fpa/ntm-ebitda/analyze",
+                    "/api/fpa/ntm-ebitda/detect-sheets",
+                    "/api/fpa/ntm-ebitda/files",
+                    "/api/fpa/ntm-ebitda/download/{filename}"
                 ]
             }
         },

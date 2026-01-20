@@ -3,6 +3,7 @@ uvicorn[standard]==0.30.6
 pandas==2.2.3
 numpy==2.1.2
 openpyxl==3.1.5
+pyxlsb>=1.0.10
 xlwings
 psutil
 xlrd

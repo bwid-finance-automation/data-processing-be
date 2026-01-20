@@ -18,6 +18,10 @@ from .fpa_prompts import (
     get_variance_user_prompt,
     get_notes_user_prompt,
     get_file_structure_user_prompt,
+    # NTM EBITDA Variance Analysis
+    NTM_EBITDA_SYSTEM_PROMPT,
+    NTM_COMMENTARY_SYSTEM_PROMPT,
+    get_ntm_commentary_prompt,
 )
 
 from .finance_prompts import (
@@ -41,7 +45,7 @@ from .finance_prompts import (
 )
 
 __all__ = [
-    # FPA Prompts
+    # FPA Prompts - GLA Variance
     "GLA_VARIANCE_SYSTEM_PROMPT",
     "GLA_NOTES_SYSTEM_PROMPT",
     "GLA_FILE_STRUCTURE_SYSTEM_PROMPT",
@@ -49,6 +53,10 @@ __all__ = [
     "get_variance_user_prompt",
     "get_notes_user_prompt",
     "get_file_structure_user_prompt",
+    # FPA Prompts - NTM EBITDA
+    "NTM_EBITDA_SYSTEM_PROMPT",
+    "NTM_COMMENTARY_SYSTEM_PROMPT",
+    "get_ntm_commentary_prompt",
     # Finance Prompts - Contract OCR
     "CONTRACT_EXTRACTION_SYSTEM_PROMPT",
     "get_contract_extraction_prompt",
