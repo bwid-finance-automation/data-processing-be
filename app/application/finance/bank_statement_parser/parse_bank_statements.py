@@ -532,7 +532,9 @@ class ParseBankStatementsUseCase:
 
     async def execute_from_pdf(
         self,
-        pdf_inputs: List[Tuple[str, bytes, Optional[str], Optional[str]]]
+        pdf_inputs: List[Tuple[str, bytes, Optional[str], Optional[str]]],
+        sequential: bool = False,
+        max_concurrent: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Parse multiple bank statements from PDF files using Gemini OCR (async).
@@ -544,6 +546,10 @@ class ParseBankStatementsUseCase:
             pdf_inputs: List of (file_name, pdf_bytes, bank_code, password) tuples
                         bank_code can be None for auto-detection
                         password can be None for non-encrypted PDFs
+            sequential: If True, process files one by one instead of concurrently.
+                       Recommended when uploading many files to avoid rate limits.
+            max_concurrent: Maximum concurrent requests (default: 3).
+                           Only used when sequential=False.
 
         Returns:
             Dictionary with same structure as execute():
@@ -558,7 +564,11 @@ class ParseBankStatementsUseCase:
 
         # Step 1: Extract text from all PDFs using Gemini (async with caching)
         pdf_files = [(file_name, pdf_bytes, password) for file_name, pdf_bytes, _, password in pdf_inputs]
-        ocr_results, ocr_metrics = await gemini_service.extract_text_from_pdf_batch(pdf_files)
+        ocr_results, ocr_metrics = await gemini_service.extract_text_from_pdf_batch(
+            pdf_files,
+            sequential=sequential,
+            max_concurrent=max_concurrent
+        )
 
         # Step 2: Build text_inputs for execute_from_text
         text_inputs: List[Tuple[str, str, str]] = []

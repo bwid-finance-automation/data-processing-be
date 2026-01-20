@@ -596,6 +596,8 @@ async def parse_bank_statements(
     zip_passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted ZIP files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted ZIPs."),
     zip_pdf_passwords: Optional[str] = Form(None, description="JSON object mapping PDF filenames inside ZIP to passwords (e.g., '{\"file1.pdf\": \"pass1\", \"file2.pdf\": \"pass2\"}'). Use this for password-protected PDFs inside ZIP files."),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
+    sequential: bool = Form(True, description="Process PDF files one by one (default). Set to false for concurrent processing."),
+    max_concurrent: Optional[int] = Form(None, description="Maximum number of concurrent PDF file processing (default: 3). Only used when sequential=false."),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
     ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
@@ -732,7 +734,11 @@ async def parse_bank_statements(
 
         # Process PDF files (from ZIP)
         if pdf_files:
-            pdf_result = await use_case.execute_from_pdf(pdf_files)
+            pdf_result = await use_case.execute_from_pdf(
+                pdf_files,
+                sequential=sequential,
+                max_concurrent=max_concurrent
+            )
             combined_result["statements"].extend(pdf_result["statements"])
             combined_result["all_transactions"].extend(pdf_result["all_transactions"])
             combined_result["all_balances"].extend(pdf_result["all_balances"])
@@ -960,6 +966,8 @@ async def parse_bank_statements_pdf(
     zip_passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted ZIP files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted ZIPs."),
     zip_pdf_passwords: Optional[str] = Form(None, description="JSON object mapping PDF filenames inside ZIP to passwords (e.g., '{\"file1.pdf\": \"pass1\", \"file2.pdf\": \"pass2\"}'). Use this for password-protected PDFs inside ZIP files."),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
+    sequential: bool = Form(True, description="Process PDF files one by one (default). Set to false for concurrent processing."),
+    max_concurrent: Optional[int] = Form(None, description="Maximum number of concurrent file processing (default: 3). Only used when sequential=false. Set to 1 for pseudo-sequential processing."),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
     ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
@@ -1075,7 +1083,11 @@ async def parse_bank_statements_pdf(
 
         # Parse using use case
         use_case = ParseBankStatementsUseCase()
-        result = await use_case.execute_from_pdf(pdf_inputs)
+        result = await use_case.execute_from_pdf(
+            pdf_inputs,
+            sequential=sequential,
+            max_concurrent=max_concurrent
+        )
 
         # Add ZIP extraction errors to result
         if zip_errors:

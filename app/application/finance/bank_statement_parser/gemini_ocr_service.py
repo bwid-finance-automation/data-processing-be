@@ -365,17 +365,24 @@ Output the extracted text:"""
 
     async def extract_text_from_pdf_batch(
         self,
-        pdf_files: List[Tuple[str, bytes, Optional[str]]]
+        pdf_files: List[Tuple[str, bytes, Optional[str]]],
+        sequential: bool = False,
+        max_concurrent: Optional[int] = None
     ) -> Tuple[List[Tuple[str, str, Optional[str]]], OCRBatchMetrics]:
         """
-        Extract text from multiple PDF files concurrently.
+        Extract text from multiple PDF files.
 
-        This method processes multiple PDFs in parallel using asyncio.gather(),
-        with a semaphore to limit concurrent Gemini API calls.
+        This method supports both concurrent and sequential processing:
+        - Concurrent (default): Uses asyncio.gather() with semaphore limiting
+        - Sequential: Processes one file at a time (safer for many files)
 
         Args:
             pdf_files: List of (file_name, pdf_bytes, password) tuples
                        password can be None for non-encrypted PDFs
+            sequential: If True, process files one by one instead of concurrently.
+                       Recommended when uploading many files to avoid rate limits.
+            max_concurrent: Maximum concurrent requests (default: MAX_CONCURRENT_REQUESTS=3).
+                           Only used when sequential=False. Set to 1 for pseudo-sequential.
 
         Returns:
             Tuple of:
@@ -383,6 +390,14 @@ Output the extracted text:"""
             - OCRBatchMetrics with aggregated usage statistics
         """
         batch_metrics = OCRBatchMetrics(model_name=self.model_name)
+
+        # Determine concurrency limit
+        concurrency_limit = max_concurrent if max_concurrent is not None else self.MAX_CONCURRENT_REQUESTS
+
+        logger.info(
+            f"Processing {len(pdf_files)} PDF files "
+            f"(sequential={sequential}, max_concurrent={concurrency_limit})"
+        )
 
         async def process_single(
             file_name: str, pdf_bytes: bytes, password: Optional[str]
@@ -401,31 +416,68 @@ Output the extracted text:"""
                 )
                 return (file_name, "", str(e), failed_metrics)
 
-        # Process all files concurrently
-        tasks = [
-            process_single(file_name, pdf_bytes, password)
-            for file_name, pdf_bytes, password in pdf_files
-        ]
-
-        processed = await asyncio.gather(*tasks)
-
-        # Aggregate results
         results = []
-        for file_name, text, error, metrics in processed:
-            batch_metrics.files_processed += 1
-            results.append((file_name, text, error))
-            batch_metrics.file_metrics.append(metrics)
 
-            if error:
-                batch_metrics.files_failed += 1
-            else:
-                batch_metrics.files_successful += 1
-                batch_metrics.total_input_tokens += metrics.input_tokens
-                batch_metrics.total_output_tokens += metrics.output_tokens
-                batch_metrics.total_tokens += metrics.total_tokens
-                batch_metrics.total_processing_time_ms += metrics.processing_time_ms
+        if sequential:
+            # Sequential processing: one file at a time
+            for file_name, pdf_bytes, password in pdf_files:
+                logger.info(f"Processing file {batch_metrics.files_processed + 1}/{len(pdf_files)}: {file_name}")
+                result = await process_single(file_name, pdf_bytes, password)
+                file_name, text, error, metrics = result
 
-                if metrics.cache_hit:
-                    batch_metrics.cache_hits += 1
+                batch_metrics.files_processed += 1
+                results.append((file_name, text, error))
+                batch_metrics.file_metrics.append(metrics)
+
+                if error:
+                    batch_metrics.files_failed += 1
+                else:
+                    batch_metrics.files_successful += 1
+                    batch_metrics.total_input_tokens += metrics.input_tokens
+                    batch_metrics.total_output_tokens += metrics.output_tokens
+                    batch_metrics.total_tokens += metrics.total_tokens
+                    batch_metrics.total_processing_time_ms += metrics.processing_time_ms
+
+                    if metrics.cache_hit:
+                        batch_metrics.cache_hits += 1
+        else:
+            # Concurrent processing with semaphore
+            semaphore = asyncio.Semaphore(concurrency_limit)
+
+            async def process_with_semaphore(
+                file_name: str, pdf_bytes: bytes, password: Optional[str]
+            ) -> Tuple[str, str, Optional[str], OCRUsageMetrics]:
+                async with semaphore:
+                    return await process_single(file_name, pdf_bytes, password)
+
+            tasks = [
+                process_with_semaphore(file_name, pdf_bytes, password)
+                for file_name, pdf_bytes, password in pdf_files
+            ]
+
+            processed = await asyncio.gather(*tasks)
+
+            # Aggregate results
+            for file_name, text, error, metrics in processed:
+                batch_metrics.files_processed += 1
+                results.append((file_name, text, error))
+                batch_metrics.file_metrics.append(metrics)
+
+                if error:
+                    batch_metrics.files_failed += 1
+                else:
+                    batch_metrics.files_successful += 1
+                    batch_metrics.total_input_tokens += metrics.input_tokens
+                    batch_metrics.total_output_tokens += metrics.output_tokens
+                    batch_metrics.total_tokens += metrics.total_tokens
+                    batch_metrics.total_processing_time_ms += metrics.processing_time_ms
+
+                    if metrics.cache_hit:
+                        batch_metrics.cache_hits += 1
+
+        logger.info(
+            f"Batch processing complete: {batch_metrics.files_successful} successful, "
+            f"{batch_metrics.files_failed} failed out of {batch_metrics.files_processed} files"
+        )
 
         return results, batch_metrics
