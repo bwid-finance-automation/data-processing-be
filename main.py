@@ -22,6 +22,7 @@ import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.exceptions import RequestValidationError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -92,6 +93,9 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+# Add GZip compression for responses > 1KB (reduces response size by 70-90%)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Register exception handlers for user-friendly error messages
 app.add_exception_handler(AnalysisError, analysis_error_handler)

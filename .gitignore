@@ -1,5 +1,7 @@
-# Environment
+# Environment - NEVER commit actual secrets
 .env
+.env.*
+!.env.example
 venv/
 
 # Python

@@ -26,30 +26,6 @@ from app.presentation.schemas.project_schemas import (
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
 
-# ============== Debug endpoint (remove in production) ==============
-
-@router.get("/{project_uuid}/debug-hash")
-async def debug_project_hash(
-    project_uuid: UUID,
-    test_password: str = Query(..., description="Password to test"),
-    service: ProjectService = Depends(get_project_service),
-    current_user: UserModel = Depends(get_current_user),
-):
-    """Debug endpoint to check password hash."""
-    project = await service.get_project(project_uuid)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    input_hash = ProjectService.hash_password(test_password)
-    return {
-        "project_uuid": str(project_uuid),
-        "is_protected": project.is_protected,
-        "stored_hash": project.password_hash,
-        "input_hash": input_hash,
-        "match": input_hash == project.password_hash if project.password_hash else None,
-    }
-
-
 # ============== Project CRUD ==============
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -280,9 +256,6 @@ async def verify_project_password(
     """
     Verify project password.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
     project = await service.get_project(project_uuid)
     if not project:
         raise HTTPException(
@@ -293,14 +266,7 @@ async def verify_project_password(
     if not project.is_protected:
         return ProjectVerifyResponse(verified=True, message="Project is not protected")
 
-    # Debug logging
-    input_hash = ProjectService.hash_password(request.password)
-    logger.info(f"Verify password for project {project_uuid}")
-    logger.info(f"Input password hash: {input_hash[:20]}...")
-    logger.info(f"Stored password hash: {project.password_hash[:20] if project.password_hash else 'None'}...")
-
     verified = ProjectService.verify_password(request.password, project.password_hash)
-    logger.info(f"Verification result: {verified}")
 
     return ProjectVerifyResponse(
         verified=verified,

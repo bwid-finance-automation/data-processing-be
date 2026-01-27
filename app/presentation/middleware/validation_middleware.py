@@ -2,7 +2,7 @@
 """Validation middleware for API endpoints."""
 
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from fastapi import Request, Response, HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -13,15 +13,24 @@ from app.shared.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Global rate limiter instance (lazy initialized)
+_rate_limiter: Optional[Any] = None
+
+
 class ValidationMiddleware(BaseHTTPMiddleware):
-    """Middleware to validate requests and enhance security."""
+    """Middleware to validate requests and enhance security.
+
+    Uses Redis-based rate limiting when available, falls back to in-memory
+    storage when Redis is unavailable. This ensures rate limiting works
+    correctly across multiple server instances.
+    """
 
     def __init__(self, app, max_request_size: int = 100 * 1024 * 1024):  # 100MB
         super().__init__(app)
         self.max_request_size = max_request_size
-        self.request_counts: Dict[str, list] = {}  # Simple rate limiting
         self.rate_limit_window = 60  # 1 minute
         self.max_requests_per_minute = 100
+        self._rate_limiter_initialized = False
 
     async def dispatch(self, request: Request, call_next):
         """Process request through validation middleware."""
@@ -106,35 +115,57 @@ class ValidationMiddleware(BaseHTTPMiddleware):
                 )
 
     async def _check_rate_limit(self, request: Request) -> None:
-        """Simple rate limiting by client IP."""
+        """Rate limiting by client IP using Redis (with in-memory fallback).
+
+        Uses distributed rate limiting via Redis when available to ensure
+        consistent rate limiting across multiple server instances.
+        Falls back to in-memory storage when Redis is unavailable.
+        """
+        global _rate_limiter
+
         client_ip = self._get_client_ip(request)
-        current_time = time.time()
 
-        # Initialize or clean old requests for this IP
-        if client_ip not in self.request_counts:
-            self.request_counts[client_ip] = []
+        # Lazy initialize the rate limiter
+        if not self._rate_limiter_initialized:
+            try:
+                from app.infrastructure.cache.rate_limiter import RateLimiter
+                _rate_limiter = await RateLimiter.get_instance(
+                    requests_per_minute=self.max_requests_per_minute,
+                    window_seconds=self.rate_limit_window,
+                )
+                self._rate_limiter_initialized = True
+            except Exception as e:
+                logger.warning(f"Failed to initialize rate limiter: {e}")
+                self._rate_limiter_initialized = True  # Don't retry
 
-        # Remove requests older than the window
-        self.request_counts[client_ip] = [
-            req_time for req_time in self.request_counts[client_ip]
-            if current_time - req_time < self.rate_limit_window
-        ]
+        # Check rate limit
+        if _rate_limiter:
+            try:
+                is_allowed, current_count, remaining = await _rate_limiter.is_allowed(client_ip)
 
-        # Check if rate limit exceeded
-        if len(self.request_counts[client_ip]) >= self.max_requests_per_minute:
-            logger.warning(f"Rate limit exceeded for IP: {client_ip}", extra={
-                "client_ip": client_ip,
-                "request_count": len(self.request_counts[client_ip]),
-                "path": request.url.path
-            })
+                if not is_allowed:
+                    logger.warning(f"Rate limit exceeded for IP: {client_ip}", extra={
+                        "client_ip": client_ip,
+                        "request_count": current_count,
+                        "path": request.url.path,
+                        "backend": "redis" if _rate_limiter.is_redis_available else "memory"
+                    })
 
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many requests. Please wait a moment and try again."
-            )
-
-        # Add current request timestamp
-        self.request_counts[client_ip].append(current_time)
+                    raise HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail="Too many requests. Please wait a moment and try again.",
+                        headers={
+                            "Retry-After": str(self.rate_limit_window),
+                            "X-RateLimit-Limit": str(self.max_requests_per_minute),
+                            "X-RateLimit-Remaining": str(remaining),
+                            "X-RateLimit-Reset": str(self.rate_limit_window),
+                        }
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                # Log but don't block the request if rate limiting fails
+                logger.error(f"Rate limit check failed: {e}")
 
     async def _validate_content_type(self, request: Request) -> None:
         """Validate content type for specific endpoints."""

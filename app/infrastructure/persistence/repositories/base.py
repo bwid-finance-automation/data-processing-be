@@ -172,11 +172,11 @@ class BaseRepository(Generic[ModelType]):
         if not hasattr(self.model, 'is_deleted'):
             raise AttributeError(f"{self.model.__name__} does not support soft delete")
 
-        from datetime import datetime
+        from app.shared.utils.datetime_utils import utc_now
         return await self.update(
             id,
             is_deleted=True,
-            deleted_at=datetime.utcnow()
+            deleted_at=utc_now()
         )
 
     async def count(self) -> int:
