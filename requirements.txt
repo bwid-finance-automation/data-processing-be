@@ -47,3 +47,6 @@ apscheduler>=3.10.0
 
 # Caching
 redis>=5.0.0
+
+# Windows COM Automation (Excel)
+pywin32>=306; sys_platform == 'win32'
