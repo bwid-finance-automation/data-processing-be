@@ -38,6 +38,11 @@ from app.infrastructure.database.models.user import (
 from app.infrastructure.database.models.system_settings import (
     SystemSettingsModel,
 )
+from app.infrastructure.database.models.cash_report_session import (
+    CashReportSessionModel,
+    CashReportUploadedFileModel,
+    CashReportSessionStatus,
+)
 
 __all__ = [
     # Project models
@@ -71,4 +76,8 @@ __all__ = [
     "UserSessionModel",
     # System Settings
     "SystemSettingsModel",
+    # Cash Report models
+    "CashReportSessionModel",
+    "CashReportUploadedFileModel",
+    "CashReportSessionStatus",
 ]

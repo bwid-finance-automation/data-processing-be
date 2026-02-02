@@ -1,22 +1,116 @@
-# Environment - NEVER commit actual secrets
+# ========================================
+# Environment & Secrets
+# ========================================
 .env
 .env.*
 !.env.example
-venv/
+*.pem
+*.key
+credentials.json
+service-account*.json
 
+# ========================================
 # Python
+# ========================================
+venv/
+.venv/
+env/
 __pycache__/
 *.py[cod]
 *.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+*.manifest
+*.spec
 
-# Temporary data (session files, uploads, outputs)
+# ========================================
+# IDE & Editors
+# ========================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ========================================
+# Testing
+# ========================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ========================================
+# Working & Temporary Data
+# ========================================
+working/
 data/
 uploads/
 outputs/
 logs/
+temp/
+tmp/
+*.tmp
+*.temp
+*.log
 
-# Test files
+# ========================================
+# Sample & Test Files
+# ========================================
 sample_for_test/
+test_files/
+*.test.xlsx
+*.test.pdf
 
-# Claude 
-.claude
+# ========================================
+# Database
+# ========================================
+*.db
+*.sqlite
+*.sqlite3
+
+# ========================================
+# OS Generated
+# ========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ========================================
+# Claude & AI Tools
+# ========================================
+.claude/
+
+# ========================================
+# Excel Temp Files
+# ========================================
+~$*.xlsx
+~$*.xls
+*.xlk
+
+# ========================================
+# Alembic (keep migrations but ignore temp)
+# ========================================
+alembic/versions/__pycache__/

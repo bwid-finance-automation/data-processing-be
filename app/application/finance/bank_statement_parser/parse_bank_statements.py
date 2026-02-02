@@ -659,16 +659,16 @@ class ParseBankStatementsUseCase:
                     # Skip invalid transactions (no TX ID, no amounts, no date)
                     if not _is_valid_transaction(tx):
                         continue
-                    tx_data.append({
+                        tx_data.append({
                         "Bank Name": tx.bank_name,
-                        "Acc No": tx.acc_no,
+                        "Acc No": str(tx.acc_no) if tx.acc_no else "",
                         "Debit": tx.debit,
                         "Credit": tx.credit,
                         "Date": tx.date,
                         "Description": tx.description,
                         "Currency": tx.currency,
                         "Transaction ID": tx.transaction_id,
-                        "Beneficiary Acc No": tx.beneficiary_acc_no,
+                        "Beneficiary Acc No": str(tx.beneficiary_acc_no) if tx.beneficiary_acc_no else "",
                         "Beneficiary Acc Name": tx.beneficiary_acc_name,
                         "Beneficiary Bank": tx.beneficiary_bank
                     })
@@ -691,6 +691,14 @@ class ParseBankStatementsUseCase:
 
                 # Convert Transactions sheet to Table for formula references
                 ws_transactions = writer.sheets["Transactions"]
+
+                # Format account number columns as text to prevent scientific notation
+                for row_idx in range(2, len(df_transactions) + 2):
+                    # Column B (Acc No) - index 2
+                    ws_transactions.cell(row=row_idx, column=2).number_format = '@'
+                    # Column I (Beneficiary Acc No) - index 9
+                    ws_transactions.cell(row=row_idx, column=9).number_format = '@'
+
                 from openpyxl.worksheet.table import Table, TableStyleInfo
                 tab = Table(displayName="Transactions_All_banks", ref=f"A1:K{len(df_transactions) + 1}")
                 style = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
@@ -718,7 +726,7 @@ class ParseBankStatementsUseCase:
 
                     bal_data.append({
                         "Bank Name": bal.bank_name,
-                        "Acc No": bal.acc_no,
+                        "Acc No": str(bal.acc_no) if bal.acc_no else "",
                         "Currency": bal.currency,
                         "Opening Balance": bal.opening_balance,
                         "Closing Balance": bal.closing_balance,
@@ -744,6 +752,11 @@ class ParseBankStatementsUseCase:
 
                 # Add formulas to Balances sheet
                 ws_balances = writer.sheets["Balances"]
+
+                # Format Acc No column as text to prevent scientific notation
+                for row_idx in range(2, len(df_balances) + 2):
+                    ws_balances.cell(row=row_idx, column=2).number_format = '@'
+
                 for row_idx in range(2, len(df_balances) + 2):  # Start from row 2 (after header)
                     # Debit formula: =SUMIFS(Transactions_All_banks[Debit];Transactions_All_banks[Acc No];[@[Acc No]];Transactions_All_banks[Bank Name];[@[Bank Name]])
                     ws_balances[f'F{row_idx}'] = f'=SUMIFS(Transactions_All_banks[Debit],Transactions_All_banks[Acc No],B{row_idx},Transactions_All_banks[Bank Name],A{row_idx})'
@@ -1154,7 +1167,7 @@ class ParseBankStatementsUseCase:
                 balance_data.append({
                     "External ID": external_id,
                     "Name (*)": name,
-                    "Bank Account Number (*)": bal.acc_no,
+                    "Bank Account Number (*)": str(bal.acc_no) if bal.acc_no else "",
                     "Bank code (*)": bal.bank_name,
                     "Openning Balance (*)": opening_val,
                     "Closing Balance (*)": closing_val,
@@ -1237,7 +1250,7 @@ class ParseBankStatementsUseCase:
                     "Bank Statement Daily": bank_statement_daily,
                     "Name (*)": name,
                     "Bank Code (*)": tx.bank_name,
-                    "Bank Account Number (*)": tx.acc_no,
+                    "Bank Account Number (*)": str(tx.acc_no) if tx.acc_no else "",
                     "TRANS ID": trans_id,
                     "Trans Date (*)": tx_date,
                     "Description (*)": tx.description or "",
@@ -1248,7 +1261,7 @@ class ParseBankStatementsUseCase:
                     "Type": tx_type,
                     "Balance": "",
                     "PARTNER": tx.beneficiary_acc_name or "",
-                    "PARTNER ACCOUNT": tx.beneficiary_acc_no or "",
+                    "PARTNER ACCOUNT": str(tx.beneficiary_acc_no) if tx.beneficiary_acc_no else "",
                     "PARTNER BANK ID": tx.beneficiary_bank or ""
                 })
 
@@ -1452,7 +1465,7 @@ class ParseBankStatementsUseCase:
                 balance_data.append({
                     "External ID": external_id,
                     "Name (*)": name,
-                    "Bank Account Number (*)": bal.acc_no,
+                    "Bank Account Number (*)": str(bal.acc_no) if bal.acc_no else "",
                     "Bank code (*)": bal.bank_name,
                     "Openning Balance (*)": opening_val,
                     "Closing Balance (*)": closing_val,
@@ -1538,7 +1551,7 @@ class ParseBankStatementsUseCase:
                     "Bank Statement Daily": bank_statement_daily,
                     "Name (*)": name,
                     "Bank Code (*)": tx.bank_name,
-                    "Bank Account Number (*)": tx.acc_no,
+                    "Bank Account Number (*)": str(tx.acc_no) if tx.acc_no else "",
                     "TRANS ID": trans_id,
                     "Trans Date (*)": formatted_date,
                     "Description (*)": tx.description or "",
@@ -1549,7 +1562,7 @@ class ParseBankStatementsUseCase:
                     "Type": tx_type,
                     "Balance": "",
                     "PARTNER": tx.beneficiary_acc_name or "",
-                    "PARTNER ACCOUNT": tx.beneficiary_acc_no or "",
+                    "PARTNER ACCOUNT": str(tx.beneficiary_acc_no) if tx.beneficiary_acc_no else "",
                     "PARTNER BANK ID": tx.beneficiary_bank or ""
                 })
 
