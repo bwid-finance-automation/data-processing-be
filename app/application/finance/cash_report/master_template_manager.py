@@ -14,12 +14,12 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from app.shared.utils.logging_config import get_logger
-from .excel_com_handler import ExcelCOMHandler
+from .openpyxl_handler import OpenpyxlHandler, get_openpyxl_handler
 
 logger = get_logger(__name__)
 
-# Flag to use COM automation (preserves all Excel features) vs openpyxl
-USE_COM_AUTOMATION = True
+# Always use OpenpyxlHandler for cross-platform compatibility
+# COM automation is no longer used - openpyxl works on all platforms
 
 # Base paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
@@ -31,18 +31,21 @@ MASTER_TEMPLATE_FILENAME = "master_data.xlsx"
 
 # In-memory template cache (shared across all instances)
 _template_cache: Optional[bytes] = None
+_template_mtime: Optional[float] = None
 
 
 def _load_template_to_cache() -> bytes:
-    """Load master template into memory cache (lazy loading)."""
-    global _template_cache
-    if _template_cache is None:
-        template_path = TEMPLATES_DIR / MASTER_TEMPLATE_FILENAME
-        if not template_path.exists():
-            raise FileNotFoundError(f"Master template not found at {template_path}")
+    """Load master template into memory cache (lazy loading, auto-invalidates on file change)."""
+    global _template_cache, _template_mtime
+    template_path = TEMPLATES_DIR / MASTER_TEMPLATE_FILENAME
+    if not template_path.exists():
+        raise FileNotFoundError(f"Master template not found at {template_path}")
 
+    current_mtime = template_path.stat().st_mtime
+    if _template_cache is None or _template_mtime != current_mtime:
         with open(template_path, 'rb') as f:
             _template_cache = f.read()
+        _template_mtime = current_mtime
 
         size_mb = len(_template_cache) / (1024 * 1024)
         logger.info(f"Loaded master template into memory cache ({size_mb:.2f} MB)")
@@ -52,8 +55,9 @@ def _load_template_to_cache() -> bytes:
 
 def clear_template_cache() -> None:
     """Clear the template cache to force reload on next use."""
-    global _template_cache
+    global _template_cache, _template_mtime
     _template_cache = None
+    _template_mtime = None
     logger.info("Template cache cleared")
 
 
@@ -120,22 +124,16 @@ class MasterTemplateManager:
 
         logger.info(f"Created session {session_id}, wrote template from memory cache")
 
-        # Break external links to avoid "Update Links" prompt when downloading
-        if USE_COM_AUTOMATION:
-            handler = ExcelCOMHandler()
-            handler.break_external_links(working_file)
-
-        # Update configuration
-        self._update_config(
-            session_id=session_id,
+        # Initialize session in single optimized operation
+        # (combines: step 0 prior period copy, update_config, clear_movement_data)
+        handler = get_openpyxl_handler()
+        handler.initialize_session_optimized(
+            file_path=working_file,
             opening_date=opening_date,
             ending_date=ending_date,
             fx_rate=fx_rate,
             period_name=period_name,
         )
-
-        # Clear Movement data rows (keep headers and formula template)
-        self._clear_movement_data(session_id)
 
         return {
             "session_id": session_id,
@@ -168,36 +166,15 @@ class MasterTemplateManager:
         """
         working_file = self._get_working_file_path(session_id)
 
-        if USE_COM_AUTOMATION:
-            # Use COM automation to preserve all Excel features
-            handler = ExcelCOMHandler()
-            handler.update_config(
-                file_path=working_file,
-                opening_date=opening_date,
-                ending_date=ending_date,
-                fx_rate=fx_rate,
-                period_name=period_name,
-            )
-            logger.info(f"Updated config for session {session_id} via COM")
-        else:
-            # Fallback to openpyxl (may lose some Excel features)
-            wb = openpyxl.load_workbook(working_file)
-
-            try:
-                ws = wb["Summary"]
-
-                # Update configuration cells
-                ws["B1"] = ending_date  # Date
-                ws["B3"] = float(fx_rate)  # FX rate
-                ws["B4"] = period_name  # Period name
-                ws["B5"] = opening_date  # Opening date
-                ws["B6"] = ending_date  # Ending date
-
-                wb.save(working_file)
-                logger.info(f"Updated config for session {session_id}")
-
-            finally:
-                wb.close()
+        handler = get_openpyxl_handler()
+        handler.update_config(
+            file_path=working_file,
+            opening_date=opening_date,
+            ending_date=ending_date,
+            fx_rate=fx_rate,
+            period_name=period_name,
+        )
+        logger.info(f"Updated config for session {session_id}")
 
     def _clear_movement_data(self, session_id: str) -> None:
         """
@@ -209,39 +186,9 @@ class MasterTemplateManager:
         """
         working_file = self._get_working_file_path(session_id)
 
-        if USE_COM_AUTOMATION:
-            # Use COM automation to preserve all Excel features
-            handler = ExcelCOMHandler()
-            rows_cleared = handler.clear_movement_data(working_file)
-            logger.info(f"Cleared {rows_cleared} Movement rows for session {session_id} via COM")
-        else:
-            # Fallback to openpyxl (may lose some Excel features)
-            wb = openpyxl.load_workbook(working_file)
-
-            try:
-                ws = wb["Movement"]
-
-                # Find the last row with data
-                max_row = ws.max_row
-
-                # Delete rows from 5 to max_row (keep row 4 as template)
-                if max_row > 4:
-                    ws.delete_rows(5, max_row - 4)
-                    logger.info(f"Cleared Movement rows 5-{max_row} for session {session_id}")
-
-                # Clear data values in row 4 (columns A-G, I) but keep formulas
-                data_columns = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'I']
-                for col in data_columns:
-                    cell = ws[f"{col}4"]
-                    # Only clear if it's not a formula
-                    if cell.value and not str(cell.value).startswith('='):
-                        cell.value = None
-
-                wb.save(working_file)
-                logger.info(f"Cleared Movement data for session {session_id}")
-
-            finally:
-                wb.close()
+        handler = get_openpyxl_handler()
+        rows_cleared = handler.clear_movement_data(working_file)
+        logger.info(f"Cleared {rows_cleared} Movement rows for session {session_id}")
 
     def reset_session(self, session_id: str) -> Dict[str, Any]:
         """
@@ -290,34 +237,21 @@ class MasterTemplateManager:
         if period_name is None:
             period_name = ""
 
-        # Kill any lingering Excel processes that might be locking the file
-        if USE_COM_AUTOMATION:
-            from .excel_com_handler import kill_excel_processes
-            kill_excel_processes()
-            import time
-            time.sleep(0.5)  # Wait for file to be released
-
         # Re-copy master template from memory cache
         template_bytes = _load_template_to_cache()
         with open(working_file, 'wb') as f:
             f.write(template_bytes)
 
-        # Break external links to avoid "Update Links" prompt
-        if USE_COM_AUTOMATION:
-            handler = ExcelCOMHandler()
-            handler.break_external_links(working_file)
-
-        # Re-apply config
-        self._update_config(
-            session_id=session_id,
+        # Initialize session in single optimized operation
+        # (combines: step 0 prior period copy, update_config, clear_movement_data)
+        handler = get_openpyxl_handler()
+        handler.initialize_session_optimized(
+            file_path=working_file,
             opening_date=opening_date,
             ending_date=ending_date,
             fx_rate=Decimal(str(fx_rate)),
             period_name=period_name,
         )
-
-        # Clear Movement data
-        self._clear_movement_data(session_id)
 
         logger.info(f"Reset session {session_id}")
 
@@ -337,13 +271,6 @@ class MasterTemplateManager:
         session_dir = self._get_session_dir(session_id)
 
         if session_dir.exists():
-            # Kill any lingering Excel processes that might be locking the file
-            if USE_COM_AUTOMATION:
-                from .excel_com_handler import kill_excel_processes
-                kill_excel_processes()
-                import time
-                time.sleep(0.5)  # Wait for file to be released
-
             shutil.rmtree(session_dir)
             logger.info(f"Deleted session {session_id}")
             return True

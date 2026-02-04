@@ -2,6 +2,7 @@
 Cash Report Service - Main service for cash report automation.
 Integrates all components: MasterTemplateManager, MovementDataWriter, BankStatementReader, AI Classifier.
 """
+import asyncio
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.domain.finance.cash_report.services.ai_classifier import AITransactionC
 from .master_template_manager import MasterTemplateManager
 from .movement_data_writer import MovementDataWriter, MovementTransaction
 from .bank_statement_reader import BankStatementReader
+from .progress_store import ProgressEvent
 
 logger = get_logger(__name__)
 
@@ -147,6 +149,7 @@ class CashReportService:
         session_id: str,
         files: List[Tuple[str, bytes]],  # List of (filename, content)
         filter_by_date: bool = True,
+        progress_callback: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """
         Upload and process parsed bank statement files.
@@ -191,11 +194,43 @@ class CashReportService:
         all_transactions: List[MovementTransaction] = []
         file_results = []
         total_skipped = 0
+        total_found = 0
 
-        for filename, content in files:
+        for file_idx, (filename, content) in enumerate(files):
             try:
+                # Emit progress: reading file
+                if progress_callback:
+                    progress_callback(ProgressEvent(
+                        event_type="step_start",
+                        step="reading",
+                        message=f"Reading {filename}...",
+                        detail=f"Parsing transactions from file {file_idx + 1}/{len(files)}",
+                        percentage=int((file_idx) / len(files) * 20),
+                    ))
+
                 # Read transactions from parsed Excel
                 transactions = self.statement_reader.read_from_bytes(content, "Automation")
+                found_count = len(transactions)
+                total_found += found_count
+
+                # Emit progress: file read complete
+                if progress_callback:
+                    progress_callback(ProgressEvent(
+                        event_type="step_complete",
+                        step="reading",
+                        message=f"Found {found_count} transactions in {filename}",
+                        percentage=int((file_idx + 1) / len(files) * 20),
+                        data={"filename": filename, "count": found_count},
+                    ))
+
+                # Collect file date range before filtering
+                file_dates = [tx.date for tx in transactions if tx.date]
+                file_date_range = None
+                if file_dates:
+                    file_date_range = {
+                        "start": min(file_dates).isoformat(),
+                        "end": max(file_dates).isoformat(),
+                    }
 
                 # Filter by date if enabled
                 skipped = 0
@@ -207,16 +242,20 @@ class CashReportService:
                 all_transactions.extend(transactions)
                 total_skipped += skipped
 
-                file_results.append({
+                file_result = {
                     "filename": filename,
                     "status": "success",
-                    "transactions_found": len(transactions) + skipped,
+                    "transactions_found": found_count,
                     "transactions_added": len(transactions),
                     "transactions_skipped": skipped,
-                })
+                }
+                if file_date_range:
+                    file_result["file_date_range"] = file_date_range
 
-                # Track in database
-                if self.db_session:
+                file_results.append(file_result)
+
+                # Track in database only when transactions were added
+                if self.db_session and len(transactions) > 0:
                     await self._track_uploaded_file(
                         session_id=session_id,
                         filename=filename,
@@ -234,27 +273,130 @@ class CashReportService:
                     "error": str(e),
                 })
 
+        # Emit filtering summary
+        if progress_callback and filter_by_date and opening_date and ending_date:
+            progress_callback(ProgressEvent(
+                event_type="step_start",
+                step="filtering",
+                message=f"Filtering {total_found} transactions by date range",
+                detail=f"{opening_date.strftime('%d/%m/%Y')} - {ending_date.strftime('%d/%m/%Y')}",
+                percentage=25,
+            ))
+            progress_callback(ProgressEvent(
+                event_type="step_complete",
+                step="filtering",
+                message=f"{len(all_transactions)} transactions within range, {total_skipped} skipped",
+                percentage=30,
+                data={"kept": len(all_transactions), "skipped": total_skipped},
+            ))
+
         if not all_transactions:
-            return {
+            # Emit completion even when no transactions
+            if progress_callback:
+                progress_callback(ProgressEvent(
+                    event_type="complete",
+                    step="done",
+                    message="No transactions to process",
+                    percentage=100,
+                ))
+            # Build a helpful warning message
+            if total_skipped > 0 and total_found > 0:
+                message = (
+                    f"All {total_skipped} transactions were outside the session period "
+                    f"({opening_date.strftime('%d/%m/%Y')} - {ending_date.strftime('%d/%m/%Y')}). "
+                    f"Please check if the correct period was selected."
+                )
+                warning = "date_mismatch"
+            else:
+                message = "No valid transactions found in uploaded files"
+                warning = None
+
+            result = {
                 "session_id": session_id,
                 "files_processed": len(files),
                 "total_transactions_added": 0,
+                "total_transactions_found": total_found,
                 "total_transactions_skipped": total_skipped,
                 "file_results": file_results,
-                "message": "No valid transactions found in uploaded files",
+                "message": message,
             }
+            if warning:
+                result["warning"] = warning
+                if opening_date and ending_date:
+                    result["session_period"] = {
+                        "start": opening_date.isoformat(),
+                        "end": ending_date.isoformat(),
+                    }
+            return result
 
         # Classify transactions using AI
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="step_start",
+                step="classifying",
+                message=f"Classifying {len(all_transactions)} transactions with AI...",
+                detail="Using Gemini AI to determine transaction categories",
+                percentage=35,
+            ))
+            await asyncio.sleep(0)  # Flush SSE
+
         logger.info(f"Classifying {len(all_transactions)} transactions...")
-        classified_transactions = await self._classify_transactions(all_transactions)
+        classified_transactions = await self._classify_transactions(
+            all_transactions,
+            progress_callback=progress_callback,
+        )
+
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="step_complete",
+                step="classifying",
+                message=f"Classified {len(classified_transactions)} transactions",
+                percentage=80,
+            ))
+            await asyncio.sleep(0)  # Flush SSE
 
         # Write to Movement sheet
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="step_start",
+                step="writing",
+                message=f"Writing {len(classified_transactions)} transactions to Movement sheet...",
+                detail="Appending data to Excel workbook",
+                percentage=85,
+            ))
+            await asyncio.sleep(0)  # Flush SSE
+
         writer = MovementDataWriter(working_file)
-        rows_added, total_rows = writer.append_transactions(classified_transactions)
+        # Run blocking Excel write in thread to not block event loop
+        rows_added, total_rows = await asyncio.to_thread(
+            writer.append_transactions, classified_transactions
+        )
+
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="step_complete",
+                step="writing",
+                message=f"Written {rows_added} rows (total: {total_rows})",
+                percentage=95,
+            ))
 
         # Update session stats in database
         if self.db_session:
             await self._update_session_stats(session_id, rows_added, len(files))
+
+        # Emit completion
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="complete",
+                step="done",
+                message=f"Upload complete! {rows_added} transactions processed.",
+                percentage=100,
+                data={
+                    "files_processed": len(files),
+                    "total_transactions_added": rows_added,
+                    "total_rows_in_movement": total_rows,
+                },
+            ))
 
         return {
             "session_id": session_id,
@@ -268,12 +410,14 @@ class CashReportService:
     async def _classify_transactions(
         self,
         transactions: List[MovementTransaction],
+        progress_callback: Optional[callable] = None,
     ) -> List[MovementTransaction]:
         """
         Classify transactions using AI.
 
         Args:
             transactions: List of transactions without Nature
+            progress_callback: Optional callback for progress updates
 
         Returns:
             List of transactions with Nature classified
@@ -288,12 +432,38 @@ class CashReportService:
             is_receipt = bool(tx.debit)  # Debit = money in = Receipt
             batch.append((tx.description, is_receipt))
 
-        # Classify in batch
+        # Classify with per-batch progress updates
+        # Uses asyncio.to_thread() to avoid blocking the event loop,
+        # which would prevent SSE progress events from being flushed to the client.
         try:
-            natures = self.ai_classifier.classify_batch(batch)
+            batch_size = 50
+            all_natures = []
+            total_batches = (len(batch) + batch_size - 1) // batch_size
+
+            for i in range(0, len(batch), batch_size):
+                chunk = batch[i:i + batch_size]
+                batch_num = i // batch_size + 1
+
+                if progress_callback:
+                    pct = 35 + int((batch_num / total_batches) * 45)  # 35-80%
+                    progress_callback(ProgressEvent(
+                        event_type="step_update",
+                        step="classifying",
+                        message=f"AI batch {batch_num}/{total_batches} ({len(chunk)} transactions)...",
+                        percentage=min(pct, 79),
+                    ))
+                    # Yield control so event loop can flush SSE events
+                    await asyncio.sleep(0)
+
+                # Run blocking AI call in thread to not block event loop
+                batch_natures = await asyncio.to_thread(
+                    self.ai_classifier._classify_batch_internal, chunk
+                )
+                all_natures.extend(batch_natures)
+                logger.info(f"AI classified batch {batch_num}/{total_batches}: {len(chunk)} transactions")
 
             # Apply classifications
-            for i, nature in enumerate(natures):
+            for i, nature in enumerate(all_natures):
                 if i < len(transactions):
                     transactions[i].nature = nature
 

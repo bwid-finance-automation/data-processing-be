@@ -14,12 +14,12 @@ from openpyxl.utils import get_column_letter
 from openpyxl.cell.cell import Cell
 
 from app.shared.utils.logging_config import get_logger
-from .excel_com_handler import ExcelCOMHandler
+from .openpyxl_handler import OpenpyxlHandler, get_openpyxl_handler
 
 logger = get_logger(__name__)
 
-# Flag to use COM automation (preserves all Excel features) vs openpyxl
-USE_COM_AUTOMATION = True
+# Always use OpenpyxlHandler for cross-platform compatibility
+# COM automation is no longer used - openpyxl works on all platforms
 
 
 @dataclass
@@ -204,84 +204,29 @@ class MovementDataWriter:
         if not transactions:
             return 0, self.get_row_count()
 
-        if USE_COM_AUTOMATION:
-            # Use COM automation to preserve all Excel features
-            handler = ExcelCOMHandler()
-            # Convert MovementTransaction to dict for COM handler
-            tx_dicts = [
-                {
-                    'source': tx.source,
-                    'bank': tx.bank,
-                    'account': tx.account,
-                    'date': tx.date,
-                    'description': tx.description,
-                    'debit': float(tx.debit) if tx.debit else None,
-                    'credit': float(tx.credit) if tx.credit else None,
-                    'nature': tx.nature,
-                }
-                for tx in transactions
-            ]
-            rows_added, total_rows = handler.append_transactions(
-                self.working_file_path, tx_dicts
-            )
-            logger.info(f"Appended {rows_added} transactions via COM, total: {total_rows}")
-            return rows_added, total_rows
+        # Use OpenpyxlHandler for cross-platform compatibility
+        handler = get_openpyxl_handler()
 
-        # Fallback to openpyxl (may lose some Excel features)
-        wb = openpyxl.load_workbook(self.working_file_path)
+        # Convert MovementTransaction to dict for handler
+        tx_dicts = [
+            {
+                'source': tx.source,
+                'bank': tx.bank,
+                'account': tx.account,
+                'date': tx.date,
+                'description': tx.description,
+                'debit': float(tx.debit) if tx.debit else None,
+                'credit': float(tx.credit) if tx.credit else None,
+                'nature': tx.nature,
+            }
+            for tx in transactions
+        ]
 
-        try:
-            ws = wb["Movement"]
-
-            # Get formula templates from row 4
-            formula_templates = self._get_formula_templates(wb)
-
-            # Find last row with data
-            last_row = self.FIRST_DATA_ROW - 1
-            for row in range(self.FIRST_DATA_ROW, ws.max_row + 1):
-                cell_value = ws.cell(row=row, column=3).value
-                if cell_value is not None and str(cell_value).strip():
-                    last_row = row
-
-            # If no data yet, start at row 4
-            if last_row < self.FIRST_DATA_ROW:
-                start_row = self.FIRST_DATA_ROW
-            else:
-                start_row = last_row + 1
-
-            # Write transactions
-            rows_added = 0
-            for i, tx in enumerate(transactions):
-                row = start_row + i
-
-                # Write input columns
-                ws[f"A{row}"] = tx.source
-                ws[f"B{row}"] = tx.bank
-                ws[f"C{row}"] = tx.account
-                ws[f"D{row}"] = tx.date
-                ws[f"E{row}"] = tx.description
-                ws[f"F{row}"] = float(tx.debit) if tx.debit else None
-                ws[f"G{row}"] = float(tx.credit) if tx.credit else None
-                ws[f"I{row}"] = tx.nature
-
-                # Copy and adjust formulas
-                for col, formula in formula_templates.items():
-                    adjusted_formula = self._adjust_formula_for_row(
-                        formula, self.FIRST_DATA_ROW, row
-                    )
-                    ws[f"{col}{row}"] = adjusted_formula
-
-                rows_added += 1
-
-            wb.save(self.working_file_path)
-
-            total_rows = (start_row - self.FIRST_DATA_ROW) + rows_added
-            logger.info(f"Appended {rows_added} transactions to Movement sheet, total: {total_rows}")
-
-            return rows_added, total_rows
-
-        finally:
-            wb.close()
+        rows_added, total_rows = handler.append_transactions(
+            self.working_file_path, tx_dicts
+        )
+        logger.info(f"Appended {rows_added} transactions, total: {total_rows}")
+        return rows_added, total_rows
 
     def remove_transactions_by_source(self, source_name: str) -> int:
         """
@@ -294,38 +239,9 @@ class MovementDataWriter:
         Returns:
             Number of rows removed
         """
-        if USE_COM_AUTOMATION:
-            handler = ExcelCOMHandler()
-            rows_removed = handler.remove_rows_by_source(self.working_file_path, source_name)
-            return rows_removed
-
-        # Fallback to openpyxl
-        wb = openpyxl.load_workbook(self.working_file_path)
-
-        try:
-            ws = wb["Movement"]
-            rows_removed = 0
-
-            # Find rows to delete (iterate from bottom to top)
-            rows_to_delete = []
-            for row in range(ws.max_row, self.FIRST_DATA_ROW - 1, -1):
-                cell_value = ws.cell(row=row, column=1).value  # Column A
-                if cell_value and str(cell_value).strip() == source_name.strip():
-                    rows_to_delete.append(row)
-
-            # Delete rows from bottom to top
-            for row in rows_to_delete:
-                ws.delete_rows(row)
-                rows_removed += 1
-
-            if rows_removed > 0:
-                wb.save(self.working_file_path)
-                logger.info(f"Removed {rows_removed} rows with source '{source_name}'")
-
-            return rows_removed
-
-        finally:
-            wb.close()
+        handler = get_openpyxl_handler()
+        rows_removed = handler.remove_rows_by_source(self.working_file_path, source_name)
+        return rows_removed
 
     def clear_all_data(self) -> int:
         """
@@ -334,39 +250,10 @@ class MovementDataWriter:
         Returns:
             Number of rows cleared
         """
-        if USE_COM_AUTOMATION:
-            # Use COM automation to preserve all Excel features
-            handler = ExcelCOMHandler()
-            rows_cleared = handler.clear_movement_data(self.working_file_path)
-            logger.info(f"Cleared {rows_cleared} rows via COM")
-            return rows_cleared
-
-        # Fallback to openpyxl (may lose some Excel features)
-        wb = openpyxl.load_workbook(self.working_file_path)
-
-        try:
-            ws = wb["Movement"]
-
-            # Count rows to delete
-            rows_to_clear = max(0, ws.max_row - self.FIRST_DATA_ROW)
-
-            if rows_to_clear > 0:
-                # Delete rows from 5 to end
-                ws.delete_rows(self.FIRST_DATA_ROW + 1, rows_to_clear)
-
-            # Clear data in row 4 (keep formulas)
-            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'I']:
-                cell = ws[f"{col}{self.FIRST_DATA_ROW}"]
-                if cell.value and not str(cell.value).startswith('='):
-                    cell.value = None
-
-            wb.save(self.working_file_path)
-            logger.info(f"Cleared {rows_to_clear} rows from Movement sheet")
-
-            return rows_to_clear
-
-        finally:
-            wb.close()
+        handler = get_openpyxl_handler()
+        rows_cleared = handler.clear_movement_data(self.working_file_path)
+        logger.info(f"Cleared {rows_cleared} rows")
+        return rows_cleared
 
     def get_all_transactions(self) -> List[MovementTransaction]:
         """

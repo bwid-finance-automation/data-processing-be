@@ -168,7 +168,8 @@ CRITICAL: The transaction type [RECEIPT] or [PAYMENT] is ALREADY DETERMINED. You
 === KEYWORD-BASED CLASSIFICATION RULES ===
 
 **INTERNAL TRANSFER** (HIGHEST PRIORITY - check first!):
-Keywords: HDTG, GUI TIEN TK, tien gui, internal transfer, transfer money, SHL, shareholder loan, SHL repayment
+Keywords: HDTG, GUI TIEN TK, tien gui, internal transfer, transfer money, SHL, shareholder loan, SHL repayment, SAVING, tiet kiem, Repayment loan to SPV/holdco
+IMPORTANT: Intercompany loan repayments (to SPV, holdco, subsidiaries) = Internal transfer, NOT Loan repayment. "Loan repayment" is only for BANK loans.
 [PAYMENT] "GUI HDTG KY HAN 51D, ST: 3,000,000,000. SO HDTG: 285/2025/17687" → Internal transfer out
 [PAYMENT] "GUI TIEN GUI KY HAN 1 THANG THEO HDTG SO 902/2025/18909" → Internal transfer out
 [PAYMENT] "TRICH TK MO HDTG 1 THANG RGLH LCK" → Internal transfer out
@@ -176,6 +177,8 @@ Keywords: HDTG, GUI TIEN TK, tien gui, internal transfer, transfer money, SHL, s
 [PAYMENT] "INTERNAL TRANSFER FROM VTB TO UOB" → Internal transfer out
 [PAYMENT] "VC3_DC2_TRANSFER MONEY FROM VC3 TO DC2" → Internal transfer out
 [PAYMENT] "GTC_VC3_Repayment sharehoder loan" → Internal transfer out
+[PAYMENT] "BDH_Repayment principal loan to SPV5C tra goc vay cho SPV5C" → Internal transfer out (intercompany)
+[PAYMENT] "SAVING DEPOSIT 12 MONTHS" → Internal transfer out
 [RECEIPT] "TAT TOAN HDTG 640.2024.85809" → Internal transfer in
 [RECEIPT] "RUT TIEN THEO PHU LUC 640/2023/29169/PL3" → Internal transfer in
 [RECEIPT] "TAT TOAN TAI KHOAN TIET KIEM SO 216000382800" → Internal transfer in
@@ -194,7 +197,8 @@ Keywords: IPC, APG, design service, geological survey, permitting service, Main 
 [PAYMENT] "Construction Supervision Service" → Construction expense
 
 **OPERATING EXPENSE**:
-Keywords: PHI QUAN LY TAI KHOAN, PHI BSMS, THP, NOPTHUE, Thu phi duy tri dich vu, NSNN, IMF, EMF, nuoc, dien, water, IMPC, BECAMEX, BA DUONG, KZN, NL, AB.MKH, meeting, electricity, Refund fit out deposit, Refund fitout deposit, Refund booking fee
+Keywords: PHI QUAN LY TAI KHOAN, PHI BSMS, THP, NOPTHUE, Thu phi duy tri dich vu, Phi duy tri tai khoan, THU Phi QLTK TO CHUC, NSNN, IMF, EMF, nuoc, dien, water, IMPC, BECAMEX, BA DUONG, KZN, NL, AB.MKH, meeting, electricity, Refund fit out deposit, Refund fitout deposit, Refund booking fee, FM service, Wastewater, scrap
+IMPORTANT: Repair/typhoon damage works by contractors (even construction companies like Kansai Vina) = Operating expense, NOT Construction expense. Construction expense is only for NEW construction projects (CIP).
 [PAYMENT] "PHI QUAN LY TAI KHOAN 150xxx128 T06 2025" → Operating expense
 [PAYMENT] "PHI BSMS T05.2025. MA KH10725855" → Operating expense
 [PAYMENT] "KTR_IDICO_Electricity fee in 062025_Term 1" → Operating expense
@@ -202,6 +206,11 @@ Keywords: PHI QUAN LY TAI KHOAN, PHI BSMS, THP, NOPTHUE, Thu phi duy tri dich vu
 [PAYMENT] "BWD_Dan On_Refund fit out deposit" → Operating expense
 [PAYMENT] "BWD_LIANGMU_Refund booking fee" → Operating expense
 [PAYMENT] "NO PHI QLY TAI KHOAN" → Operating expense
+[PAYMENT] "BDH_CREW24_FM Service MAY 2025_INV 86" → Operating expense
+[PAYMENT] "BTP_Kansai Vina_Advance 30 contract value Works after Typhoon Yagi" → Operating expense (repair, not construction)
+[PAYMENT] "BHA_DEEPC Blue_Payment of Water consumption and Wastewater treatment" → Operating expense
+[PAYMENT] "BTP_BTPIZ_EMF fee in June 2025" → Operating expense
+[PAYMENT] "BDH_MTTT_Refund the different amount after selling scrap" → Operating expense
 
 **LOAN REPAYMENT**:
 Keywords: GOC, principal, THU NO GOC, TAT TOAN KV, Loan Repayment, Prepayment principal
@@ -245,6 +254,11 @@ Keywords: land payment, land price, land lease, Land rental fee, Land Lease fee
 [PAYMENT] "BHI_KCN SM_Land rental fee in 2025" → Land acquisition
 [PAYMENT] "BDG_KCN.DG_Land Lease fee in 2025" → Land acquisition
 
+**PAYMENT FOR ACQUISITION**:
+Keywords: acquisition, M&A
+[PAYMENT] "Payment for acquisition of shares in ABC Company" → Payment for acquisition
+[PAYMENT] "Transfer for M&A deal completion" → Payment for acquisition
+
 **INTERNAL CONTRIBUTION IN/OUT**:
 Keywords: capital contribution, gop von
 [RECEIPT] "Capital contribution from holdco N4C to Nastec JSC" → Internal contribution in
@@ -274,12 +288,13 @@ Keywords: VAT refund, hoan thue, HOAN THUE GTGT
 [RECEIPT] "18294/QD-CCTKV16-KDT...hoan thue" → VAT refund
 
 **OTHER RECEIPTS** (bank interest, misc):
-Keywords: Thanh toan lai tai khoan tien gui, Tra lai TK tien gui, lai nhap von, ghi co lai tien gui, Deposit Interest Credit, hoan ta LCT, TFR, CA - TARGET, interest payment
+Keywords: Thanh toan lai tai khoan tien gui, Tra lai TK tien gui, lai nhap von, ghi co lai tien gui, Deposit Interest Credit, hoan ta LCT, TFR, CA - TARGET, interest payment, tra lai tai khoan DDA
 [RECEIPT] "Thanh toan lai tai khoan tien gui 819009112551" → Other receipts
 [RECEIPT] "Tra lai TK tien gui 211000396185" → Other receipts
 [RECEIPT] "lai nhap von" → Other receipts
 [RECEIPT] "ghi co lai tien gui" → Other receipts
 [RECEIPT] "Deposit Interest Credit" → Other receipts
+[RECEIPT] "tra lai tai khoan DDA 110002855448" → Other receipts
 
 **RECEIPT FROM TENANTS** (DEFAULT for business payments):
 Keywords: TT tien, rental fee, rent fee, tien thue, thue xuong, thue kho, dien nuoc, tien dien, tien nuoc, phi tien ich, phi quan ly, management fee, REM B/O, THANH TOAN, TT (payment)
@@ -346,6 +361,9 @@ Return ONLY numbered list with category names. No explanations.
             return ""
 
         category = category.strip()
+
+        # Normalize non-breaking spaces (found in reference files like "Dividend paid (inside\xa0group)")
+        category = category.replace('\xa0', ' ')
 
         # Check exact match first
         if is_receipt:

@@ -1,7 +1,10 @@
 """Factory for auto-detecting and creating bank parsers."""
 
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from .base_parser import BaseBankParser
+from app.shared.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 from .acb_parser import ACBParser
 from .vib_parser import VIBParser
 from .kbank_parser import KBANKParser
@@ -83,6 +86,76 @@ class ParserFactory:
     def get_supported_banks(cls) -> List[str]:
         """Get list of supported bank names."""
         return [parser.bank_name for parser in cls._parsers]
+
+    @classmethod
+    def get_all_parsers(cls, file_bytes: bytes) -> List[BaseBankParser]:
+        """
+        Detect ALL banks that can parse this file (not just the first match).
+
+        Useful for multi-bank files where different parsers might match
+        different sheets.
+
+        Args:
+            file_bytes: Excel file as binary
+
+        Returns:
+            List of parser instances that can handle this file
+        """
+        matching = []
+        for parser in cls._parsers:
+            if parser.can_parse(file_bytes):
+                matching.append(parser)
+        return matching
+
+    @classmethod
+    def detect_all_banks_in_file(
+        cls, file_bytes: bytes
+    ) -> List[Tuple[BaseBankParser, str, bytes]]:
+        """
+        Detect all banks across all sheets of a multi-sheet Excel file.
+
+        Strategy:
+        1. First try whole-file detection (existing parsers check sheet 0)
+        2. If file has multiple sheets, try each sheet individually
+        3. Return all unique (parser, sheet_name, sheet_bytes) tuples
+
+        Args:
+            file_bytes: Excel file as binary
+
+        Returns:
+            List of (parser, sheet_name, sheet_bytes) tuples.
+            sheet_bytes is the isolated single-sheet Excel for that bank.
+            If only one bank found on sheet 0, sheet_bytes = original file_bytes.
+        """
+        # Get sheet names
+        sheet_names = BaseBankParser.get_sheet_names(file_bytes)
+
+        if len(sheet_names) <= 1:
+            # Single sheet: just return the standard detection
+            parser = cls.get_parser(file_bytes)
+            if parser:
+                sheet_name = sheet_names[0] if sheet_names else "Sheet1"
+                return [(parser, sheet_name, file_bytes)]
+            return []
+
+        # Multi-sheet: try each sheet individually
+        results: List[Tuple[BaseBankParser, str, bytes]] = []
+        detected_sheets = set()
+
+        for sheet_name in sheet_names:
+            sheet_bytes = BaseBankParser.extract_sheet_as_bytes(file_bytes, sheet_name)
+            if sheet_bytes is None:
+                continue
+
+            parser = cls.get_parser(sheet_bytes)
+            if parser and sheet_name not in detected_sheets:
+                results.append((parser, sheet_name, sheet_bytes))
+                detected_sheets.add(sheet_name)
+                logger.info(
+                    f"Multi-bank detection: sheet '{sheet_name}' -> {parser.bank_name}"
+                )
+
+        return results
 
     @classmethod
     def get_parser_for_text(cls, text: str) -> Optional[BaseBankParser]:

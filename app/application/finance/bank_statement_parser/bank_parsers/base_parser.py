@@ -318,6 +318,108 @@ class BaseBankParser(ABC):
 
         return file_bytes
 
+    @classmethod
+    def get_sheet_names(cls, file_bytes: bytes) -> List[str]:
+        """
+        Get all sheet names from an Excel file.
+
+        Args:
+            file_bytes: Excel file as binary
+
+        Returns:
+            List of sheet names. Empty list if not readable.
+        """
+        file_format = cls.detect_file_format(file_bytes)
+
+        if file_format == 'html':
+            return []
+
+        try:
+            if file_format == 'xls':
+                xls = pd.ExcelFile(io.BytesIO(file_bytes), engine='xlrd')
+            else:
+                fixed_bytes = cls._ensure_visible_sheet(file_bytes)
+                xls = pd.ExcelFile(io.BytesIO(fixed_bytes), engine='openpyxl')
+            return xls.sheet_names
+        except Exception:
+            return []
+
+    @classmethod
+    def extract_sheet_as_bytes(cls, file_bytes: bytes, sheet_name: str) -> Optional[bytes]:
+        """
+        Extract a single sheet from a multi-sheet Excel file into a new
+        single-sheet workbook bytes.
+
+        This allows parsers (which read sheet_name=0) to work on any
+        individual sheet from a multi-bank file.
+
+        Args:
+            file_bytes: Original multi-sheet Excel file
+            sheet_name: Name of the sheet to extract
+
+        Returns:
+            Bytes of a new Excel file containing only the target sheet,
+            or None if extraction fails.
+        """
+        try:
+            file_format = cls.detect_file_format(file_bytes)
+
+            if file_format == 'html':
+                return None
+
+            if file_format == 'xls':
+                # For .xls: read the sheet with pandas and write to xlsx
+                df = pd.read_excel(
+                    io.BytesIO(file_bytes),
+                    sheet_name=sheet_name,
+                    header=None,
+                    engine='xlrd'
+                )
+                output = io.BytesIO()
+                df.to_excel(output, index=False, header=False, engine='openpyxl')
+                output.seek(0)
+                return output.read()
+
+            # For .xlsx: copy the sheet using openpyxl to preserve formatting
+            src_wb = load_workbook(io.BytesIO(file_bytes))
+            if sheet_name not in src_wb.sheetnames:
+                src_wb.close()
+                return None
+
+            from openpyxl import Workbook
+            from copy import copy
+
+            dst_wb = Workbook()
+            dst_ws = dst_wb.active
+            dst_ws.title = sheet_name
+
+            src_ws = src_wb[sheet_name]
+
+            for row in src_ws.iter_rows():
+                for cell in row:
+                    new_cell = dst_ws.cell(
+                        row=cell.row,
+                        column=cell.column,
+                        value=cell.value
+                    )
+                    # Copy cell style if present
+                    if cell.has_style:
+                        new_cell.number_format = cell.number_format
+
+            # Copy merged cells
+            for merged_range in src_ws.merged_cells.ranges:
+                dst_ws.merge_cells(str(merged_range))
+
+            output = io.BytesIO()
+            dst_wb.save(output)
+            src_wb.close()
+            dst_wb.close()
+            output.seek(0)
+            return output.read()
+
+        except Exception:
+            return None
+
     @staticmethod
     def to_text(value) -> str:
         """Convert any value to text."""

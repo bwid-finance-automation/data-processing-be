@@ -2,6 +2,10 @@
 Cash Report Router - API endpoints for cash report automation.
 Uses master template approach with COM automation for Excel.
 """
+import asyncio
+import json
+import queue
+import time
 from datetime import date
 from decimal import Decimal
 from typing import List
@@ -11,6 +15,7 @@ from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Query, 
 from fastapi.responses import StreamingResponse
 
 from app.application.finance.cash_report import CashReportService
+from app.application.finance.cash_report.progress_store import progress_store, ProgressEvent
 from app.infrastructure.database.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.shared.utils.logging_config import get_logger
@@ -123,12 +128,23 @@ async def upload_bank_statements(
             content = await file.read()
             file_data.append((file.filename, content))
 
+        # Create progress queue for SSE streaming
+        progress_store.create(session_id)
+
+        def on_progress(event: ProgressEvent):
+            progress_store.emit(session_id, event)
+
         service = CashReportService(db_session=db)
         result = await service.upload_bank_statements(
             session_id=session_id,
             files=file_data,
             filter_by_date=filter_by_date,
+            progress_callback=on_progress,
         )
+
+        # Delay cleanup so SSE generator has time to read final events from queue
+        await asyncio.sleep(1)
+        progress_store.cleanup(session_id)
 
         return {
             "success": True,
@@ -136,10 +152,89 @@ async def upload_bank_statements(
         }
 
     except ValueError as e:
+        await asyncio.sleep(0.5)
+        progress_store.cleanup(session_id)
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        # Emit error event before cleanup
+        progress_store.emit(session_id, ProgressEvent(
+            event_type="error", step="error",
+            message=str(e), percentage=0,
+        ))
+        await asyncio.sleep(0.5)
+        progress_store.cleanup(session_id)
         logger.error(f"Error uploading statements: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/upload-progress/{session_id}")
+async def stream_upload_progress(session_id: str):
+    """
+    Stream upload progress events using Server-Sent Events (SSE).
+
+    Connect to this endpoint BEFORE firing the upload POST request.
+    Events stream in real-time as the backend processes files.
+    """
+
+    def generate():
+        # Wait for queue to be created (POST might not have started yet)
+        max_wait = 10  # seconds
+        waited = 0.0
+        while progress_store.get(session_id) is None and waited < max_wait:
+            time.sleep(0.2)
+            waited += 0.2
+            yield f"data: {json.dumps({'type': 'waiting', 'message': 'Waiting for upload to start...'})}\n\n"
+
+        progress_queue = progress_store.get(session_id)
+        if not progress_queue:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Upload session not found'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'connected', 'message': 'Connected to progress stream'})}\n\n"
+
+        last_heartbeat = time.time()
+        last_real_event = time.time()  # Track last real (non-heartbeat) event
+
+        while True:
+            try:
+                message = progress_queue.get(timeout=0.1)
+                last_heartbeat = time.time()
+                last_real_event = time.time()
+
+                # message is already a JSON string from ProgressEvent.to_json()
+                event_data = json.loads(message)
+                yield f"data: {message}\n\n"
+
+                # End stream on complete or error
+                if event_data.get("type") in ("complete", "error"):
+                    break
+
+            except queue.Empty:
+                current_time = time.time()
+                if current_time - last_heartbeat >= 2.0:
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                    last_heartbeat = current_time
+
+                # Safety timeout: 5 minutes without any real event
+                if current_time - last_real_event >= 300:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Progress stream timed out'})}\n\n"
+                    break
+
+            except Exception as e:
+                logger.error(f"Error in progress stream: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                break
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Encoding": "identity",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/run-settlement/{session_id}")

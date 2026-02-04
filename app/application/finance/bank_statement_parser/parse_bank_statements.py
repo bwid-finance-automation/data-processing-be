@@ -159,12 +159,54 @@ class ParseBankStatementsUseCase:
                 if key in balance_map:
                     statement.balance = balance_map[key]
 
+    def _parse_single_bank(
+        self,
+        parser,
+        file_bytes: bytes,
+        file_name: str,
+        sheet_name: Optional[str] = None,
+    ) -> Tuple[BankStatement, List[BankTransaction], List[BankBalance]]:
+        """
+        Parse a single bank from file bytes using the given parser.
+
+        Args:
+            parser: The bank parser to use
+            file_bytes: Excel file bytes (single-sheet or original)
+            file_name: Display name for the file
+            sheet_name: Sheet name (for logging only)
+
+        Returns:
+            Tuple of (statement, transactions, balances_list)
+        """
+        transactions = parser.parse_transactions(file_bytes, file_name)
+        balance = parser.parse_balances(file_bytes, file_name)
+
+        statement = BankStatement(
+            bank_name=parser.bank_name,
+            file_name=file_name,
+            balance=balance,
+            transactions=transactions
+        )
+
+        balances = [balance] if balance else []
+
+        if sheet_name:
+            logger.info(
+                f"Parsed {parser.bank_name} from sheet '{sheet_name}' in {file_name}: "
+                f"{len(transactions)} transactions"
+            )
+
+        return statement, transactions, balances
+
     def execute(
         self,
         files: List[Tuple[str, bytes]]
     ) -> Dict[str, Any]:
         """
         Parse multiple bank statement files.
+
+        Supports multi-bank files: if a single file contains multiple sheets
+        with different banks, each sheet is parsed independently.
 
         Args:
             files: List of (filename, file_bytes) tuples
@@ -186,10 +228,10 @@ class ParseBankStatementsUseCase:
 
         for file_name, file_bytes in files:
             try:
-                # Auto-detect bank
-                parser = self.parser_factory.get_parser(file_bytes)
+                # Try multi-bank detection (handles both single and multi-sheet files)
+                bank_detections = self.parser_factory.detect_all_banks_in_file(file_bytes)
 
-                if parser is None:
+                if not bank_detections:
                     failed += 1
                     failed_files.append({
                         "file_name": file_name,
@@ -197,24 +239,33 @@ class ParseBankStatementsUseCase:
                     })
                     continue
 
-                # Parse transactions
-                transactions = parser.parse_transactions(file_bytes, file_name)
+                if len(bank_detections) > 1:
+                    bank_names = [p.bank_name for p, _, _ in bank_detections]
+                    logger.info(
+                        f"Multi-bank file detected: {file_name} -> "
+                        f"{len(bank_detections)} banks: {', '.join(bank_names)}"
+                    )
 
-                # Parse balances
-                balance = parser.parse_balances(file_bytes, file_name)
+                # Parse each detected bank
+                for parser, sheet_name, sheet_bytes in bank_detections:
+                    try:
+                        statement, transactions, balances = self._parse_single_bank(
+                            parser, sheet_bytes, file_name,
+                            sheet_name=sheet_name if len(bank_detections) > 1 else None
+                        )
 
-                # Create statement
-                statement = BankStatement(
-                    bank_name=parser.bank_name,
-                    file_name=file_name,
-                    balance=balance,
-                    transactions=transactions
-                )
-
-                statements.append(statement)
-                all_transactions.extend(transactions)
-                if balance:
-                    all_balances.append(balance)
+                        statements.append(statement)
+                        all_transactions.extend(transactions)
+                        all_balances.extend(balances)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to parse {parser.bank_name} from sheet "
+                            f"'{sheet_name}' in {file_name}: {e}"
+                        )
+                        failed_files.append({
+                            "file_name": f"{file_name} [{sheet_name}]",
+                            "error": str(e)
+                        })
 
                 successful += 1
 
