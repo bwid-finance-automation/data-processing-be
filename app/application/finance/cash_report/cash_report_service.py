@@ -657,18 +657,20 @@ class CashReportService:
             True if deleted, False if not found
         """
         # Delete from file system
-        deleted = self.template_manager.delete_session(session_id)
+        file_deleted = self.template_manager.delete_session(session_id)
 
         # Delete from database
+        db_deleted = False
         if self.db_session:
-            await self.db_session.execute(
+            result = await self.db_session.execute(
                 delete(CashReportSessionModel).where(
                     CashReportSessionModel.session_id == session_id
                 )
             )
             await self.db_session.commit()
+            db_deleted = result.rowcount > 0
 
-        return deleted
+        return file_deleted or db_deleted
 
     def get_working_file_path(self, session_id: str) -> Optional[Path]:
         """Get the working file path for download."""

@@ -91,10 +91,31 @@ class OpenpyxlHandler:
                             rb'<Override[^>]*calcChain[^>]*/>', b'', ct_xml
                         )
                         dst_zip.writestr(entry, ct_xml)
+                    elif entry == "xl/workbook.xml":
+                        wb_xml = src_zip.read(entry)
+                        wb_xml = OpenpyxlHandler._set_full_calc_on_load(wb_xml)
+                        dst_zip.writestr(entry, wb_xml)
                     else:
                         dst_zip.writestr(entry, src_zip.read(entry))
         with open(file_path, "wb") as f:
             f.write(output.getvalue())
+
+    @staticmethod
+    def _set_full_calc_on_load(wb_xml: bytes) -> bytes:
+        """Set fullCalcOnLoad='1' in workbook.xml so Excel recalculates all formulas on open."""
+        if b"fullCalcOnLoad" in wb_xml:
+            # Already has the attribute, ensure it's set to "1"
+            wb_xml = re.sub(rb'fullCalcOnLoad="[^"]*"', b'fullCalcOnLoad="1"', wb_xml)
+        elif b"<calcPr" in wb_xml:
+            # calcPr exists, add the attribute
+            wb_xml = wb_xml.replace(b"<calcPr", b'<calcPr fullCalcOnLoad="1"', 1)
+        else:
+            # No calcPr element, insert one before </workbook>
+            wb_xml = wb_xml.replace(
+                b"</workbook>",
+                b'<calcPr fullCalcOnLoad="1"/></workbook>',
+            )
+        return wb_xml
 
     @classmethod
     def _find_row_byte_positions(
@@ -1249,6 +1270,8 @@ class OpenpyxlHandler:
                         data = re.sub(
                             rb'<Override[^>]*calcChain[^>]*/>', b'', data
                         )
+                    elif entry == "xl/workbook.xml":
+                        data = self._set_full_calc_on_load(data)
 
                     dst_zip.writestr(entry, data)
 
