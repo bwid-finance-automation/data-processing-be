@@ -27,6 +27,8 @@ class FeatureTogglesRequest(BaseModel):
     glaAnalysis: Optional[FeatureConfig] = None
     excelComparison: Optional[FeatureConfig] = None
     utilityBilling: Optional[FeatureConfig] = None
+    cashReport: Optional[FeatureConfig] = None
+    ntmEbitdaAnalysis: Optional[FeatureConfig] = None
 
 
 class FeatureTogglesResponse(BaseModel):
@@ -38,6 +40,8 @@ class FeatureTogglesResponse(BaseModel):
     glaAnalysis: FeatureConfig
     excelComparison: FeatureConfig
     utilityBilling: FeatureConfig
+    cashReport: FeatureConfig
+    ntmEbitdaAnalysis: FeatureConfig
 
 
 # ==================== General Settings Schemas ====================

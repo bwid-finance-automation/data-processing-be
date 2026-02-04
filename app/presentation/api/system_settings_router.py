@@ -40,6 +40,8 @@ async def get_feature_toggles(
         glaAnalysis=FeatureConfig(**features.get("glaAnalysis", {"enabled": True, "disabledMessage": ""})),
         excelComparison=FeatureConfig(**features.get("excelComparison", {"enabled": True, "disabledMessage": ""})),
         utilityBilling=FeatureConfig(**features.get("utilityBilling", {"enabled": True, "disabledMessage": ""})),
+        cashReport=FeatureConfig(**features.get("cashReport", {"enabled": True, "disabledMessage": ""})),
+        ntmEbitdaAnalysis=FeatureConfig(**features.get("ntmEbitdaAnalysis", {"enabled": True, "disabledMessage": ""})),
     )
 
 
@@ -60,6 +62,8 @@ async def get_feature_status(
         "glaAnalysis",
         "excelComparison",
         "utilityBilling",
+        "cashReport",
+        "ntmEbitdaAnalysis",
     ]
 
     if feature_key not in valid_features:
@@ -116,6 +120,8 @@ async def update_feature_toggles(
         glaAnalysis=FeatureConfig(**current_features.get("glaAnalysis", {"enabled": True, "disabledMessage": ""})),
         excelComparison=FeatureConfig(**current_features.get("excelComparison", {"enabled": True, "disabledMessage": ""})),
         utilityBilling=FeatureConfig(**current_features.get("utilityBilling", {"enabled": True, "disabledMessage": ""})),
+        cashReport=FeatureConfig(**current_features.get("cashReport", {"enabled": True, "disabledMessage": ""})),
+        ntmEbitdaAnalysis=FeatureConfig(**current_features.get("ntmEbitdaAnalysis", {"enabled": True, "disabledMessage": ""})),
     )
 
 
@@ -137,6 +143,8 @@ async def update_single_feature(
         "glaAnalysis",
         "excelComparison",
         "utilityBilling",
+        "cashReport",
+        "ntmEbitdaAnalysis",
     ]
 
     if feature_key not in valid_features:
