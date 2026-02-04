@@ -200,6 +200,100 @@ class RedisCacheService:
             logger.warning(f"Redis set_ai_result error: {e}")
             return False
 
+    # ==================== Classification Cache Methods ====================
+
+    async def get_classification(self, cache_key: str) -> Optional[str]:
+        """Get cached AI classification result.
+
+        Args:
+            cache_key: MD5 hash of description+is_receipt
+
+        Returns:
+            Cached category string if found, None otherwise
+        """
+        if not self.is_connected:
+            return None
+
+        try:
+            key = f"classify:{cache_key}"
+            result = await self._client.get(key)
+            if result:
+                logger.debug(f"Classification cache hit for {cache_key[:12]}...")
+            return result
+        except Exception as e:
+            logger.warning(f"Redis get_classification error: {e}")
+            return None
+
+    async def get_classifications_bulk(self, cache_keys: list[str]) -> Dict[str, str]:
+        """Get multiple cached classification results in one round-trip.
+
+        Args:
+            cache_keys: List of MD5 hash keys
+
+        Returns:
+            Dict mapping cache_key -> category for found entries
+        """
+        if not self.is_connected or not cache_keys:
+            return {}
+
+        try:
+            redis_keys = [f"classify:{k}" for k in cache_keys]
+            values = await self._client.mget(redis_keys)
+            results = {}
+            for key, val in zip(cache_keys, values):
+                if val is not None:
+                    results[key] = val
+            if results:
+                logger.info(f"Classification cache: {len(results)}/{len(cache_keys)} hits")
+            return results
+        except Exception as e:
+            logger.warning(f"Redis get_classifications_bulk error: {e}")
+            return {}
+
+    async def set_classifications_bulk(self, entries: Dict[str, str]) -> bool:
+        """Cache multiple classification results with TTL.
+
+        Args:
+            entries: Dict mapping cache_key -> category
+
+        Returns:
+            True if cached successfully
+        """
+        if not self.is_connected or not entries:
+            return False
+
+        try:
+            pipe = self._client.pipeline()
+            for cache_key, category in entries.items():
+                pipe.setex(f"classify:{cache_key}", self.config.ai_cache_ttl, category)
+            await pipe.execute()
+            logger.info(f"Cached {len(entries)} classification results (TTL: {self.config.ai_cache_ttl}s)")
+            return True
+        except Exception as e:
+            logger.warning(f"Redis set_classifications_bulk error: {e}")
+            return False
+
+    async def clear_classification_cache(self) -> int:
+        """Clear all classification cache entries.
+
+        Returns:
+            Number of keys deleted
+        """
+        if not self.is_connected:
+            return 0
+
+        try:
+            keys = []
+            async for key in self._client.scan_iter(match="classify:*"):
+                keys.append(key)
+            if keys:
+                await self._client.delete(*keys)
+            logger.info(f"Cleared {len(keys)} classification cache entries")
+            return len(keys)
+        except Exception as e:
+            logger.warning(f"Redis clear_classification_cache error: {e}")
+            return 0
+
     # ==================== Utility Methods ====================
 
     async def delete_key(self, key: str) -> bool:
@@ -274,6 +368,7 @@ class RedisCacheService:
             "enabled": self.config.enabled,
             "ocr_count": 0,
             "ai_count": 0,
+            "classify_count": 0,
         }
 
         if not self.is_connected:
@@ -291,6 +386,12 @@ class RedisCacheService:
             async for _ in self._client.scan_iter(match="ai:*"):
                 ai_count += 1
             stats["ai_count"] = ai_count
+
+            # Count classification entries
+            classify_count = 0
+            async for _ in self._client.scan_iter(match="classify:*"):
+                classify_count += 1
+            stats["classify_count"] = classify_count
 
         except Exception as e:
             logger.warning(f"Error getting cache stats: {e}")

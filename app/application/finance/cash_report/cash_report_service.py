@@ -24,6 +24,7 @@ from .master_template_manager import MasterTemplateManager
 from .movement_data_writer import MovementDataWriter, MovementTransaction
 from .bank_statement_reader import BankStatementReader
 from .progress_store import ProgressEvent
+from app.infrastructure.cache.redis_cache import get_cache_service
 
 logger = get_logger(__name__)
 
@@ -432,6 +433,18 @@ class CashReportService:
             is_receipt = bool(tx.debit)  # Debit = money in = Receipt
             batch.append((tx.description, is_receipt))
 
+        # Pre-load Redis cache into in-memory cache (production only)
+        cache_keys_before = set(self.ai_classifier._cache.keys())
+        try:
+            cache_service = await get_cache_service()
+            if cache_service.is_connected:
+                key_map = self.ai_classifier.get_cache_keys_for_batch(batch)
+                redis_results = await cache_service.get_classifications_bulk(list(key_map.keys()))
+                if redis_results:
+                    self.ai_classifier.preload_cache(redis_results)
+        except Exception as e:
+            logger.warning(f"Redis cache pre-load failed (continuing without): {e}")
+
         # Classify with per-batch progress updates
         # Uses asyncio.to_thread() to avoid blocking the event loop,
         # which would prevent SSE progress events from being flushed to the client.
@@ -470,6 +483,16 @@ class CashReportService:
         except Exception as e:
             logger.error(f"AI classification error: {e}")
             # Leave nature empty if classification fails
+
+        # Save new classification results to Redis cache
+        try:
+            cache_service = await get_cache_service()
+            if cache_service.is_connected:
+                new_entries = self.ai_classifier.get_new_cache_entries(cache_keys_before)
+                if new_entries:
+                    await cache_service.set_classifications_bulk(new_entries)
+        except Exception as e:
+            logger.warning(f"Redis cache save failed (results still applied): {e}")
 
         return transactions
 

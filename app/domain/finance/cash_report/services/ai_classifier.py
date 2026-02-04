@@ -423,6 +423,35 @@ Return ONLY numbered list with category names. No explanations.
 
         return results[:expected_count]
 
+    def preload_cache(self, entries: Dict[str, str]) -> None:
+        """Bulk-load cache entries (e.g. from Redis) into in-memory cache."""
+        self._cache.update(entries)
+        if entries:
+            logger.info(f"Pre-loaded {len(entries)} entries into in-memory cache")
+
+    def get_new_cache_entries(self, before_keys: set) -> Dict[str, str]:
+        """Get cache entries that were added after a known snapshot.
+
+        Args:
+            before_keys: Set of cache keys that existed before classification
+
+        Returns:
+            Dict of new cache_key -> category entries
+        """
+        return {k: v for k, v in self._cache.items() if k not in before_keys}
+
+    def get_cache_keys_for_batch(self, transactions: List[Tuple[str, bool]]) -> Dict[str, Tuple[str, bool]]:
+        """Generate cache keys for a batch of transactions.
+
+        Returns:
+            Dict mapping cache_key -> (description, is_receipt)
+        """
+        result = {}
+        for desc, is_receipt in transactions:
+            cache_key = self._get_cache_key(desc, is_receipt)
+            result[cache_key] = (desc, is_receipt)
+        return result
+
     def classify_single(self, description: str, is_receipt: bool) -> str:
         """Classify a single transaction."""
         results = self.classify_batch([(description, is_receipt)])

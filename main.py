@@ -53,13 +53,7 @@ from app.presentation.api.finance import contract_ocr_router
 from app.presentation.api.finance import bank_statement_parser_router
 from app.presentation.api.fpa import excel_comparison_router
 
-# Cash Report only available on Windows (uses COM automation)
-import sys
-if sys.platform == 'win32':
-    from app.presentation.api.finance import cash_report_router
-    CASH_REPORT_AVAILABLE = True
-else:
-    CASH_REPORT_AVAILABLE = False
+from app.presentation.api.finance import cash_report_router
 from app.presentation.api.fpa import gla_variance_router
 from app.presentation.api.fpa import ntm_ebitda_router
 from app.presentation.api import ai_usage_router
@@ -120,9 +114,7 @@ app.include_router(utility_billing_router.router, prefix="/api/finance")
 app.include_router(contract_ocr_router.router, prefix="/api/finance")
 app.include_router(bank_statement_parser_router.router, prefix="/api/finance")
 
-# Cash Report only on Windows
-if CASH_REPORT_AVAILABLE:
-    app.include_router(cash_report_router.router, prefix="/api/finance")
+app.include_router(cash_report_router.router, prefix="/api/finance")
 
 # Include FP&A Department routers with /api prefix (already have /fpa prefix in routers)
 app.include_router(excel_comparison_router.router, prefix="/api")
