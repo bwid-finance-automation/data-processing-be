@@ -89,6 +89,14 @@ class SystemSettingsRepository(BaseRepository[SystemSettingsModel]):
                 "enabled": True,
                 "disabledMessage": "Utility Billing is temporarily unavailable. Please contact Admin for assistance.",
             },
+            "cashReport": {
+                "enabled": True,
+                "disabledMessage": "Cash Report is temporarily unavailable. Please contact Admin for assistance.",
+            },
+            "ntmEbitdaAnalysis": {
+                "enabled": True,
+                "disabledMessage": "NTM EBITDA Analysis is temporarily unavailable. Please contact Admin for assistance.",
+            },
         }
 
         return await self.get_value("feature_toggles", default_features)
