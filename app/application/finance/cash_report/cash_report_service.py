@@ -59,27 +59,32 @@ class CashReportService:
         ending_date: date,
         fx_rate: Decimal = Decimal("26175"),
         period_name: str = "",
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Get existing active session or create a new one.
-        Only 1 session allowed per user/system.
+        Only 1 session allowed per user.
 
         Args:
             opening_date: Report period start date
             ending_date: Report period end date
             fx_rate: VND/USD exchange rate
             period_name: Period name (e.g., "W3-4Jan26")
+            user_id: Owner user ID
 
         Returns:
             Session info dict with 'is_existing' flag
         """
-        # Check for existing active session
+        # Check for existing active session for this user
         if self.db_session:
-            result = await self.db_session.execute(
-                select(CashReportSessionModel).where(
-                    CashReportSessionModel.status == CashReportSessionStatus.ACTIVE
-                ).order_by(CashReportSessionModel.created_at.desc())
+            query = select(CashReportSessionModel).where(
+                CashReportSessionModel.status == CashReportSessionStatus.ACTIVE
             )
+            if user_id is not None:
+                query = query.where(CashReportSessionModel.user_id == user_id)
+            query = query.order_by(CashReportSessionModel.created_at.desc())
+
+            result = await self.db_session.execute(query)
             existing_session = result.scalar_one_or_none()
 
             if existing_session:
@@ -105,7 +110,7 @@ class CashReportService:
                 }
 
         # No existing session, create new one
-        return await self._create_new_session(opening_date, ending_date, fx_rate, period_name)
+        return await self._create_new_session(opening_date, ending_date, fx_rate, period_name, user_id=user_id)
 
     async def _create_new_session(
         self,
@@ -113,6 +118,7 @@ class CashReportService:
         ending_date: date,
         fx_rate: Decimal,
         period_name: str,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Internal method to create a new session."""
         # Create session with template manager
@@ -135,6 +141,7 @@ class CashReportService:
                 working_file_path=session_info["working_file"],
                 total_transactions=0,
                 total_files_uploaded=0,
+                user_id=user_id,
             )
             self.db_session.add(db_model)
             await self.db_session.commit()
@@ -667,15 +674,17 @@ class CashReportService:
         """Get the working file path for download."""
         return self.template_manager.get_working_file_path(session_id)
 
-    async def list_sessions(self) -> List[Dict[str, Any]]:
-        """List all active sessions from database (fast)."""
+    async def list_sessions(self, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """List active sessions from database, filtered by user."""
         if self.db_session:
-            # Use database for fast listing
-            result = await self.db_session.execute(
-                select(CashReportSessionModel).where(
-                    CashReportSessionModel.status == CashReportSessionStatus.ACTIVE
-                ).order_by(CashReportSessionModel.created_at.desc())
+            query = select(CashReportSessionModel).where(
+                CashReportSessionModel.status == CashReportSessionStatus.ACTIVE
             )
+            if user_id is not None:
+                query = query.where(CashReportSessionModel.user_id == user_id)
+            query = query.order_by(CashReportSessionModel.created_at.desc())
+
+            result = await self.db_session.execute(query)
             db_sessions = result.scalars().all()
 
             return [

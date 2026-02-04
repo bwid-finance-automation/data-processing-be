@@ -34,6 +34,13 @@ class CashReportSessionModel(Base, TimestampMixin):
         nullable=False,
     )
 
+    # Owner
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
     # Session configuration
     session_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     status: Mapped[CashReportSessionStatus] = mapped_column(
@@ -75,6 +82,7 @@ class CashReportSessionModel(Base, TimestampMixin):
         Index("ix_cash_report_sessions_status", "status"),
         Index("ix_cash_report_sessions_opening_date", "opening_date"),
         Index("ix_cash_report_sessions_ending_date", "ending_date"),
+        Index("ix_cash_report_sessions_user_status", "user_id", "status"),
     )
 
     def __repr__(self) -> str:

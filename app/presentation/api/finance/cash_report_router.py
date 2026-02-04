@@ -18,6 +18,8 @@ from app.application.finance.cash_report import CashReportService
 from app.application.finance.cash_report.progress_store import progress_store, ProgressEvent
 from app.infrastructure.database.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.dependencies import get_current_user
+from app.infrastructure.database.models.user import UserModel
 from app.shared.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -68,11 +70,12 @@ async def init_session(
     fx_rate: float = Form(default=26175, description="VND/USD exchange rate"),
     period_name: str = Form(default="", description="Period name (e.g., W3-4Jan26)"),
     db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Initialize or get existing cash report automation session.
 
-    Only ONE session is allowed at a time. If an active session exists,
+    Only ONE session is allowed per user. If an active session exists,
     returns that session instead of creating a new one.
 
     Returns a session_id to use for subsequent operations.
@@ -84,6 +87,7 @@ async def init_session(
             ending_date=ending_date,
             fx_rate=Decimal(str(fx_rate)),
             period_name=period_name,
+            user_id=current_user.id,
         )
 
         is_existing = result.get("is_existing", False)
@@ -109,6 +113,7 @@ async def upload_bank_statements(
     files: List[UploadFile] = File(..., description="Parsed bank statement Excel files"),
     filter_by_date: bool = Form(default=True, description="Filter transactions by session date range"),
     db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Upload parsed bank statement files to a session.
@@ -241,6 +246,7 @@ async def stream_upload_progress(session_id: str):
 async def run_settlement(
     session_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Run settlement (tất toán) automation on Movement data.
@@ -272,6 +278,7 @@ async def run_settlement(
 async def get_session_status(
     session_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Get the status and statistics of a session.
@@ -302,7 +309,10 @@ async def get_session_status(
 
 
 @router.get("/download/{session_id}")
-async def download_session_result(session_id: str):
+async def download_session_result(
+    session_id: str,
+    current_user: UserModel = Depends(get_current_user),
+):
     """
     Download the working Excel file for a session.
 
@@ -338,6 +348,7 @@ async def download_session_result(session_id: str):
 async def reset_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Reset a session to clean state.
@@ -365,6 +376,7 @@ async def reset_session(
 async def delete_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Delete a session and its working files.
@@ -391,13 +403,14 @@ async def delete_session(
 @router.get("/sessions")
 async def list_sessions(
     db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
-    List all active automation sessions.
+    List active automation sessions for the current user.
     """
     try:
         service = CashReportService(db_session=db)
-        sessions = await service.list_sessions()
+        sessions = await service.list_sessions(user_id=current_user.id)
 
         return {
             "success": True,
@@ -414,6 +427,7 @@ async def list_sessions(
 async def preview_movement_data(
     session_id: str,
     limit: int = Query(default=20, ge=1, le=100, description="Number of rows to preview"),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """
     Preview Movement sheet data for a session.
