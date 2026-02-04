@@ -53,6 +53,28 @@ class CashReportService:
         self.statement_reader = BankStatementReader()
         self.ai_classifier = AITransactionClassifier()
 
+    async def _verify_session_owner(self, session_id: str, user_id: int) -> None:
+        """
+        Verify that the session belongs to the given user.
+        Raises PermissionError if the session belongs to another user.
+        Raises ValueError if session not found.
+        """
+        if not self.db_session:
+            return
+
+        result = await self.db_session.execute(
+            select(CashReportSessionModel).where(
+                CashReportSessionModel.session_id == session_id
+            )
+        )
+        session = result.scalar_one_or_none()
+
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        if session.user_id is not None and session.user_id != user_id:
+            raise PermissionError("You do not have access to this session")
+
     async def get_or_create_session(
         self,
         opening_date: date,
@@ -158,6 +180,7 @@ class CashReportService:
         files: List[Tuple[str, bytes]],  # List of (filename, content)
         filter_by_date: bool = True,
         progress_callback: Optional[callable] = None,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Upload and process parsed bank statement files.
@@ -166,10 +189,14 @@ class CashReportService:
             session_id: The session ID
             files: List of (filename, file_content) tuples
             filter_by_date: Whether to filter transactions by session date range
+            user_id: Owner user ID for access control
 
         Returns:
             Processing result summary
         """
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
+
         # Get session info
         session_info = self.template_manager.get_session_info(session_id)
         if not session_info:
@@ -349,10 +376,13 @@ class CashReportService:
             await asyncio.sleep(0)  # Flush SSE
 
         logger.info(f"Classifying {len(all_transactions)} transactions...")
+        import time as _time
+        _classify_start = _time.monotonic()
         classified_transactions = await self._classify_transactions(
             all_transactions,
             progress_callback=progress_callback,
         )
+        _classify_elapsed_ms = (_time.monotonic() - _classify_start) * 1000
 
         if progress_callback:
             progress_callback(ProgressEvent(
@@ -406,6 +436,10 @@ class CashReportService:
                 },
             ))
 
+        # Collect AI usage from classifier
+        ai_usage = self.ai_classifier.get_and_reset_usage()
+        ai_usage["processing_time_ms"] = _classify_elapsed_ms
+
         return {
             "session_id": session_id,
             "files_processed": len(files),
@@ -413,6 +447,7 @@ class CashReportService:
             "total_transactions_skipped": total_skipped,
             "total_rows_in_movement": total_rows,
             "file_results": file_results,
+            "ai_usage": ai_usage,
         }
 
     async def _classify_transactions(
@@ -557,16 +592,20 @@ class CashReportService:
         )
         await self.db_session.commit()
 
-    async def get_session_status(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session_status(self, session_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
         Get session status and statistics (fast - uses database).
 
         Args:
             session_id: The session ID
+            user_id: Owner user ID for access control
 
         Returns:
             Session info dict or None if not found
         """
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
+
         # Get from database first (fast)
         if self.db_session:
             result = await self.db_session.execute(
@@ -609,16 +648,20 @@ class CashReportService:
         # Fallback to reading file (slower)
         return self.template_manager.get_session_info(session_id)
 
-    async def reset_session(self, session_id: str) -> Dict[str, Any]:
+    async def reset_session(self, session_id: str, user_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Reset session to clean state.
 
         Args:
             session_id: The session ID
+            user_id: Owner user ID for access control
 
         Returns:
             Reset result
         """
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
+
         result = self.template_manager.reset_session(session_id)
 
         # Update database
@@ -646,16 +689,20 @@ class CashReportService:
         logger.info(f"Reset session {session_id}")
         return result
 
-    async def delete_session(self, session_id: str) -> bool:
+    async def delete_session(self, session_id: str, user_id: Optional[int] = None) -> bool:
         """
         Delete a session.
 
         Args:
             session_id: The session ID
+            user_id: Owner user ID for access control
 
         Returns:
             True if deleted, False if not found
         """
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
+
         # Delete from file system
         file_deleted = self.template_manager.delete_session(session_id)
 
@@ -672,8 +719,10 @@ class CashReportService:
 
         return file_deleted or db_deleted
 
-    def get_working_file_path(self, session_id: str) -> Optional[Path]:
+    async def get_working_file_path(self, session_id: str, user_id: Optional[int] = None) -> Optional[Path]:
         """Get the working file path for download."""
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
         return self.template_manager.get_working_file_path(session_id)
 
     async def list_sessions(self, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -707,17 +756,20 @@ class CashReportService:
         # Fallback to file system (slower)
         return self.template_manager.list_sessions()
 
-    def get_data_preview(self, session_id: str, limit: int = 20) -> List[dict]:
+    async def get_data_preview(self, session_id: str, limit: int = 20, user_id: Optional[int] = None) -> List[dict]:
         """
         Get preview of Movement data.
 
         Args:
             session_id: The session ID
             limit: Maximum number of rows
+            user_id: Owner user ID for access control
 
         Returns:
             List of row dicts
         """
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
         working_file = self.template_manager.get_working_file_path(session_id)
         if not working_file:
             return []
@@ -725,7 +777,7 @@ class CashReportService:
         writer = MovementDataWriter(working_file)
         return writer.get_data_preview(limit)
 
-    async def run_settlement_automation(self, session_id: str) -> Dict[str, Any]:
+    async def run_settlement_automation(self, session_id: str, user_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Run settlement (tất toán) automation on Movement data.
 
@@ -736,10 +788,13 @@ class CashReportService:
 
         Args:
             session_id: The session ID
+            user_id: Owner user ID for access control
 
         Returns:
             Dict with results summary
         """
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
         import re
 
         working_file = self.template_manager.get_working_file_path(session_id)

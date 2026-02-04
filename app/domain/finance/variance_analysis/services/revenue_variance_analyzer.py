@@ -332,6 +332,7 @@ class RevenueVarianceAnalyzer:
 
         # Determine API type
         self.is_claude = "claude" in self.model.lower() if self.model else False
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         # Initialize AI client
         self.ai_client = None
@@ -348,6 +349,14 @@ class RevenueVarianceAnalyzer:
                 self.ai_client = None
         else:
             logger.warning("No API key found - AI analysis will be skipped")
+
+    def get_and_reset_usage(self) -> Dict[str, Any]:
+        """Return accumulated token usage and reset counters."""
+        usage = dict(self._total_usage)
+        usage["model"] = self.model
+        usage["provider"] = "anthropic" if self.is_claude else "openai"
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return usage
 
     def analyze(self, revenue_bytes: bytes, ufl_bytes: bytes) -> bytes:
         """
@@ -586,6 +595,8 @@ class RevenueVarianceAnalyzer:
                     messages=[{"role": "user", "content": context}]
                 )
                 result = response.content[0].text
+                self._total_usage["input_tokens"] += getattr(response.usage, 'input_tokens', 0)
+                self._total_usage["output_tokens"] += getattr(response.usage, 'output_tokens', 0)
             else:
                 params = {
                     "model": self.model,
@@ -599,7 +610,10 @@ class RevenueVarianceAnalyzer:
                     params["temperature"] = 0.2
                 response = self.ai_client.chat.completions.create(**params)
                 result = response.choices[0].message.content
+                self._total_usage["input_tokens"] += getattr(response.usage, 'prompt_tokens', 0)
+                self._total_usage["output_tokens"] += getattr(response.usage, 'completion_tokens', 0)
 
+            self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
             return self._parse_ai_response(result)
         except Exception as e:
             logger.error(f"AI monthly analysis failed for {current_month} vs {prior_month}: {e}")
@@ -645,6 +659,8 @@ class RevenueVarianceAnalyzer:
                     messages=[{"role": "user", "content": context}]
                 )
                 result = response.content[0].text
+                self._total_usage["input_tokens"] += getattr(response.usage, 'input_tokens', 0)
+                self._total_usage["output_tokens"] += getattr(response.usage, 'output_tokens', 0)
             else:
                 params = {
                     "model": self.model,
@@ -658,7 +674,10 @@ class RevenueVarianceAnalyzer:
                     params["temperature"] = 0.2
                 response = self.ai_client.chat.completions.create(**params)
                 result = response.choices[0].message.content
+                self._total_usage["input_tokens"] += getattr(response.usage, 'prompt_tokens', 0)
+                self._total_usage["output_tokens"] += getattr(response.usage, 'completion_tokens', 0)
 
+            self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
             return self._parse_ai_response(result)
         except Exception as e:
             logger.error(f"AI flag analysis failed: {e}")
@@ -715,6 +734,8 @@ class RevenueVarianceAnalyzer:
                     messages=[{"role": "user", "content": context}]
                 )
                 result = response.content[0].text
+                self._total_usage["input_tokens"] += getattr(response.usage, 'input_tokens', 0)
+                self._total_usage["output_tokens"] += getattr(response.usage, 'output_tokens', 0)
             else:
                 params = {
                     "model": self.model,
@@ -728,7 +749,10 @@ class RevenueVarianceAnalyzer:
                     params["temperature"] = 0.3
                 response = self.ai_client.chat.completions.create(**params)
                 result = response.choices[0].message.content
+                self._total_usage["input_tokens"] += getattr(response.usage, 'prompt_tokens', 0)
+                self._total_usage["output_tokens"] += getattr(response.usage, 'completion_tokens', 0)
 
+            self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
             return self._parse_ai_response(result)
         except Exception as e:
             logger.error(f"AI executive summary failed: {e}")
@@ -1977,8 +2001,9 @@ def analyze_revenue_variance(
     revenue_bytes: bytes,
     ufl_bytes: bytes,
     api_key: Optional[str] = None,
-    model: Optional[str] = None
-) -> bytes:
+    model: Optional[str] = None,
+    return_usage: bool = False,
+) -> Any:
     """
     AI-powered revenue variance analysis with UFL linkage.
 
@@ -1987,9 +2012,13 @@ def analyze_revenue_variance(
         ufl_bytes: Raw bytes of UnitForLeaseList file
         api_key: Optional API key (defaults to OPENAI_API_KEY or ANTHROPIC_API_KEY env var)
         model: Optional model name (defaults to AI_MODEL env var or "gpt-4o")
+        return_usage: If True, return (bytes, usage_dict) tuple
 
     Returns:
-        Excel file bytes with 14 sheets (including AI Insights)
+        Excel file bytes, or (bytes, usage_dict) tuple if return_usage=True
     """
     analyzer = RevenueVarianceAnalyzer(api_key=api_key, model=model)
-    return analyzer.analyze(revenue_bytes, ufl_bytes)
+    xlsx_bytes = analyzer.analyze(revenue_bytes, ufl_bytes)
+    if return_usage:
+        return xlsx_bytes, analyzer.get_and_reset_usage()
+    return xlsx_bytes

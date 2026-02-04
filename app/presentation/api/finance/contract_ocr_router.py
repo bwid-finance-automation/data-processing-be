@@ -22,9 +22,11 @@ from app.application.finance.contract_ocr.process_contracts import ContractOCRSe
 from app.application.finance.contract_ocr.contract_excel_export import ContractExcelExporter
 from app.application.finance.contract_ocr.unit_breakdown_reader import UnitBreakdownReader
 from app.shared.utils.logging_config import get_logger
-from app.core.dependencies import get_db, get_project_service
+from app.core.dependencies import get_db, get_project_service, get_ai_usage_repository
 from app.application.project.project_service import ProjectService
 from app.infrastructure.database.models.project import CaseType
+from app.infrastructure.persistence.repositories.ai_usage_repository import AIUsageRepository
+from app.shared.utils.ai_usage_tracker import log_ai_usage
 
 logger = get_logger(__name__)
 
@@ -66,7 +68,10 @@ async def get_supported_formats():
 
 
 @router.post("/process-contract", response_model=ContractExtractionResult)
-async def process_single_contract(file: UploadFile = File(...)):
+async def process_single_contract(
+    file: UploadFile = File(...),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
+):
     """
     Process a single contract document and extract information.
 
@@ -97,8 +102,11 @@ async def process_single_contract(file: UploadFile = File(...)):
         logger.info(f"Saved temporary file: {temp_file_path}")
 
         # Process the contract
+        import time as _time
+        _ocr_start = _time.monotonic()
         ocr_service = get_ocr_service()
         result = ocr_service.process_contract(temp_file_path)
+        _ocr_elapsed_ms = (_time.monotonic() - _ocr_start) * 1000
 
         # Clean up temp file
         try:
@@ -109,6 +117,21 @@ async def process_single_contract(file: UploadFile = File(...)):
         if not result.success:
             logger.error(f"Contract processing failed: {result.error}")
             raise HTTPException(status_code=500, detail=result.error)
+
+        # Log AI usage
+        if result.token_usage:
+            await log_ai_usage(
+                ai_usage_repo,
+                provider="openai",
+                model_name="gpt-4o",
+                task_type="ocr",
+                input_tokens=result.token_usage.prompt_tokens,
+                output_tokens=result.token_usage.completion_tokens,
+                processing_time_ms=_ocr_elapsed_ms,
+                task_description="Contract OCR extraction",
+                file_name=file.filename,
+                file_count=1,
+            )
 
         logger.info(f"Successfully processed contract: {file.filename}")
         return result
@@ -128,6 +151,7 @@ async def process_multiple_contracts(
     files: List[UploadFile] = File(...),
     project_uuid: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Process multiple contract documents in batch.
@@ -169,6 +193,8 @@ async def process_multiple_contracts(
                 temp_files.append((temp_file.name, file.filename))
 
         # Process all valid contracts
+        import time as _time
+        _batch_start = _time.monotonic()
         if temp_files:
             ocr_service = get_ocr_service()
             file_paths = [temp_path for temp_path, _ in temp_files]
@@ -179,6 +205,7 @@ async def process_multiple_contracts(
                 result.source_file = original_name
 
             results.extend(processing_results)
+        _batch_elapsed_ms = (_time.monotonic() - _batch_start) * 1000
 
         # Clean up temp files
         for temp_path, _ in temp_files:
@@ -307,6 +334,22 @@ async def process_multiple_contracts(
                 logger.error(f"Failed to save contracts to database: {e}", exc_info=True)
                 # Don't fail the request, just log the error
 
+        # Log AI usage for batch
+        if total_tokens > 0:
+            await log_ai_usage(
+                ai_usage_repo,
+                provider="openai",
+                model_name="gpt-4o",
+                task_type="ocr",
+                input_tokens=total_prompt_tokens,
+                output_tokens=total_completion_tokens,
+                processing_time_ms=_batch_elapsed_ms,
+                task_description="Contract OCR batch extraction",
+                file_name=", ".join([f.filename for f in files]),
+                file_count=len(files),
+                success=failed == 0,
+            )
+
         return BatchContractResult(
             success=True,
             total_files=len(results),
@@ -335,7 +378,10 @@ async def process_multiple_contracts(
 
 
 @router.post("/export-to-excel")
-async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
+async def export_contracts_to_excel(
+    files: List[UploadFile] = File(...),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
+):
     """
     Process multiple contracts and export results to Excel.
 
@@ -376,6 +422,8 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
                 temp_files.append((temp_file.name, file.filename))
 
         # Process all valid contracts
+        import time as _time
+        _export_start = _time.monotonic()
         if temp_files:
             ocr_service = get_ocr_service()
             file_paths = [temp_path for temp_path, _ in temp_files]
@@ -386,6 +434,7 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
                 result.source_file = original_name
 
             results.extend(processing_results)
+        _export_elapsed_ms = (_time.monotonic() - _export_start) * 1000
 
         # Clean up temp contract files
         for temp_path, _ in temp_files:
@@ -426,6 +475,21 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
         print(f"Output file: contract_extractions_{len(results)}_contracts.xlsx")
         print("="*80 + "\n")
 
+        # Log AI usage
+        if total_tokens > 0:
+            await log_ai_usage(
+                ai_usage_repo,
+                provider="openai",
+                model_name="gpt-4o",
+                task_type="ocr",
+                input_tokens=total_prompt_tokens,
+                output_tokens=total_completion_tokens,
+                processing_time_ms=_export_elapsed_ms,
+                task_description="Contract OCR Excel export",
+                file_name=", ".join([f.filename for f in files]),
+                file_count=len(files),
+            )
+
         # Return the Excel file
         logger.info(f"Returning Excel file: {excel_path}")
 
@@ -457,7 +521,8 @@ async def export_contracts_to_excel(files: List[UploadFile] = File(...)):
 @router.post("/process-contract-with-units", response_model=ContractWithUnitsResult)
 async def process_contract_with_unit_breakdown(
     contract_file: UploadFile = File(..., description="Contract PDF/image file"),
-    unit_breakdown_file: UploadFile = File(..., description="Unit breakdown Excel file (.xlsx)")
+    unit_breakdown_file: UploadFile = File(..., description="Unit breakdown Excel file (.xlsx)"),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Process a contract PDF and create individual contracts for each unit from breakdown Excel.
@@ -525,6 +590,8 @@ async def process_contract_with_unit_breakdown(
         logger.info(f"Saved Excel temp file: {excel_temp_path}")
 
         # Process contract with unit breakdown
+        import time as _time
+        _units_start = _time.monotonic()
         ocr_service = get_ocr_service()
         result = ocr_service.process_contract_with_unit_breakdown(
             contract_file_path=contract_temp_path,
@@ -532,6 +599,7 @@ async def process_contract_with_unit_breakdown(
             validate_gfa=True,
             gfa_tolerance=0.01  # 1% tolerance
         )
+        _units_elapsed_ms = (_time.monotonic() - _units_start) * 1000
 
         # Clean up temp files
         for temp_path in [contract_temp_path, excel_temp_path]:
@@ -591,6 +659,22 @@ async def process_contract_with_unit_breakdown(
             error=result.get('error')
         )
 
+        # Log AI usage
+        if result.get('base_result') and result['base_result'].token_usage:
+            tu = result['base_result'].token_usage
+            await log_ai_usage(
+                ai_usage_repo,
+                provider="openai",
+                model_name="gpt-4o",
+                task_type="ocr",
+                input_tokens=tu.prompt_tokens,
+                output_tokens=tu.completion_tokens,
+                processing_time_ms=_units_elapsed_ms,
+                task_description="Contract OCR with unit breakdown",
+                file_name=contract_file.filename,
+                file_count=1,
+            )
+
         logger.info(f"Successfully processed contract with {len(result['unit_contracts'])} units")
         return response
 
@@ -616,7 +700,8 @@ async def process_contract_with_unit_breakdown(
 @router.post("/export-contract-with-units-to-excel")
 async def export_contract_with_units_to_excel(
     contract_file: UploadFile = File(..., description="Contract PDF/image file"),
-    unit_breakdown_file: UploadFile = File(..., description="Unit breakdown Excel file (.xlsx)")
+    unit_breakdown_file: UploadFile = File(..., description="Unit breakdown Excel file (.xlsx)"),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Process a contract with unit breakdown and export unit-specific contracts to Excel.
@@ -681,6 +766,8 @@ async def export_contract_with_units_to_excel(
         logger.info(f"Saved Excel temp file: {excel_temp_path}")
 
         # Process contract with unit breakdown
+        import time as _time
+        _export_units_start = _time.monotonic()
         ocr_service = get_ocr_service()
         result = ocr_service.process_contract_with_unit_breakdown(
             contract_file_path=contract_temp_path,
@@ -688,6 +775,7 @@ async def export_contract_with_units_to_excel(
             validate_gfa=True,
             gfa_tolerance=0.01  # 1% tolerance
         )
+        _export_units_elapsed_ms = (_time.monotonic() - _export_units_start) * 1000
 
         if not result['success']:
             error_msg = result.get('error', 'Unknown error processing contract with units')
@@ -745,6 +833,22 @@ async def export_contract_with_units_to_excel(
             print("")
             print(f"Output file: contract_with_units_{len(unit_contracts)}_units.xlsx")
             print("="*80 + "\n")
+
+        # Log AI usage
+        if result.get('base_result') and result['base_result'].token_usage:
+            tu = result['base_result'].token_usage
+            await log_ai_usage(
+                ai_usage_repo,
+                provider="openai",
+                model_name="gpt-4o",
+                task_type="ocr",
+                input_tokens=tu.prompt_tokens,
+                output_tokens=tu.completion_tokens,
+                processing_time_ms=_export_units_elapsed_ms,
+                task_description="Contract OCR with units Excel export",
+                file_name=contract_file.filename,
+                file_count=1,
+            )
 
         # Clean up input temp files
         for temp_path in [contract_temp_path, excel_temp_path]:

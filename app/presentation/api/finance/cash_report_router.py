@@ -18,9 +18,11 @@ from app.application.finance.cash_report import CashReportService
 from app.application.finance.cash_report.progress_store import progress_store, ProgressEvent
 from app.infrastructure.database.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, get_ai_usage_repository
 from app.infrastructure.database.models.user import UserModel
+from app.infrastructure.persistence.repositories.ai_usage_repository import AIUsageRepository
 from app.shared.utils.logging_config import get_logger
+from app.shared.utils.ai_usage_tracker import log_ai_usage
 
 logger = get_logger(__name__)
 
@@ -114,6 +116,7 @@ async def upload_bank_statements(
     filter_by_date: bool = Form(default=True, description="Filter transactions by session date range"),
     db: AsyncSession = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Upload parsed bank statement files to a session.
@@ -145,7 +148,27 @@ async def upload_bank_statements(
             files=file_data,
             filter_by_date=filter_by_date,
             progress_callback=on_progress,
+            user_id=current_user.id,
         )
+
+        # Log AI usage for Gemini classification
+        ai_usage = result.get("ai_usage")
+        logger.info(f"AI usage data from classifier: {ai_usage}")
+        if ai_usage and ai_usage.get("total_tokens", 0) > 0:
+            await log_ai_usage(
+                ai_usage_repo,
+                provider=ai_usage.get("provider", "gemini"),
+                model_name=ai_usage.get("model", "gemini-2.0-flash"),
+                task_type="classification",
+                input_tokens=ai_usage.get("input_tokens", 0),
+                output_tokens=ai_usage.get("output_tokens", 0),
+                processing_time_ms=ai_usage.get("processing_time_ms", 0),
+                task_description="Cash report transaction classification",
+                file_name=", ".join([f.filename for f in files]),
+                file_count=len(files),
+                session_id=session_id,
+                user_id=current_user.id,
+            )
 
         # Delay cleanup so SSE generator has time to read final events from queue
         await asyncio.sleep(1)
@@ -156,6 +179,10 @@ async def upload_bank_statements(
             **result,
         }
 
+    except PermissionError as e:
+        await asyncio.sleep(0.5)
+        progress_store.cleanup(session_id)
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         await asyncio.sleep(0.5)
         progress_store.cleanup(session_id)
@@ -260,13 +287,15 @@ async def run_settlement(
     """
     try:
         service = CashReportService(db_session=db)
-        result = await service.run_settlement_automation(session_id)
+        result = await service.run_settlement_automation(session_id, user_id=current_user.id)
 
         return {
             "success": True,
             **result,
         }
 
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -291,7 +320,7 @@ async def get_session_status(
     """
     try:
         service = CashReportService(db_session=db)
-        result = await service.get_session_status(session_id)
+        result = await service.get_session_status(session_id, user_id=current_user.id)
 
         if not result:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -301,6 +330,8 @@ async def get_session_status(
             **result,
         }
 
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -311,6 +342,7 @@ async def get_session_status(
 @router.get("/download/{session_id}")
 async def download_session_result(
     session_id: str,
+    db: AsyncSession = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ):
     """
@@ -319,8 +351,8 @@ async def download_session_result(
     Returns the Excel file with all uploaded transactions in the Movement sheet.
     """
     try:
-        service = CashReportService()
-        file_path = service.get_working_file_path(session_id)
+        service = CashReportService(db_session=db)
+        file_path = await service.get_working_file_path(session_id, user_id=current_user.id)
 
         if not file_path or not file_path.exists():
             raise HTTPException(status_code=404, detail="Session file not found")
@@ -337,6 +369,8 @@ async def download_session_result(
             }
         )
 
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -357,7 +391,7 @@ async def reset_session(
     """
     try:
         service = CashReportService(db_session=db)
-        result = await service.reset_session(session_id)
+        result = await service.reset_session(session_id, user_id=current_user.id)
 
         return {
             "success": True,
@@ -365,6 +399,8 @@ async def reset_session(
             "message": "Session reset successfully",
         }
 
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
@@ -383,7 +419,7 @@ async def delete_session(
     """
     try:
         service = CashReportService(db_session=db)
-        deleted = await service.delete_session(session_id)
+        deleted = await service.delete_session(session_id, user_id=current_user.id)
 
         if not deleted:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -393,6 +429,8 @@ async def delete_session(
             "message": "Session deleted successfully",
         }
 
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -427,6 +465,7 @@ async def list_sessions(
 async def preview_movement_data(
     session_id: str,
     limit: int = Query(default=20, ge=1, le=100, description="Number of rows to preview"),
+    db: AsyncSession = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ):
     """
@@ -435,8 +474,8 @@ async def preview_movement_data(
     Useful for checking uploaded data before downloading.
     """
     try:
-        service = CashReportService()
-        data = service.get_data_preview(session_id, limit)
+        service = CashReportService(db_session=db)
+        data = await service.get_data_preview(session_id, limit, user_id=current_user.id)
 
         return {
             "success": True,
@@ -445,6 +484,8 @@ async def preview_movement_data(
             "rows_shown": len(data),
         }
 
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.error(f"Error previewing data: {e}")
         raise HTTPException(status_code=500, detail=str(e))

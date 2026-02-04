@@ -74,6 +74,7 @@ class AITransactionClassifier:
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self.client = None
         self._cache: Dict[str, str] = {}  # Cache: hash(description+is_receipt) -> category
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         if self.api_key:
             genai.configure(api_key=self.api_key)
@@ -89,6 +90,14 @@ class AITransactionClassifier:
             )
         else:
             logger.warning("No GEMINI_API_KEY found, AI classifier will not work")
+
+    def get_and_reset_usage(self) -> Dict:
+        """Return accumulated token usage and reset counters."""
+        usage = dict(self._total_usage)
+        usage["model"] = "gemini-2.0-flash"
+        usage["provider"] = "gemini"
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return usage
 
     def classify_batch(
         self,
@@ -332,6 +341,19 @@ Return ONLY numbered list with category names. No explanations.
 
         try:
             response = self.client.generate_content(prompt)
+
+            # Track token usage from Gemini response
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                um = response.usage_metadata
+                inp = getattr(um, 'prompt_token_count', 0) or 0
+                out = getattr(um, 'candidates_token_count', 0) or 0
+                self._total_usage["input_tokens"] += inp
+                self._total_usage["output_tokens"] += out
+                self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
+                logger.debug(f"Gemini token usage batch: in={inp}, out={out}, cumulative={self._total_usage}")
+            else:
+                logger.warning(f"Gemini response missing usage_metadata: hasattr={hasattr(response, 'usage_metadata')}, value={getattr(response, 'usage_metadata', 'N/A')}")
+
             response_text = response.text
             ai_results = self._parse_classification_response(response_text, len(uncached_batch))
 

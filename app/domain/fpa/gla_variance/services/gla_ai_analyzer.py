@@ -81,6 +81,7 @@ class GLAAIAnalyzer:
             self.api_key = os.getenv("OPENAI_API_KEY")
 
         self.is_claude = self.model.startswith("claude")
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         # Initialize client
         self.client = None
@@ -144,6 +145,12 @@ class GLAAIAnalyzer:
             else:
                 response = self._call_openai(system_prompt, user_prompt)
 
+            # Accumulate token usage
+            tokens = response.get("tokens", {})
+            self._total_usage["input_tokens"] += tokens.get("input", 0)
+            self._total_usage["output_tokens"] += tokens.get("output", 0)
+            self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
+
             if callback:
                 callback(80, "Processing AI response...")
 
@@ -168,6 +175,14 @@ class GLAAIAnalyzer:
                 "analysis": self._generate_basic_analysis(summary).get("analysis", ""),
                 "model": self.model
             }
+
+    def get_and_reset_usage(self) -> Dict[str, Any]:
+        """Return accumulated token usage and reset counters."""
+        usage = dict(self._total_usage)
+        usage["model"] = self.model
+        usage["provider"] = "anthropic" if self.is_claude else "openai"
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return usage
 
     def _call_openai(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         """Call OpenAI API."""
@@ -336,6 +351,12 @@ class GLAAIAnalyzer:
             else:
                 response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
 
+            # Accumulate token usage
+            tokens = response.get("tokens", {})
+            self._total_usage["input_tokens"] += tokens.get("input", 0)
+            self._total_usage["output_tokens"] += tokens.get("output", 0)
+            self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
+
             # Parse JSON response
             batch_notes = self._parse_notes_response(response.get("content", ""))
 
@@ -346,6 +367,13 @@ class GLAAIAnalyzer:
                     response = self._call_claude(GLA_NOTES_SYSTEM_PROMPT, prompt)
                 else:
                     response = self._call_openai(GLA_NOTES_SYSTEM_PROMPT, prompt)
+
+                # Accumulate retry tokens
+                tokens = response.get("tokens", {})
+                self._total_usage["input_tokens"] += tokens.get("input", 0)
+                self._total_usage["output_tokens"] += tokens.get("output", 0)
+                self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
+
                 batch_notes = self._parse_notes_response(response.get("content", ""))
 
             all_notes.extend(batch_notes)

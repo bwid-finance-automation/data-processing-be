@@ -10,8 +10,10 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.fpa.ntm_ebitda.ntm_ebitda_use_case import NTMEBITDAUseCase
-from app.core.dependencies import get_db
+from app.core.dependencies import get_db, get_ai_usage_repository
+from app.infrastructure.persistence.repositories.ai_usage_repository import AIUsageRepository
 from app.shared.utils.logging_config import get_logger
+from app.shared.utils.ai_usage_tracker import log_ai_usage
 
 logger = get_logger(__name__)
 
@@ -40,6 +42,7 @@ async def analyze_ntm_variance(
     previous_label: Optional[str] = Query(None, description="Label for previous period (e.g., 'Sep\\'25')"),
     current_label: Optional[str] = Query(None, description="Label for current period (e.g., 'Nov\\'25')"),
     db: AsyncSession = Depends(get_db),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Analyze NTM EBITDA variance between two periods from a leasing model Excel file.
@@ -80,6 +83,8 @@ async def analyze_ntm_variance(
         )
 
     try:
+        import time as _time
+        _ntm_start = _time.monotonic()
         result = await ntm_use_case.execute(
             file=file,
             prev_sheet=prev_sheet,
@@ -87,7 +92,24 @@ async def analyze_ntm_variance(
             previous_label=previous_label,
             current_label=current_label
         )
+        _ntm_elapsed_ms = (_time.monotonic() - _ntm_start) * 1000
         logger.info(f"NTM EBITDA analysis successful: {result['statistics']['total_projects']} projects")
+
+        # Log AI usage
+        ai_usage = result.get("ai_usage")
+        if ai_usage and ai_usage.get("total_tokens", 0) > 0:
+            await log_ai_usage(
+                ai_usage_repo,
+                provider=ai_usage.get("provider", "openai"),
+                model_name=ai_usage.get("model", "gpt-4o"),
+                task_type="analysis",
+                input_tokens=ai_usage.get("input_tokens", 0),
+                output_tokens=ai_usage.get("output_tokens", 0),
+                processing_time_ms=_ntm_elapsed_ms,
+                task_description="NTM EBITDA variance analysis",
+                file_name=file.filename,
+            )
+
         return result
 
     except ValueError as e:

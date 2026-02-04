@@ -108,6 +108,7 @@ class Account511Analyzer:
 
         # Determine API type
         self.is_claude = "claude" in self.model.lower() if self.model else False
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         # Initialize client
         self.client = None
@@ -118,6 +119,14 @@ class Account511Analyzer:
                 self.client = OpenAI(api_key=self.api_key)
 
         self.tenant_matcher = TenantMatcher(min_confidence=0.6)
+
+    def get_and_reset_usage(self) -> Dict[str, Any]:
+        """Return accumulated token usage and reset counters."""
+        usage = dict(self._total_usage)
+        usage["model"] = self.model
+        usage["provider"] = "anthropic" if self.is_claude else "openai"
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return usage
 
     def analyze(
         self,
@@ -404,6 +413,9 @@ class Account511Analyzer:
             params["temperature"] = 0.3
 
         response = self.client.chat.completions.create(**params)
+        self._total_usage["input_tokens"] += getattr(response.usage, 'prompt_tokens', 0)
+        self._total_usage["output_tokens"] += getattr(response.usage, 'completion_tokens', 0)
+        self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
         return response.choices[0].message.content
 
     def _call_claude(self, context: str) -> str:
@@ -416,6 +428,9 @@ class Account511Analyzer:
                 {"role": "user", "content": context}
             ]
         )
+        self._total_usage["input_tokens"] += getattr(response.usage, 'input_tokens', 0)
+        self._total_usage["output_tokens"] += getattr(response.usage, 'output_tokens', 0)
+        self._total_usage["total_tokens"] = self._total_usage["input_tokens"] + self._total_usage["output_tokens"]
         return response.content[0].text
 
     def _parse_ai_response(self, response: str) -> Dict[str, Any]:

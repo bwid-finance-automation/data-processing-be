@@ -19,8 +19,9 @@ from app.presentation.schemas.analysis import (
 )
 from app.application.finance.variance_analysis.analyze_variance import analysis_service
 from app.application.project.project_service import ProjectService
-from app.core.dependencies import get_db
+from app.core.dependencies import get_db, get_ai_usage_repository
 from app.infrastructure.database.models.analysis_session import AnalysisSessionModel
+from app.infrastructure.persistence.repositories.ai_usage_repository import AIUsageRepository
 from app.shared.utils.helpers import build_config_overrides
 from app.shared.utils.file_validation import validate_file_list, FileValidator
 from app.shared.utils.input_sanitization import validate_analysis_parameters, sanitize_session_id
@@ -28,6 +29,7 @@ from app.core.config import get_settings, Settings
 from app.core.unified_config import get_unified_config
 from app.core.exceptions import FileProcessingError, ValidationError, SessionError
 from app.shared.utils.logging_config import get_logger
+from app.shared.utils.ai_usage_tracker import log_ai_usage
 
 logger = get_logger(__name__)
 
@@ -513,6 +515,7 @@ async def analyze_account_511_standalone(
     unit_for_lease_file: UploadFile = File(..., description="UnitForLeaseList file from NetSuite"),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
     db: AsyncSession = Depends(get_db),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Revenue Variance Analysis with UFL Linkage.
@@ -557,10 +560,28 @@ async def analyze_account_511_standalone(
         # Run Revenue Variance Analysis
         from app.domain.finance.variance_analysis.services.revenue_variance_analyzer import analyze_revenue_variance
 
+        import time as _time
+        _var_start = _time.monotonic()
         logger.info("Running revenue variance analysis with UFL linkage...")
-        xlsx_bytes = analyze_revenue_variance(revenue_bytes, unit_bytes)
+        xlsx_bytes, ai_usage = analyze_revenue_variance(revenue_bytes, unit_bytes, return_usage=True)
+        _var_elapsed_ms = (_time.monotonic() - _var_start) * 1000
 
         logger.info("Revenue variance analysis completed successfully")
+
+        # Log AI usage
+        if ai_usage and ai_usage.get("total_tokens", 0) > 0:
+            await log_ai_usage(
+                ai_usage_repo,
+                provider=ai_usage.get("provider", "openai"),
+                model_name=ai_usage.get("model", "gpt-4o"),
+                task_type="analysis",
+                input_tokens=ai_usage.get("input_tokens", 0),
+                output_tokens=ai_usage.get("output_tokens", 0),
+                processing_time_ms=_var_elapsed_ms,
+                task_description="Revenue variance analysis with UFL linkage",
+                file_name=f"{revenue_breakdown_file.filename}, {unit_for_lease_file.filename}",
+                file_count=2,
+            )
 
         # Save to project if project_uuid provided
         if project_uuid:

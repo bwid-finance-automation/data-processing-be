@@ -172,6 +172,9 @@ class GLAVarianceUseCase:
                 logger.warning(f"AI analysis failed: {e}")
                 ai_result = {"status": "error", "error": str(e)}
 
+            # Collect AI usage
+            ai_usage = ai_analyzer.get_and_reset_usage()
+
             # Generate output Excel file (now includes notes)
             excel_filename = f"gla_variance_{timestamp}.xlsx"
             excel_path = self.output_dir / excel_filename
@@ -196,7 +199,8 @@ class GLAVarianceUseCase:
                 "output_file": excel_filename,
                 "message": "GLA variance analysis completed successfully",
                 "statistics": statistics,
-                "results": [r.to_dict() for r in summary.results]
+                "results": [r.to_dict() for r in summary.results],
+                "ai_usage": ai_usage,
             }
 
             # Generate PDF with AI analysis

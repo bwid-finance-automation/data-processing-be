@@ -183,6 +183,10 @@ class NTMEBITDAUseCase:
                 "results": [r.to_dict() for r in summary.results],
             }
 
+            # Collect AI usage
+            ai_usage = ai_analyzer.get_and_reset_usage()
+            result["ai_usage"] = ai_usage
+
             if ai_result:
                 result["ai_analysis"] = {
                     "status": ai_result.get("status", "success"),

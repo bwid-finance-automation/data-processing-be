@@ -13,9 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.fpa.gla_variance.gla_variance_use_case import GLAVarianceUseCase
 from app.application.project.project_service import ProjectService
-from app.core.dependencies import get_db, get_project_service
+from app.core.dependencies import get_db, get_project_service, get_ai_usage_repository
 from app.infrastructure.database.models.gla import GLAProjectModel
+from app.infrastructure.persistence.repositories.ai_usage_repository import AIUsageRepository
 from app.shared.utils.logging_config import get_logger
+from app.shared.utils.ai_usage_tracker import log_ai_usage
 
 logger = get_logger(__name__)
 
@@ -91,6 +93,7 @@ async def analyze_gla_variance(
     current_label: Optional[str] = Query(None, description="Label for current period (e.g., 'Nov 2025')"),
     project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
     db: AsyncSession = Depends(get_db),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
     Analyze GLA variance between two periods from a single Excel file.
@@ -133,12 +136,30 @@ async def analyze_gla_variance(
         )
 
     try:
+        import time as _time
+        _gla_start = _time.monotonic()
         result = await gla_use_case.execute(
             file=file,
             previous_label=previous_label,
             current_label=current_label
         )
+        _gla_elapsed_ms = (_time.monotonic() - _gla_start) * 1000
         logger.info(f"GLA variance analysis successful: {result['statistics']['total_projects']} projects")
+
+        # Log AI usage
+        ai_usage = result.get("ai_usage")
+        if ai_usage and ai_usage.get("total_tokens", 0) > 0:
+            await log_ai_usage(
+                ai_usage_repo,
+                provider=ai_usage.get("provider", "openai"),
+                model_name=ai_usage.get("model", "gpt-4o"),
+                task_type="analysis",
+                input_tokens=ai_usage.get("input_tokens", 0),
+                output_tokens=ai_usage.get("output_tokens", 0),
+                processing_time_ms=_gla_elapsed_ms,
+                task_description="GLA variance analysis",
+                file_name=file.filename,
+            )
 
         # Save to project if project_uuid provided
         if project_uuid:
