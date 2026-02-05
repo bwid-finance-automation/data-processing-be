@@ -25,7 +25,7 @@ class TCBParser(BaseBankParser):
 
         TCB markers:
         - "TECHCOMBANK" or "KỸ THƯƠNG VIỆT NAM"
-        - "SỐ PHỤ KIÊM PHIẾU BÁO NỢ/CÓ" or "BANK STATEMENT"
+        - "SỐ PHỤ KIÊM PHIẾU BÁO NỢ/CÓ" or "BANK STATEMENT" or "TRANSACTION ENQUIRY" or "TRUY VẤN GIAO DỊCH"
         """
         try:
             xls = self.get_excel_file(file_bytes)
@@ -43,7 +43,12 @@ class TCBParser(BaseBankParser):
 
             # Check for Techcombank markers
             has_tcb = "TECHCOMBANK" in txt or "KỸ THƯƠNG" in txt
-            has_statement = "PHIẾU BÁO" in txt or "BANK STATEMENT" in txt
+            has_statement = (
+                "PHIẾU BÁO" in txt
+                or "BANK STATEMENT" in txt
+                or "TRANSACTION ENQUIRY" in txt
+                or "TRUY VẤN GIAO DỊCH" in txt
+            )
 
             return has_tcb and has_statement
 
@@ -51,14 +56,167 @@ class TCBParser(BaseBankParser):
             return False
 
     def parse_transactions(self, file_bytes: bytes, file_name: str) -> List[BankTransaction]:
-        """Parse TCB transactions from Excel file."""
-        # TODO: Implement Excel parsing if needed
-        return []
+        """
+        Parse TCB transactions from Excel file (TRANSACTION ENQUIRY format).
+
+        Excel structure:
+        - Rows 0-19: Header / balance summary
+        - Row 20: Column headers (Ngày giao dịch, Số bút toán, Diễn giải, Nợ/Debit, Có/Credit, etc.)
+        - Row 21+: Transaction data
+
+        Columns (0-11):
+        0: Ngày KH thực hiện/Requesting date
+        1: Ngày giao dịch/Transaction date
+        2: Số bút toán/Reference number
+        3: Ngân hàng đối tác / Remitter's bank
+        4: Tài khoản đích/Remitter's account number
+        5: Tên tài khoản đối ứng/Remitter's account name
+        6: Diễn giải/Description
+        7: Nợ/Debit
+        8: Có/Credit
+        9: Phí/Lãi / Fee/Interest
+        10: Thuế/Transaction VAT
+        11: Số dư/Running balance
+        """
+        try:
+            xls = self.get_excel_file(file_bytes)
+            df = pd.read_excel(xls, sheet_name=0, header=None)
+
+            # Extract account number and currency from header section
+            acc_no = self._extract_account_from_excel(df)
+            currency = self._extract_currency_from_excel(df)
+
+            logger.info(f"TCB Excel: account={acc_no}, currency={currency}")
+
+            # Find header row by scoring keywords
+            header_idx = self._find_header_row_excel(df)
+            if header_idx is None:
+                logger.warning("TCB Excel: Could not find header row")
+                return []
+
+            logger.info(f"TCB Excel: Header row at index {header_idx}")
+
+            # Parse transactions from rows below header
+            transactions = []
+            for row_idx in range(header_idx + 1, len(df)):
+                row = df.iloc[row_idx]
+
+                # Skip rows where transaction date is empty (NaN/empty rows)
+                tx_date_raw = row.iloc[1] if len(row) > 1 else None
+                if tx_date_raw is None or pd.isna(tx_date_raw):
+                    continue
+
+                # Parse debit/credit
+                debit_val = self.fix_number(row.iloc[7]) if len(row) > 7 else None
+                credit_val = self.fix_number(row.iloc[8]) if len(row) > 8 else None
+
+                # TCB debit values are negative in Excel, take absolute value
+                if debit_val is not None and debit_val < 0:
+                    debit_val = abs(debit_val)
+
+                # Parse Fee/Interest (col 9) and Tax (col 10)
+                # If negative, accumulate absolute value into debit
+                fee_val = self.fix_number(row.iloc[9]) if len(row) > 9 else None
+                tax_val = self.fix_number(row.iloc[10]) if len(row) > 10 else None
+
+                if fee_val is not None and fee_val < 0:
+                    debit_val = (debit_val or 0) + abs(fee_val)
+                if tax_val is not None and tax_val < 0:
+                    debit_val = (debit_val or 0) + abs(tax_val)
+
+                # Skip rows with no debit and no credit
+                if debit_val is None and credit_val is None:
+                    continue
+
+                # Parse description
+                description = self.to_text(row.iloc[6]) if len(row) > 6 else ""
+
+                # Parse reference number (transaction ID)
+                tx_id = self.to_text(row.iloc[2]) if len(row) > 2 else ""
+
+                tx = BankTransaction(
+                    bank_name="TCB",
+                    acc_no=acc_no or "",
+                    debit=credit_val,
+                    credit=debit_val,
+                    date=self.fix_date(tx_date_raw),
+                    description=description.strip(),
+                    currency=currency,
+                    transaction_id=tx_id,
+                    beneficiary_bank="",
+                    beneficiary_acc_no="",
+                    beneficiary_acc_name="",
+                )
+                transactions.append(tx)
+
+            logger.info(f"TCB Excel: Parsed {len(transactions)} transactions")
+            return transactions
+
+        except Exception as e:
+            logger.error(f"Error parsing TCB Excel transactions: {e}")
+            return []
 
     def parse_balances(self, file_bytes: bytes, file_name: str) -> Optional[BankBalance]:
-        """Parse TCB balance from Excel file."""
-        # TODO: Implement Excel parsing if needed
-        return None
+        """
+        Parse TCB balance from Excel file (TRANSACTION ENQUIRY format).
+
+        Balance info is in the header section (rows 8-12):
+        - Row with "Số dư đầu ngày/Opening balance" -> col 6 has value
+        - Row with "Số dư cuối ngày/ Closing balance" -> col 6 has value
+        """
+        try:
+            xls = self.get_excel_file(file_bytes)
+            df = pd.read_excel(xls, sheet_name=0, header=None)
+
+            acc_no = self._extract_account_from_excel(df)
+            currency = self._extract_currency_from_excel(df)
+
+            logger.info(f"TCB Excel balance: account={acc_no}, currency={currency}")
+
+            opening = 0.0
+            closing = 0.0
+
+            # Search in the first 20 rows for balance labels
+            top_rows = df.head(20)
+            for row_idx in range(len(top_rows)):
+                row = top_rows.iloc[row_idx]
+                for col_idx in range(min(len(row), 6)):
+                    cell_text = self.to_text(row.iloc[col_idx]).lower()
+
+                    # Opening balance
+                    if 'số dư đầu' in cell_text or 'opening balance' in cell_text:
+                        # Value is in a later column on the same row
+                        for val_col in range(col_idx + 1, len(row)):
+                            val = self.fix_number(row.iloc[val_col])
+                            if val is not None:
+                                opening = val
+                                break
+
+                    # Closing balance
+                    if 'số dư cuối' in cell_text or 'closing balance' in cell_text:
+                        for val_col in range(col_idx + 1, len(row)):
+                            val = self.fix_number(row.iloc[val_col])
+                            if val is not None:
+                                closing = val
+                                break
+
+            if opening == 0 and closing == 0:
+                logger.warning("TCB Excel: No balances found")
+                return None
+
+            logger.info(f"TCB Excel: opening={opening}, closing={closing}")
+
+            return BankBalance(
+                bank_name="TCB",
+                acc_no=acc_no or "",
+                currency=currency,
+                opening_balance=opening,
+                closing_balance=closing,
+            )
+
+        except Exception as e:
+            logger.error(f"Error parsing TCB Excel balances: {e}")
+            return None
 
     # ========== OCR Text Parsing Methods (PDF via Gemini) ==========
 
@@ -376,7 +534,73 @@ class TCBParser(BaseBankParser):
             closing_balance=closing
         )
 
-    # ========== Helper Methods ==========
+    # ========== Excel Helper Methods ==========
+
+    def _extract_account_from_excel(self, df: pd.DataFrame) -> Optional[str]:
+        """Extract account number from Excel header rows."""
+        top = df.head(15)
+        for _, row in top.iterrows():
+            for col_idx in range(min(len(row), 4)):
+                cell_text = self.to_text(row.iloc[col_idx]).lower()
+                if 'số tài khoản' in cell_text or 'account number' in cell_text:
+                    # Account number is in the next column
+                    if col_idx + 1 < len(row):
+                        acc_val = self.to_text(row.iloc[col_idx + 1])
+                        if acc_val:
+                            # Extract digits
+                            digits = ''.join(c for c in acc_val if c.isdigit())
+                            if len(digits) >= 5:
+                                return digits
+        return None
+
+    def _extract_currency_from_excel(self, df: pd.DataFrame) -> str:
+        """Extract currency from Excel header rows."""
+        top = df.head(15)
+        for _, row in top.iterrows():
+            for col_idx in range(min(len(row), 4)):
+                cell_text = self.to_text(row.iloc[col_idx]).lower()
+                if 'loại tiền' in cell_text or 'currency' in cell_text:
+                    if col_idx + 1 < len(row):
+                        currency_val = self.to_text(row.iloc[col_idx + 1]).upper().strip()
+                        if currency_val in ('VND', 'USD', 'EUR'):
+                            return currency_val
+        return "VND"
+
+    def _find_header_row_excel(self, df: pd.DataFrame) -> Optional[int]:
+        """
+        Find the transaction table header row by scoring keywords.
+
+        Looks for rows containing: Ngày giao dịch, Transaction date, Nợ/Debit, Có/Credit, Diễn giải, Description
+        """
+        best_idx = None
+        best_score = 0
+
+        for row_idx in range(min(len(df), 25)):
+            row = df.iloc[row_idx]
+            row_text = " ".join([self.to_text(cell).upper() for cell in row])
+
+            score = 0
+            if "NGÀY GIAO DỊCH" in row_text or "TRANSACTION DATE" in row_text:
+                score += 2
+            if "NỢ" in row_text or "DEBIT" in row_text:
+                score += 1
+            if "CÓ" in row_text or "CREDIT" in row_text:
+                score += 1
+            if "DIỄN GIẢI" in row_text or "DESCRIPTION" in row_text:
+                score += 1
+            if "SỐ BÚT TOÁN" in row_text or "REFERENCE" in row_text:
+                score += 1
+
+            if score > best_score:
+                best_score = score
+                best_idx = row_idx
+
+        if best_score >= 3:
+            return best_idx
+
+        return None
+
+    # ========== OCR Helper Methods ==========
 
     def _extract_account_from_ocr(self, text: str) -> Optional[str]:
         """Extract account number from OCR text."""

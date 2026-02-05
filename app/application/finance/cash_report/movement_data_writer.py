@@ -215,8 +215,8 @@ class MovementDataWriter:
                 'account': tx.account,
                 'date': tx.date,
                 'description': tx.description,
-                'debit': float(tx.debit) if tx.debit else None,
-                'credit': float(tx.credit) if tx.credit else None,
+                'debit': float(tx.debit) if tx.debit else 0,
+                'credit': float(tx.credit) if tx.credit else 0,
                 'nature': tx.nature,
             }
             for tx in transactions
@@ -227,6 +227,20 @@ class MovementDataWriter:
         )
         logger.info(f"Appended {rows_added} transactions, total: {total_rows}")
         return rows_added, total_rows
+
+    def highlight_settlement_rows(self, row_numbers: List[int]) -> None:
+        """
+        Apply settlement highlight (orange/theme 5 tint 0.6) to specific rows in Movement sheet.
+        Uses byte-level XML manipulation to avoid corrupting drawings/charts.
+
+        Args:
+            row_numbers: List of 1-based row numbers to highlight
+        """
+        if not row_numbers:
+            return
+
+        handler = get_openpyxl_handler()
+        handler.highlight_rows(self.working_file_path, "Movement", row_numbers)
 
     def remove_transactions_by_source(self, source_name: str) -> int:
         """

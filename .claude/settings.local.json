@@ -35,7 +35,8 @@
       "Bash(sc query:*)",
       "Bash(net stop:*)",
       "Bash(del \"d:\\\\Project\\\\data-processing-be\\\\app\\\\application\\\\finance\\\\bank_statement_parser\\\\bank_parsers\\\\ctbc_parser.py\")",
-      "Bash(del:*)"
+      "Bash(del:*)",
+      "Bash(ls -la \"d:\\\\Project\\\\data-processing-be\\\\app\\\\application\\\\finance\\\\bank_statement_parser\\\\bank_parsers\"\" | findstr \".py \")"
     ],
     "deny": [],
     "ask": []

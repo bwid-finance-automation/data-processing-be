@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 # Pricing table: model_prefix -> (input_cost_per_token, output_cost_per_token)
 AI_PRICING = {
     # Google Gemini
-    "gemini-2.0-flash": (0.000000075, 0.0000003),
+    "gemini-2.0-flash": (0.0000001, 0.0000004),
     "gemini-1.5-flash": (0.000000075, 0.0000003),
     "gemini-1.5-pro": (0.00000125, 0.000005),
     # OpenAI

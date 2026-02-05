@@ -667,6 +667,220 @@ class OpenpyxlHandler:
 
         return re.sub(pattern, replace_ref, formula)
 
+    @staticmethod
+    def _expand_shared_formula(master_formula: str, master_row: int, target_row: int) -> str:
+        """
+        Expand a shared formula from master_row to target_row.
+        Shifts ALL relative row references by (target_row - master_row).
+        Absolute references ($) are preserved unchanged.
+
+        Unlike _adjust_formula (which only shifts references matching source_row),
+        this shifts every relative reference — required for shared formula expansion
+        where cross-row references (e.g. SUM ranges) must also shift.
+        """
+        if not master_formula:
+            return master_formula
+
+        delta = target_row - master_row
+        if delta == 0:
+            return master_formula
+
+        pattern = r'(\$?[A-Z]+)(\$?)(\d+)'
+
+        def replace_ref(match):
+            col = match.group(1)
+            dollar = match.group(2)
+            row_num = int(match.group(3))
+
+            if dollar == '$':
+                return f"{col}${row_num}"
+
+            return f"{col}{row_num + delta}"
+
+        return re.sub(pattern, replace_ref, master_formula)
+
+    def _read_sheet_xml(self, file_path: Path, sheet_name: str) -> Tuple[bytes, str, bytes]:
+        """Read ZIP data and extract a named sheet's XML bytes."""
+        with open(file_path, "rb") as f:
+            zip_data = f.read()
+        sheet_paths = self._get_sheet_xml_paths(zip_data)
+        sheet_path = sheet_paths.get(sheet_name)
+        if not sheet_path:
+            raise ValueError(f"{sheet_name} sheet not found in workbook")
+        with zipfile.ZipFile(io.BytesIO(zip_data), "r") as z:
+            sheet_xml = z.read(sheet_path)
+        return zip_data, sheet_path, sheet_xml
+
+    def remove_zero_closing_balance_saving_rows(self, file_path: Path) -> int:
+        """
+        Remove rows from Saving Account sheet where CLOSING BALANCE (VND) = 0.
+
+        Phase 1: Find CLOSING BALANCE (VND) column letter from headers (openpyxl).
+        Phase 2: Read XML directly to detect zero values + collect shared formulas.
+        Phase 3: Remove rows, convert shared formulas to regular, renumber.
+
+        Returns:
+            Number of rows removed
+        """
+        SAVING_SHEET = "Saving Account"
+        DATA_START_ROW = 4
+
+        # Phase 1: Find CLOSING BALANCE (VND) column letter from headers
+        wb = load_workbook(file_path, data_only=True, read_only=True)
+        try:
+            if SAVING_SHEET not in wb.sheetnames:
+                logger.warning("Saving Account sheet not found, skipping zero-balance cleanup")
+                return 0
+
+            ws = wb[SAVING_SHEET]
+            closing_vnd_col = None  # column letter (e.g. "F")
+            for row in ws.iter_rows(min_row=1, max_row=3, values_only=False):
+                for cell in row:
+                    val = str(cell.value or "").upper()
+                    if "CLOSING BALANCE" in val and "VND" in val:
+                        closing_vnd_col = get_column_letter(cell.column)
+                        break
+                if closing_vnd_col:
+                    break
+        finally:
+            wb.close()
+
+        if not closing_vnd_col:
+            logger.warning("CLOSING BALANCE (VND) column not found in Saving Account headers")
+            return 0
+
+        # Phase 2: Read sheet XML, detect zero-balance rows + collect shared formulas
+        zip_data, sheet_path, sheet_xml = self._read_sheet_xml(file_path, SAVING_SHEET)
+        self._register_all_ns()
+        ns = self._NS
+
+        last_data_row = self._find_last_data_row_bytes(sheet_xml)
+        if last_data_row < DATA_START_ROW:
+            return 0
+
+        target_rows = set(range(DATA_START_ROW, last_data_row + 1))
+        row_positions = self._find_row_byte_positions(sheet_xml, target_rows)
+        if not row_positions:
+            return 0
+
+        rows_to_remove = set()
+        shared_formulas = {}  # si -> (formula_text, master_row)
+
+        for row_num in sorted(row_positions.keys()):
+            start, end = row_positions[row_num]
+            row_el = self._parse_single_row(sheet_xml[start:end])
+
+            has_account = False
+            closing_is_zero = False
+
+            for cell in row_el:
+                ref = cell.get("r", "")
+                col_match = re.match(r"([A-Z]+)", ref)
+                if not col_match:
+                    continue
+                col = col_match.group(1)
+
+                # Check column C for account data
+                if col == "C":
+                    v_el = cell.find(f"{{{ns}}}v")
+                    is_el = cell.find(f"{{{ns}}}is")
+                    if (v_el is not None and v_el.text) or is_el is not None:
+                        has_account = True
+
+                # Check CLOSING BALANCE (VND) column for zero via <v> element
+                if col == closing_vnd_col:
+                    v_el = cell.find(f"{{{ns}}}v")
+                    if v_el is not None and v_el.text:
+                        try:
+                            if float(v_el.text) == 0:
+                                closing_is_zero = True
+                        except (ValueError, TypeError):
+                            pass
+
+                # Collect shared formula masters (needed for Phase 3)
+                f_el = cell.find(f"{{{ns}}}f")
+                if f_el is not None and f_el.get("t") == "shared" and f_el.text:
+                    si = f_el.get("si")
+                    if si is not None and si not in shared_formulas:
+                        shared_formulas[si] = (f_el.text, row_num)
+
+            if has_account and closing_is_zero:
+                rows_to_remove.add(row_num)
+
+        if not rows_to_remove:
+            logger.info("No zero-closing-balance rows found in Saving Account sheet")
+            return 0
+
+        # Phase 3: Remove rows, convert shared formulas, renumber
+        remaining_rows = []
+        new_row_num = DATA_START_ROW
+
+        for row_num in sorted(row_positions.keys()):
+            if row_num in rows_to_remove:
+                continue
+
+            start, end = row_positions[row_num]
+            row_el = self._parse_single_row(sheet_xml[start:end])
+
+            # Renumber row
+            row_el.set("r", str(new_row_num))
+            for cell in row_el:
+                ref = cell.get("r", "")
+                col_match = re.match(r"([A-Z]+)", ref)
+                if col_match:
+                    cell.set("r", f"{col_match.group(1)}{new_row_num}")
+
+                # Handle formulas
+                f_el = cell.find(f"{{{ns}}}f")
+                if f_el is not None:
+                    if f_el.get("t") == "shared":
+                        # Convert shared formula → regular formula
+                        si = f_el.get("si")
+                        if f_el.text:
+                            # Master cell: expand from own row to new row
+                            f_el.text = self._expand_shared_formula(
+                                f_el.text, row_num, new_row_num
+                            )
+                        elif si and si in shared_formulas:
+                            # Dependent cell: expand from master row to new row
+                            master_formula, master_row = shared_formulas[si]
+                            f_el.text = self._expand_shared_formula(
+                                master_formula, master_row, new_row_num
+                            )
+                        # Strip shared formula attributes
+                        for attr in ("t", "si", "ref"):
+                            if attr in f_el.attrib:
+                                del f_el.attrib[attr]
+                    elif f_el.text and row_num != new_row_num:
+                        # Regular formula: adjust row references
+                        f_el.text = self._expand_shared_formula(
+                            f_el.text, row_num, new_row_num
+                        )
+
+            row_bytes = self._serialize_row(row_el)
+            remaining_rows.append(row_bytes)
+            new_row_num += 1
+
+        # Replace data row region
+        sorted_positions = sorted(row_positions.values())
+        first_start = sorted_positions[0][0]
+        last_end = sorted_positions[-1][1]
+
+        new_sheet_xml = b''.join([
+            sheet_xml[:first_start],
+            *remaining_rows,
+            sheet_xml[last_end:],
+        ])
+
+        # Update dimension
+        if remaining_rows:
+            new_sheet_xml = self._update_dimension(new_sheet_xml, new_row_num - 1)
+
+        self._write_sheet_xml(file_path, zip_data, sheet_path, new_sheet_xml)
+
+        logger.info(f"Removed {len(rows_to_remove)} zero-closing-balance rows from Saving Account sheet")
+        return len(rows_to_remove)
+
     def remove_rows_by_source(self, file_path: Path, source_name: str) -> int:
         """
         Remove rows with matching source name (column A) via byte-level manipulation.
@@ -1285,6 +1499,221 @@ class OpenpyxlHandler:
         )
 
         return 0
+
+    def highlight_rows(
+        self, file_path: Path, sheet_name: str, row_numbers: List[int]
+    ) -> None:
+        """
+        Apply orange settlement highlight to specific rows via XML manipulation.
+        Does NOT use openpyxl load/save (which corrupts drawings/charts).
+
+        Modifies only:
+        - xl/styles.xml: adds a fill + cloned xf entries
+        - Sheet XML: updates cell s= attributes on target rows
+        All other ZIP entries (drawings, charts, etc.) are preserved byte-for-byte.
+        """
+        if not row_numbers:
+            return
+
+        with open(file_path, "rb") as f:
+            zip_data = f.read()
+
+        sheet_paths = self._get_sheet_xml_paths(zip_data)
+        sheet_path = sheet_paths.get(sheet_name)
+        if not sheet_path:
+            raise ValueError(f"{sheet_name} sheet not found")
+
+        with zipfile.ZipFile(io.BytesIO(zip_data), "r") as z:
+            styles_xml = z.read("xl/styles.xml")
+            sheet_xml = z.read(sheet_path)
+
+        self._register_all_ns()
+
+        # --- Step 1: Collect unique style indices from target rows ---
+        row_set = set(row_numbers)
+        row_positions = self._find_row_byte_positions(sheet_xml, row_set)
+
+        unique_styles = set()
+        for row_num in row_numbers:
+            if row_num not in row_positions:
+                continue
+            start, end = row_positions[row_num]
+            for m in re.finditer(rb'<c\s[^>]*?s="(\d+)"', sheet_xml[start:end]):
+                unique_styles.add(m.group(1).decode())
+
+        # --- Step 2: Modify styles.xml via byte manipulation ---
+        styles_xml, style_map = self._add_highlight_styles(
+            styles_xml, unique_styles
+        )
+
+        # --- Step 3: Update cell styles in target rows ---
+        modifications = []
+        for row_num in sorted(row_numbers):
+            if row_num not in row_positions:
+                continue
+            start, end = row_positions[row_num]
+            row_el = self._parse_single_row(sheet_xml[start:end])
+
+            for cell in row_el:
+                old_s = cell.get("s")
+                new_s = style_map.get(old_s, style_map.get(None))
+                if new_s:
+                    cell.set("s", new_s)
+
+            new_bytes = self._serialize_row(row_el)
+            modifications.append((start, end, new_bytes))
+
+        # Apply modifications to sheet XML
+        modifications.sort(key=lambda x: x[0])
+        parts = []
+        last_end = 0
+        for start, end, new_bytes in modifications:
+            parts.append(sheet_xml[last_end:start])
+            parts.append(new_bytes)
+            last_end = end
+        parts.append(sheet_xml[last_end:])
+        new_sheet_xml = b''.join(parts)
+
+        # --- Step 4: Write back to ZIP (preserving drawings etc.) ---
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(zip_data), "r") as src_zip:
+            with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dst_zip:
+                for entry in src_zip.namelist():
+                    if entry == "xl/styles.xml":
+                        dst_zip.writestr(entry, styles_xml)
+                    elif entry == sheet_path:
+                        dst_zip.writestr(entry, new_sheet_xml)
+                    else:
+                        dst_zip.writestr(entry, src_zip.read(entry))
+
+        with open(file_path, "wb") as f:
+            f.write(output.getvalue())
+
+        logger.info(f"Highlighted {len(row_numbers)} rows in '{sheet_name}' via XML")
+
+    @staticmethod
+    def _add_highlight_styles(
+        styles_xml: bytes, unique_styles: set
+    ) -> tuple:
+        """
+        Add orange fill and cloned xf entries to styles.xml via byte manipulation.
+        Returns (modified_styles_xml, style_map).
+
+        style_map: {old_s_str_or_None: new_s_str}
+        """
+        # --- Add fill (theme 5, tint 0.6 = orange) ---
+        fill_xml = (
+            b'<fill><patternFill patternType="solid">'
+            b'<fgColor theme="5" tint="0.5999938962981048"/>'
+            b'</patternFill></fill>'
+        )
+
+        fills_count_m = re.search(rb'<fills\s+count="(\d+)"', styles_xml)
+        old_fill_count = int(fills_count_m.group(1))
+        new_fill_id = old_fill_count
+
+        # Insert fill before </fills>
+        fills_close = styles_xml.find(b'</fills>')
+        styles_xml = (
+            styles_xml[:fills_close]
+            + fill_xml
+            + styles_xml[fills_close:]
+        )
+        # Update fills count attribute
+        fills_count_m2 = re.search(rb'<fills\s+count="(\d+)"', styles_xml)
+        new_fills_tag = f'<fills count="{old_fill_count + 1}"'.encode()
+        styles_xml = (
+            styles_xml[:fills_count_m2.start()]
+            + new_fills_tag
+            + styles_xml[fills_count_m2.end():]
+        )
+
+        # --- Extract existing xf entries from cellXfs ---
+        cellXfs_m = re.search(rb'<cellXfs\s+count="(\d+)"', styles_xml)
+        old_xf_count = int(cellXfs_m.group(1))
+        cellXfs_start = cellXfs_m.start()
+        cellXfs_close = styles_xml.find(b'</cellXfs>', cellXfs_start)
+        cellXfs_section = styles_xml[cellXfs_start:cellXfs_close]
+
+        # Extract individual <xf .../> or <xf ...>...</xf> entries
+        xf_entries = []
+        for m in re.finditer(rb'<xf\s', cellXfs_section):
+            xf_start = m.start()
+            tag_end = cellXfs_section.find(b'>', m.end())
+            if cellXfs_section[tag_end - 1:tag_end] == b'/':
+                xf_entries.append(cellXfs_section[xf_start:tag_end + 1])
+            else:
+                close = cellXfs_section.find(b'</xf>', tag_end)
+                xf_entries.append(cellXfs_section[xf_start:close + 5])
+
+        # Build style map and new xf bytes
+        style_map = {}
+        next_idx = old_xf_count
+        new_xf_parts = []
+
+        # Bare xf for cells without any style
+        bare_xf = (
+            f'<xf numFmtId="0" fontId="0" fillId="{new_fill_id}" '
+            f'borderId="0" applyFill="1"/>'
+        ).encode()
+        new_xf_parts.append(bare_xf)
+        style_map[None] = str(next_idx)
+        next_idx += 1
+
+        # Clone each unique existing style with the new fill
+        for s in sorted(unique_styles):
+            s_idx = int(s)
+            if s_idx < len(xf_entries):
+                cloned = xf_entries[s_idx]
+                # Replace or add fillId
+                if b'fillId=' in cloned:
+                    cloned = re.sub(
+                        rb'fillId="\d+"',
+                        f'fillId="{new_fill_id}"'.encode(),
+                        cloned,
+                        count=1,
+                    )
+                else:
+                    cloned = cloned.replace(
+                        b'<xf ', f'<xf fillId="{new_fill_id}" '.encode(), 1
+                    )
+                # Add or update applyFill
+                if b'applyFill=' in cloned:
+                    cloned = re.sub(
+                        rb'applyFill="[^"]*"', b'applyFill="1"', cloned, count=1
+                    )
+                else:
+                    cloned = cloned.replace(
+                        b'<xf ', b'<xf applyFill="1" ', 1
+                    )
+            else:
+                cloned = (
+                    f'<xf numFmtId="0" fontId="0" fillId="{new_fill_id}" '
+                    f'borderId="0" applyFill="1"/>'
+                ).encode()
+            new_xf_parts.append(cloned)
+            style_map[s] = str(next_idx)
+            next_idx += 1
+
+        # Insert new xf entries before </cellXfs>
+        cellXfs_close_pos = styles_xml.find(b'</cellXfs>')
+        insert_bytes = b''.join(new_xf_parts)
+        styles_xml = (
+            styles_xml[:cellXfs_close_pos]
+            + insert_bytes
+            + styles_xml[cellXfs_close_pos:]
+        )
+
+        # Update cellXfs count
+        cellXfs_count_m = re.search(rb'<cellXfs\s+count="(\d+)"', styles_xml)
+        new_xfs_tag = f'<cellXfs count="{next_idx}"'.encode()
+        styles_xml = (
+            styles_xml[:cellXfs_count_m.start()]
+            + new_xfs_tag
+            + styles_xml[cellXfs_count_m.end():]
+        )
+
+        return styles_xml, style_map
 
 
 # Singleton instance for reuse

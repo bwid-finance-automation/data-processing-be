@@ -777,14 +777,109 @@ class CashReportService:
         writer = MovementDataWriter(working_file)
         return writer.get_data_preview(limit)
 
+    def _read_saving_accounts(self, working_file: str) -> List[Dict[str, Any]]:
+        """
+        Read Saving Account sheet from working file.
+
+        Returns:
+            List of dicts with keys: account, bank_1, bank, entity, branch
+        """
+        import openpyxl
+        wb = openpyxl.load_workbook(working_file, data_only=True, read_only=True)
+        saving_accounts = []
+        try:
+            if "Saving Account" not in wb.sheetnames:
+                logger.warning("Saving Account sheet not found")
+                return []
+
+            ws = wb["Saving Account"]
+            # Row 3 = headers, Row 4+ = data
+            # Col A=Entity, B=Branch, C=Account Number, D=Type, E=Currency,
+            # Col N(14)=Bank_1 (short code like TCB, BIDV), Col O(15)=Bank (full name)
+            for row_data in ws.iter_rows(min_row=4, values_only=False):
+                account = row_data[2].value if len(row_data) > 2 else None
+                if not account:
+                    continue
+                saving_accounts.append({
+                    "entity": str(row_data[0].value or "").strip(),
+                    "branch": str(row_data[1].value or "").strip(),
+                    "account": str(account).strip(),
+                    "bank_1": str(row_data[13].value or "").strip() if len(row_data) > 13 else "",
+                    "bank": str(row_data[14].value or "").strip() if len(row_data) > 14 else "",
+                })
+        finally:
+            wb.close()
+
+        logger.info(f"Loaded {len(saving_accounts)} saving accounts")
+        return saving_accounts
+
+    def _find_saving_account(
+        self,
+        description: str,
+        bank: str,
+        entity: str,
+        saving_accounts: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        """
+        Find saving account number with 2 separate logics:
+
+        Logic 1: Description contains account number (e.g. 'TAT TOAN TIEN GUI SO 14501110378000')
+                 → Extract and use directly as saving account
+        Logic 2: Description does NOT contain account number
+                 → Lookup in Saving Account sheet by bank + entity match
+
+        Returns:
+            Saving account number or None
+        """
+        import re
+
+        # Logic 1: Extract account number from description
+        # Try patterns: "SO 14501110378000", "STK ...", "TK ..."
+        acc_match = re.search(r'(?:SO|STK|TK|S/N|SN)\s*(\d{6,20})', description, re.IGNORECASE)
+        if acc_match:
+            logger.info(f"Settlement Logic 1: found account {acc_match.group(1)} in description")
+            return acc_match.group(1)
+
+        # Also try any long number sequence in description
+        all_numbers = re.findall(r'\d{8,20}', description)
+        if all_numbers:
+            logger.info(f"Settlement Logic 1: found number {all_numbers[0]} in description")
+            return all_numbers[0]
+
+        # Logic 2: No account in description → lookup Saving Account sheet
+        bank_upper = bank.upper().strip() if bank else ""
+        entity_upper = entity.upper().strip() if entity else ""
+
+        # Match by bank AND entity
+        matches = [
+            sa for sa in saving_accounts
+            if sa["bank_1"].upper() == bank_upper
+            and sa["entity"].upper() == entity_upper
+        ]
+        if len(matches) == 1:
+            logger.info(f"Settlement Logic 2: found saving account {matches[0]['account']} by bank={bank} + entity={entity}")
+            return matches[0]["account"]
+        elif len(matches) > 1:
+            logger.warning(f"Settlement Logic 2: multiple saving accounts found for bank={bank}, entity={entity}: {[m['account'] for m in matches]}")
+            return matches[0]["account"]
+
+        # Fallback: match by bank only
+        matches_bank = [sa for sa in saving_accounts if sa["bank_1"].upper() == bank_upper]
+        if len(matches_bank) == 1:
+            logger.info(f"Settlement Logic 2 fallback: found saving account {matches_bank[0]['account']} by bank={bank}")
+            return matches_bank[0]["account"]
+
+        logger.warning(f"Settlement: no saving account found for description='{description}', bank={bank}, entity={entity}")
+        return None
+
     async def run_settlement_automation(self, session_id: str, user_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Run settlement (tất toán) automation on Movement data.
 
-        This detects saving account transactions and creates counter entries:
-        - Detect "tất toán" (close/settle) transactions
-        - Create counter entries for internal transfers
-        - Append counter entries to Movement sheet
+        Logic:
+        1. Detect settlement transactions by keyword patterns
+        2. Lookup saving account from Saving Account sheet (by account number in description + bank match)
+        3. Create counter entry with saving account, reversed debit/credit, nature = Internal transfer out
 
         Args:
             session_id: The session ID
@@ -803,7 +898,7 @@ class CashReportService:
 
         writer = MovementDataWriter(working_file)
 
-        # Read all current transactions
+        # Read all current transactions + entity (col J) for settlement lookup
         transactions = writer.get_all_transactions()
         if not transactions:
             return {
@@ -812,6 +907,21 @@ class CashReportService:
                 "message": "No transactions found in Movement sheet",
                 "counter_entries_created": 0,
             }
+
+        # Read entity (col J = col 10) from Movement for each transaction
+        import openpyxl
+        wb_tmp = openpyxl.load_workbook(working_file, data_only=True, read_only=True)
+        ws_tmp = wb_tmp["Movement"]
+        tx_entities = {}
+        for row_idx, row_data in enumerate(ws_tmp.iter_rows(min_row=4, max_col=10), start=4):
+            acc = row_data[2].value if len(row_data) > 2 else None
+            if acc:
+                entity_val = str(row_data[9].value or "").strip() if len(row_data) > 9 else ""
+                tx_entities[row_idx] = entity_val
+        wb_tmp.close()
+
+        # Read Saving Account sheet for lookup
+        saving_accounts = self._read_saving_accounts(working_file)
 
         # Patterns for detecting tất toán (settlement) transactions
         settlement_patterns = [
@@ -827,19 +937,26 @@ class CashReportService:
         ]
         compiled_patterns = [re.compile(p, re.IGNORECASE) for p in settlement_patterns]
 
-        # Detect settlement transactions
+        # Detect settlement transactions (only Cash In / debit > 0)
+        # Store as (tx, row_index) tuples to access entity later
         settlement_transactions = []
-        for tx in transactions:
-            # Skip if already a counter entry
-            if tx.source and "Counter" in tx.source:
+        for idx, tx in enumerate(transactions):
+            row_idx = idx + 4  # transactions start at row 4
+
+            # Skip if source is already a settlement counter
+            if tx.source and tx.source.strip() == "Automation" and tx.nature and "transfer out" in tx.nature.lower():
+                continue
+
+            # Only detect on Cash In transactions (debit > 0)
+            if not tx.debit or tx.debit <= 0:
                 continue
 
             # Check description for settlement patterns
-            desc = tx.description.lower() if tx.description else ""
+            desc = tx.description if tx.description else ""
             is_settlement = any(p.search(desc) for p in compiled_patterns)
 
             if is_settlement:
-                settlement_transactions.append(tx)
+                settlement_transactions.append((tx, row_idx))
 
         if not settlement_transactions:
             return {
@@ -850,50 +967,112 @@ class CashReportService:
                 "total_transactions_scanned": len(transactions),
             }
 
+        # Check if counter entries already exist (prevent duplicates)
+        existing_descs = set()
+        for tx in transactions:
+            if tx.nature and "transfer out" in tx.nature.lower():
+                existing_descs.add(tx.description.strip() if tx.description else "")
+
         # Create counter entries
         counter_entries = []
-        for tx in settlement_transactions:
-            # Counter entry has reversed debit/credit
+        original_row_indices = []  # Track original rows for highlighting
+        skipped_no_account = []
+        skipped_duplicate = []
+        for tx, row_idx in settlement_transactions:
+            # Skip if counter entry already exists for this description
+            desc = tx.description.strip() if tx.description else ""
+            if desc in existing_descs:
+                skipped_duplicate.append(desc)
+                continue
+
+            # Get entity from Movement col J for this row
+            entity = tx_entities.get(row_idx, "")
+
+            # Lookup saving account (2 logics: from description or from Saving Account sheet)
+            saving_acc = self._find_saving_account(
+                description=tx.description or "",
+                bank=tx.bank or "",
+                entity=entity,
+                saving_accounts=saving_accounts,
+            )
+
+            if not saving_acc:
+                skipped_no_account.append(tx.description)
+                logger.warning(f"Settlement: no saving account found for '{tx.description}', bank={tx.bank}, entity={entity}")
+                continue
+
+            # Counter entry: same description, saving account, reversed amounts
             counter = MovementTransaction(
-                source="Counter Entry",
+                source="Automation",
                 bank=tx.bank,
-                account=tx.account,  # Same account for now
+                account=saving_acc,
                 date=tx.date,
-                description=f"[Counter] {tx.description[:80] if tx.description else ''}",
-                debit=tx.credit,  # Reverse: original credit -> counter debit
-                credit=tx.debit,  # Reverse: original debit -> counter credit
-                nature="Internal transfer" if tx.debit else "Internal transfer",
+                description=tx.description or "",
+                debit=Decimal("0"),
+                credit=tx.debit,  # Original debit (cash in) becomes credit (cash out) on saving account
+                nature="Internal transfer out",
             )
             counter_entries.append(counter)
+            original_row_indices.append(row_idx)
 
-        # Append counter entries to Movement sheet
-        if counter_entries:
-            rows_added, total_rows = writer.append_transactions(counter_entries)
-
-            # Update session stats
-            if self.db_session:
-                await self.db_session.execute(
-                    update(CashReportSessionModel)
-                    .where(CashReportSessionModel.session_id == session_id)
-                    .values(
-                        total_transactions=CashReportSessionModel.total_transactions + rows_added,
-                    )
-                )
-                await self.db_session.commit()
-
+        if not counter_entries:
+            msg = "No counter entries created"
+            if skipped_no_account:
+                msg += f". {len(skipped_no_account)} skipped (no matching saving account)"
+            if skipped_duplicate:
+                msg += f". {len(skipped_duplicate)} skipped (already exists)"
             return {
                 "session_id": session_id,
-                "status": "success",
-                "message": f"Created {rows_added} counter entries",
-                "counter_entries_created": rows_added,
-                "total_rows_in_movement": total_rows,
-                "settlement_transactions_found": len(settlement_transactions),
+                "status": "no_counter_entries",
+                "message": msg,
+                "counter_entries_created": 0,
+                "skipped_no_account": len(skipped_no_account),
+                "skipped_duplicate": len(skipped_duplicate),
                 "total_transactions_scanned": len(transactions),
             }
 
+        # Append counter entries to Movement sheet
+        rows_added, total_rows = writer.append_transactions(counter_entries)
+
+        # Highlight both original settlement rows and counter entry rows
+        # Counter entries start at (total_rows - rows_added + FIRST_DATA_ROW)
+        counter_start_row = total_rows - rows_added + 4  # 4 = FIRST_DATA_ROW
+        counter_row_indices = list(range(counter_start_row, counter_start_row + rows_added))
+        all_highlight_rows = original_row_indices + counter_row_indices
+        try:
+            writer.highlight_settlement_rows(all_highlight_rows)
+        except Exception as e:
+            logger.warning(f"Failed to highlight settlement rows: {e}")
+
+        # Remove rows from Saving Account sheet where CLOSING BALANCE (VND) = 0
+        from .openpyxl_handler import get_openpyxl_handler
+        handler = get_openpyxl_handler()
+        saving_rows_removed = 0
+        try:
+            saving_rows_removed = handler.remove_zero_closing_balance_saving_rows(Path(working_file))
+        except Exception as e:
+            logger.warning(f"Failed to remove zero-closing-balance saving rows: {e}")
+
+        # Update session stats
+        if self.db_session:
+            await self.db_session.execute(
+                update(CashReportSessionModel)
+                .where(CashReportSessionModel.session_id == session_id)
+                .values(
+                    total_transactions=CashReportSessionModel.total_transactions + rows_added,
+                )
+            )
+            await self.db_session.commit()
+
         return {
             "session_id": session_id,
-            "status": "no_counter_entries",
-            "message": "No counter entries were created",
-            "counter_entries_created": 0,
+            "status": "success",
+            "message": f"Created {rows_added} counter entries",
+            "counter_entries_created": rows_added,
+            "total_rows_in_movement": total_rows,
+            "settlement_transactions_found": len(settlement_transactions),
+            "skipped_no_account": len(skipped_no_account),
+            "skipped_duplicate": len(skipped_duplicate),
+            "total_transactions_scanned": len(transactions),
+            "saving_rows_removed": saving_rows_removed,
         }
