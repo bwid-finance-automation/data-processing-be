@@ -9,6 +9,7 @@ import shutil
 import uuid
 from collections import Counter, defaultdict
 from datetime import date, datetime
+from difflib import SequenceMatcher
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
@@ -3113,9 +3114,10 @@ class CashReportService:
         await asyncio.sleep(0.3)
 
         lookup_accounts: Dict[Tuple[str, float], List[str]] = {}
+        lookup_account_details: Dict[str, Dict[str, Any]] = {}
         if lookup_file_contents:
             for i, file_content in enumerate(lookup_file_contents):
-                parsed = self._parse_saving_lookup_file(file_content)
+                parsed, parsed_details = self._parse_saving_lookup_file_with_metadata(file_content)
                 loaded_count = 0
                 for key, accounts in parsed.items():
                     if not accounts:
@@ -3125,6 +3127,15 @@ class CashReportService:
                         if account not in bucket:
                             bucket.append(account)
                             loaded_count += 1
+                for acc, meta in parsed_details.items():
+                    if not acc:
+                        continue
+                    dst = lookup_account_details.setdefault(acc, {})
+                    for mk, mv in meta.items():
+                        if mv in (None, ""):
+                            continue
+                        if dst.get(mk) in (None, ""):
+                            dst[mk] = mv
                 logger.info(f"Lookup file {i+1}: loaded {loaded_count} accounts")
             total_lookup_accounts = sum(len(v) for v in lookup_accounts.values())
             logger.info(
@@ -3174,17 +3185,150 @@ class CashReportService:
         # Normalize existing account set once to prevent same-run duplicates.
         existing_saving_acc_set = {_normalize_account_text(acc) for acc in existing_saving_acc_set if acc}
 
+        # Index lookup accounts by amount for fallback matching (entity may be abbreviated in template).
+        def _amount_key(value: Any) -> int:
+            try:
+                return int(round(float(value or 0)))
+            except (ValueError, TypeError):
+                return 0
+
+        lookup_accounts_by_amount: Dict[int, List[str]] = {}
+        for (_, amt), accounts in lookup_accounts.items():
+            amt_key = _amount_key(amt)
+            if amt_key <= 0:
+                continue
+            bucket = lookup_accounts_by_amount.setdefault(amt_key, [])
+            for account in accounts:
+                acc_norm = _normalize_account_text(account)
+                if acc_norm and acc_norm not in bucket:
+                    bucket.append(acc_norm)
+
+        entity_noise_tokens = {
+            "CT", "CTY", "CONG", "TY", "TNHH", "MTV", "CP", "CO", "PHAN", "VA",
+            "PHAT", "TRIEN", "NGHIEP", "DAU", "TU", "DU", "AN", "MOT", "THANH",
+            "VIEN", "HUU", "HAN", "JSC", "PTCN", "BW",
+        }
+
+        def _normalize_entity_text(value: str) -> str:
+            text = str(value or "").upper()
+            text = text.replace("BWID", "BW")
+            text = re.sub(r'[^A-Z0-9]+', ' ', text)
+            tokens = [tok for tok in text.split() if tok and tok not in entity_noise_tokens]
+            return "".join(tokens)
+
+        def _entity_similarity_score(left: str, right: str) -> float:
+            left_norm = _normalize_entity_text(left)
+            right_norm = _normalize_entity_text(right)
+            if not left_norm or not right_norm:
+                return 0.0
+            if left_norm == right_norm:
+                return 1.0
+            base = SequenceMatcher(None, left_norm, right_norm).ratio()
+            if left_norm in right_norm or right_norm in left_norm:
+                base = max(base, 0.85)
+            return base
+
+        def _available_account(candidate: str) -> bool:
+            acc_norm = _normalize_account_text(candidate)
+            if not acc_norm:
+                return False
+            if acc_norm in existing_saving_acc_set:
+                return False
+            if acc_norm in used_lookup_accounts:
+                return False
+            return True
+
         def _select_lookup_account(candidates: List[str]) -> Optional[str]:
             """Pick first available lookup account not already used/existing."""
             for candidate in candidates:
                 acc_norm = _normalize_account_text(candidate)
-                if not acc_norm:
-                    continue
-                if acc_norm in existing_saving_acc_set:
-                    continue
-                if acc_norm in used_lookup_accounts:
+                if not _available_account(acc_norm):
                     continue
                 return acc_norm
+            return None
+
+        def _match_lookup_by_metadata(
+            *,
+            tx_bank: str,
+            tx_date: Optional[date],
+            amount_value: float,
+            entity_name: str,
+            term_info: Dict[str, Any],
+        ) -> Optional[str]:
+            """
+            Fallback matcher when description has no explicit account and entity text is abbreviated.
+            Uses amount + bank + opening date + term/maturity + fuzzy entity score.
+            """
+            amount_candidates = lookup_accounts_by_amount.get(_amount_key(amount_value), [])
+            candidates = [
+                _normalize_account_text(acc)
+                for acc in amount_candidates
+                if _available_account(acc)
+            ]
+            # Keep order stable and unique.
+            candidates = list(dict.fromkeys([acc for acc in candidates if acc]))
+            if not candidates:
+                return None
+
+            bank_norm = str(tx_bank or "").strip().upper()
+            if bank_norm:
+                bank_candidates = [
+                    acc for acc in candidates
+                    if str(lookup_account_details.get(acc, {}).get("provider") or "").strip().upper() == bank_norm
+                ]
+                if bank_candidates:
+                    candidates = bank_candidates
+
+            if tx_date:
+                date_candidates = [
+                    acc for acc in candidates
+                    if lookup_account_details.get(acc, {}).get("opening_date") == tx_date
+                ]
+                if date_candidates:
+                    candidates = date_candidates
+
+            maturity = term_info.get("maturity_date")
+            if maturity:
+                maturity_candidates = [
+                    acc for acc in candidates
+                    if lookup_account_details.get(acc, {}).get("maturity_date") == maturity
+                ]
+                if maturity_candidates:
+                    candidates = maturity_candidates
+
+            term_days = term_info.get("term_days")
+            if term_days:
+                day_candidates = [
+                    acc for acc in candidates
+                    if lookup_account_details.get(acc, {}).get("term_days") == term_days
+                ]
+                if day_candidates:
+                    candidates = day_candidates
+
+            term_months = term_info.get("term_months")
+            if term_months:
+                month_candidates = [
+                    acc for acc in candidates
+                    if lookup_account_details.get(acc, {}).get("term_months") == term_months
+                ]
+                if month_candidates:
+                    candidates = month_candidates
+
+            if len(candidates) == 1:
+                return candidates[0]
+
+            if entity_name and candidates:
+                scored = []
+                for acc in candidates:
+                    lookup_entity = str(lookup_account_details.get(acc, {}).get("entity") or "")
+                    score = _entity_similarity_score(entity_name, lookup_entity)
+                    scored.append((score, acc))
+                scored.sort(key=lambda item: item[0], reverse=True)
+                top_score, top_acc = scored[0]
+                second_score = scored[1][0] if len(scored) > 1 else 0.0
+                if top_score >= 0.55 and (top_score - second_score) >= 0.12:
+                    return top_acc
+
             return None
 
         for tx, row_idx in open_new_transactions:
@@ -3209,6 +3353,7 @@ class CashReportService:
                         entity = code_for_entity
                 logger.debug(f"Derived entity '{entity}' from current account {tx_account}")
             amount = float(tx.credit) if tx.credit else 0
+            term_info = self._extract_term_info(desc)
 
             # Try to find saving account:
             # 1. Extract from description
@@ -3229,21 +3374,29 @@ class CashReportService:
                                 saving_acc = _select_lookup_account(accounts)
                                 if saving_acc:
                                     break
-                # Fallback: if entity didn't help, try matching by amount only
-                # (when exactly one available account candidate remains for this amount)
+                # Fallback: infer from amount/bank/date/term metadata.
                 if not saving_acc:
-                    amount_candidates = []
-                    for (_, amt), accounts in lookup_accounts.items():
-                        if abs(amt - amount) < 1:
-                            amount_candidates.extend(accounts)
+                    saving_acc = _match_lookup_by_metadata(
+                        tx_bank=str(tx.bank or ""),
+                        tx_date=tx.date if isinstance(tx.date, date) else None,
+                        amount_value=amount,
+                        entity_name=entity,
+                        term_info=term_info,
+                    )
+                    if saving_acc:
+                        logger.info(
+                            f"Open-new: matched by metadata: {saving_acc} "
+                            f"(bank={tx.bank}, amount={amount}, date={tx.date})"
+                        )
+
+                # Last fallback: if entity/metadata did not help, match by amount only
+                # when exactly one available account candidate remains for this amount.
+                if not saving_acc:
+                    amount_candidates = lookup_accounts_by_amount.get(_amount_key(amount), [])
                     available = []
                     for candidate in amount_candidates:
                         acc_norm = _normalize_account_text(candidate)
-                        if not acc_norm:
-                            continue
-                        if acc_norm in existing_saving_acc_set:
-                            continue
-                        if acc_norm in used_lookup_accounts:
+                        if not _available_account(acc_norm):
                             continue
                         available.append(acc_norm)
                     available_unique = list(dict.fromkeys(available))
@@ -3270,8 +3423,21 @@ class CashReportService:
             existing_saving_acc_set.add(saving_acc)
             used_lookup_accounts.add(saving_acc)
 
-            # Extract term info from description for B2 step
-            term_info = self._extract_term_info(desc)
+            lookup_meta = lookup_account_details.get(saving_acc, {})
+            if not term_info.get("maturity_date") and lookup_meta.get("maturity_date"):
+                term_info["maturity_date"] = lookup_meta["maturity_date"]
+            if not term_info.get("term_months") and lookup_meta.get("term_months"):
+                term_info["term_months"] = lookup_meta["term_months"]
+            if not term_info.get("term_days") and lookup_meta.get("term_days"):
+                term_info["term_days"] = lookup_meta["term_days"]
+            if term_info.get("interest_rate") is None and lookup_meta.get("interest_rate") is not None:
+                term_info["interest_rate"] = lookup_meta["interest_rate"]
+
+            opening_date_for_insert = tx.date
+            if lookup_meta.get("opening_date"):
+                opening_date_for_insert = lookup_meta["opening_date"]
+
+            currency_for_insert = str(lookup_meta.get("currency") or "VND").strip().upper() or "VND"
 
             # Determine BRANCH from Cash balance (Prior period) by entity + bank prefix
             saving_bank = self._determine_saving_branch(saving_acc, entity, entity_branches, tx.bank or "")
@@ -3316,9 +3482,9 @@ class CashReportService:
                 "bank": saving_bank,
                 "code": code,
                 "amount": amount,
-                "currency": "VND",
+                "currency": currency_for_insert,
                 "term_info": term_info,
-                "opening_date": tx.date,
+                "opening_date": opening_date_for_insert,
             })
 
         emit("step_complete", "lookup",
@@ -3445,21 +3611,25 @@ class CashReportService:
         return result
 
     def _parse_saving_lookup_file(self, file_content: bytes) -> Dict[Tuple[str, float], List[str]]:
+        """Backward-compatible wrapper returning only entity+amount -> accounts mapping."""
+        lookup, _ = self._parse_saving_lookup_file_with_metadata(file_content)
+        return lookup
+
+    def _parse_saving_lookup_file_with_metadata(
+        self,
+        file_content: bytes,
+    ) -> Tuple[Dict[Tuple[str, float], List[str]], Dict[str, Dict[str, Any]]]:
         """
-        Parse saving lookup files to extract saving account mappings.
-        Auto-detects format:
-        - VTB style: Account(B), Entity(E), Balance(L)
-        - VCB style: CIF(B), Entity(C), Account(D), Amount(E), Branch(J)
-
-        Supports .xlsx (including shared-string) and .xls formats.
-
-        Returns:
-            Dict mapping (entity_upper, amount) â†’ list of saving account numbers.
-            A key can contain multiple accounts when lookup data has duplicate
-            entity+amount rows.
+        Parse lookup file and return:
+        - lookup map: ``(ENTITY_UPPER, AMOUNT) -> [ACCOUNT_NO, ...]``
+        - account metadata: ``ACCOUNT_NO -> {provider, maturity_date, opening_date, term, rate, ...}``
         """
         import io
+        import zipfile as _zf
+        import xml.etree.ElementTree as _ET
+
         lookup: Dict[Tuple[str, float], List[str]] = {}
+        account_meta: Dict[str, Dict[str, Any]] = {}
 
         def _normalize_lookup_account(raw: Any) -> str:
             acc_str = str(raw or "").strip().replace("'", "")
@@ -3472,43 +3642,192 @@ class CashReportService:
                 pass
             return acc_str
 
-        def _add_lookup_account(entity_raw: Any, amount_raw: Any, account_raw: Any) -> None:
-            ent_str = str(entity_raw or "").strip().upper()
-            acc_str = _normalize_lookup_account(account_raw)
-            if not ent_str or not acc_str:
-                return
+        def _parse_lookup_amount(raw: Any) -> Optional[float]:
+            if raw is None:
+                return None
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            s = str(raw).strip().replace(" ", "")
+            if not s:
+                return None
+            if re.match(r"^\d{1,3}(?:\.\d{3})+(?:,\d+)?$", s):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
             try:
-                bal_float = float(str(amount_raw or "0").strip().replace(",", ""))
+                return float(s)
             except (ValueError, TypeError):
+                return None
+
+        def _parse_lookup_rate(raw: Any) -> Optional[float]:
+            if raw is None or raw == "":
+                return None
+            if isinstance(raw, (int, float)):
+                v = float(raw)
+                if v <= 0:
+                    return None
+                return v / 100 if v > 1 else v
+            s = str(raw).strip().replace("%", "").replace(",", ".")
+            if not s:
+                return None
+            try:
+                v = float(s)
+            except (ValueError, TypeError):
+                return None
+            if v <= 0:
+                return None
+            return v / 100 if v > 1 else v
+
+        def _parse_lookup_date(raw: Any) -> Optional[date]:
+            if raw is None or raw == "":
+                return None
+            if isinstance(raw, datetime):
+                return raw.date()
+            if isinstance(raw, date):
+                return raw
+            if isinstance(raw, (int, float)):
+                try:
+                    serial = int(float(raw))
+                    if 20000 <= serial <= 80000:
+                        base_ord = datetime(1899, 12, 30).toordinal()
+                        return datetime.fromordinal(base_ord + serial).date()
+                except Exception:
+                    return None
+                return None
+
+            s = str(raw).strip()
+            if not s:
+                return None
+            s = s.split()[0]
+            for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
+                try:
+                    return datetime.strptime(s, fmt).date()
+                except ValueError:
+                    continue
+            return None
+
+        def _parse_term_info(term_raw: Any, product_raw: Any = None) -> Tuple[Optional[int], Optional[int]]:
+            term_months = None
+            term_days = None
+
+            def _consume(text: str) -> None:
+                nonlocal term_months, term_days
+                if not text:
+                    return
+                up = text.upper()
+                m_month = re.search(r'(\d{1,2})\s*(THANG|THÁNG|M)\b', up)
+                if m_month:
+                    term_months = int(m_month.group(1))
+                    return
+                m_day = re.search(r'(\d{1,3})\s*(NGAY|NGÀY|D)\b', up)
+                if m_day:
+                    term_days = int(m_day.group(1))
+
+            _consume(str(term_raw or ""))
+            if term_months is None and term_days is None:
+                _consume(str(product_raw or ""))
+            return term_months, term_days
+
+        def _merge_meta(
+            account: str,
+            *,
+            entity: str = "",
+            currency: str = "",
+            provider: str = "",
+            opening_date: Optional[date] = None,
+            maturity_date: Optional[date] = None,
+            interest_rate: Optional[float] = None,
+            term_months: Optional[int] = None,
+            term_days: Optional[int] = None,
+        ) -> None:
+            if not account:
                 return
-            if bal_float <= 0:
+            meta = account_meta.setdefault(account, {
+                "entity": "",
+                "currency": "",
+                "provider": "",
+                "opening_date": None,
+                "maturity_date": None,
+                "interest_rate": None,
+                "term_months": None,
+                "term_days": None,
+            })
+            if entity and not meta["entity"]:
+                meta["entity"] = entity
+            if currency and not meta["currency"]:
+                meta["currency"] = currency
+            if provider and not meta["provider"]:
+                meta["provider"] = provider
+            if opening_date and not meta["opening_date"]:
+                meta["opening_date"] = opening_date
+            if maturity_date and not meta["maturity_date"]:
+                meta["maturity_date"] = maturity_date
+            if interest_rate is not None and meta["interest_rate"] is None:
+                meta["interest_rate"] = interest_rate
+            if term_months and not meta["term_months"]:
+                meta["term_months"] = term_months
+            if term_days and not meta["term_days"]:
+                meta["term_days"] = term_days
+
+        def _add_lookup_account(
+            entity_raw: Any,
+            amount_raw: Any,
+            account_raw: Any,
+            *,
+            term_raw: Any = None,
+            rate_raw: Any = None,
+            opening_date_raw: Any = None,
+            maturity_date_raw: Any = None,
+            currency_raw: Any = None,
+            product_raw: Any = None,
+            provider_raw: Any = None,
+        ) -> None:
+            acc_str = _normalize_lookup_account(account_raw)
+            ent_str = str(entity_raw or "").strip().upper()
+            amount_val = _parse_lookup_amount(amount_raw)
+            currency_str = str(currency_raw or "").strip().upper()
+            provider_str = str(provider_raw or "").strip().upper()
+            opening_date_val = _parse_lookup_date(opening_date_raw)
+            maturity_date_val = _parse_lookup_date(maturity_date_raw)
+            interest_rate_val = _parse_lookup_rate(rate_raw)
+            term_months, term_days = _parse_term_info(term_raw, product_raw)
+
+            _merge_meta(
+                acc_str,
+                entity=ent_str,
+                currency=currency_str,
+                provider=provider_str,
+                opening_date=opening_date_val,
+                maturity_date=maturity_date_val,
+                interest_rate=interest_rate_val,
+                term_months=term_months,
+                term_days=term_days,
+            )
+
+            if not ent_str or not acc_str or amount_val is None or amount_val <= 0:
                 return
-            key = (ent_str, bal_float)
+
+            key = (ent_str, amount_val)
             bucket = lookup.setdefault(key, [])
             if acc_str not in bucket:
                 bucket.append(acc_str)
 
-        # Try .xlsx format with XML scanning (handles shared strings properly)
+        # Try .xlsx
         try:
-            import zipfile as _zf
-            import xml.etree.ElementTree as _ET
-
             zdata = io.BytesIO(file_content)
             with _zf.ZipFile(zdata) as z:
                 if "xl/workbook.xml" not in z.namelist():
                     raise ValueError("Not xlsx")
 
-                # Load shared strings
                 shared_strings = []
                 if "xl/sharedStrings.xml" in z.namelist():
                     ss_xml = z.read("xl/sharedStrings.xml")
                     for m in re.finditer(rb'<si[^>]*>.*?</si>', ss_xml, re.DOTALL):
                         parts = re.findall(rb'<t[^>]*>([^<]*)</t>', m.group(0))
-                        shared_strings.append("".join(p.decode("utf-8", errors="replace") for p in parts))
+                        shared_strings.append("".join(
+                            p.decode("utf-8", errors="replace") for p in parts
+                        ))
 
-                # Read first worksheet directly from ZIP entries.
-                # This is more robust than relationship regex matching because
-                # Target can be relative, absolute (/xl/..), or contain prefixes.
                 worksheet_paths = sorted(
                     n for n in z.namelist()
                     if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")
@@ -3517,16 +3836,14 @@ class CashReportService:
                     raise ValueError("No worksheet XML found")
                 sheet_xml = z.read(worksheet_paths[0])
 
-            # Parse all rows
             ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
             root = _ET.fromstring(sheet_xml)
             sheet_data = root.find(f"{{{ns}}}sheetData")
             if sheet_data is None:
                 raise ValueError("No sheetData")
 
-            rows_data = []
             for row_el in sheet_data:
-                cells = {}
+                row: Dict[str, Any] = {}
                 for cell in row_el:
                     ref = cell.get("r", "")
                     col = re.match(r"([A-Z]+)", ref)
@@ -3536,81 +3853,103 @@ class CashReportService:
                     t = cell.get("t", "")
                     v_el = cell.find(f"{{{ns}}}v")
                     val = v_el.text if v_el is not None else None
-                    # Inline string
                     is_el = cell.find(f"{{{ns}}}is")
                     if is_el is not None:
                         t_el = is_el.find(f"{{{ns}}}t")
                         val = t_el.text if t_el is not None else ""
                     elif t == "s" and val and shared_strings:
-                        idx = int(val)
-                        val = shared_strings[idx] if idx < len(shared_strings) else val
-                    cells[col_letter] = val
-                rows_data.append(cells)
+                        try:
+                            idx = int(val)
+                            val = shared_strings[idx] if idx < len(shared_strings) else val
+                        except (ValueError, TypeError):
+                            pass
+                    row[col_letter] = val
 
-            # Auto-detect format by scanning header rows
-            format_type = "vtb"  # default
-            for row in rows_data[:10]:
-                for col, val in row.items():
-                    if val and isinstance(val, str):
-                        val_lower = val.lower().strip()
-                        if "sá»‘ tÃ i khoáº£n" in val_lower or "so tai khoan" in val_lower:
-                            if col == "D":
-                                format_type = "vcb"
-                                break
-                            elif col == "B":
-                                format_type = "vtb"
-                                break
-                        if "cif" in val_lower and col == "B":
-                            format_type = "vcb"
-                            break
+                # VCB style
+                _add_lookup_account(
+                    row.get("C"), row.get("E"), row.get("D"),
+                    currency_raw=row.get("F"),
+                    opening_date_raw=row.get("G"),
+                    maturity_date_raw=row.get("H"),
+                    product_raw=row.get("I"),
+                    provider_raw="VCB",
+                )
+                # VTB detail style
+                _add_lookup_account(
+                    row.get("E"), row.get("L"), row.get("B"),
+                    term_raw=row.get("G"),
+                    rate_raw=row.get("H"),
+                    currency_raw=row.get("I"),
+                    opening_date_raw=row.get("J"),
+                    maturity_date_raw=row.get("K"),
+                    product_raw=row.get("F"),
+                    provider_raw="VTB",
+                )
+                # BIDV-like style
+                _add_lookup_account(
+                    row.get("F") or row.get("E"), row.get("G"), row.get("C"),
+                    term_raw=row.get("N"),
+                    rate_raw=row.get("M"),
+                    currency_raw=row.get("L"),
+                    opening_date_raw=row.get("O"),
+                    maturity_date_raw=row.get("P"),
+                    provider_raw="BIDV",
+                )
 
-            logger.info(f"Lookup file detected format: {format_type}, rows: {len(rows_data)}")
-
-            # Parse data rows based on format
-            for row in rows_data:
-                try:
-                    if format_type == "vcb":
-                        # VCB: Account=D, Entity=C, Amount=E, Branch=J
-                        account = row.get("D", "")
-                        entity = row.get("C", "")
-                        amount_str = row.get("E", "0")
-                    else:
-                        # VTB: Account=B, Entity=E, Balance=L
-                        account = row.get("B", "")
-                        entity = row.get("E", "")
-                        amount_str = row.get("L", "0")
-
-                    _add_lookup_account(entity, amount_str, account)
-                except (ValueError, TypeError):
-                    continue
-
-            if lookup:
-                return lookup
+            if lookup or account_meta:
+                return lookup, account_meta
 
         except Exception as xlsx_err:
             logger.debug(f"xlsx XML parse failed: {xlsx_err}")
 
-        # Try .xls format (xlrd)
+        # Try .xls
         try:
             import xlrd
             wb = xlrd.open_workbook(file_contents=file_content)
             ws = wb.sheet_by_index(0)
 
-            for row_idx in range(1, ws.nrows):
-                if ws.ncols < 6:
-                    continue
-                account = ws.cell_value(row_idx, 1)  # Column B
-                entity = ws.cell_value(row_idx, 4)   # Column E
-                balance = ws.cell_value(row_idx, 11) if ws.ncols > 11 else 0  # Column L
+            for row_idx in range(ws.nrows):
+                row = [ws.cell_value(row_idx, c) for c in range(ws.ncols)]
 
-                if account and entity and balance:
-                    _add_lookup_account(entity, balance, account)
+                def _v(i: int) -> Any:
+                    return row[i] if i < len(row) else None
 
-            return lookup
+                # VTB detail block
+                _add_lookup_account(
+                    _v(4), _v(11), _v(1),
+                    term_raw=_v(6),
+                    rate_raw=_v(7),
+                    currency_raw=_v(8),
+                    opening_date_raw=_v(9),
+                    maturity_date_raw=_v(10),
+                    product_raw=_v(5),
+                    provider_raw="VTB",
+                )
+                # BIDV style
+                _add_lookup_account(
+                    _v(5), _v(6), _v(2),
+                    term_raw=_v(13),
+                    rate_raw=_v(12),
+                    currency_raw=_v(11),
+                    opening_date_raw=_v(14),
+                    maturity_date_raw=_v(15),
+                    provider_raw="BIDV",
+                )
+                # VCB-like fallback (when saved to xls)
+                _add_lookup_account(
+                    _v(2), _v(4), _v(3),
+                    currency_raw=_v(5),
+                    opening_date_raw=_v(6),
+                    maturity_date_raw=_v(7),
+                    product_raw=_v(8),
+                    provider_raw="VCB",
+                )
+
+            return lookup, account_meta
 
         except Exception as xls_err:
             logger.warning(f"Failed to parse lookup file (tried xlsx and xls): {xls_err}")
-            return {}
+            return {}, {}
 
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # Test Automation (settlement + open-new using test template)

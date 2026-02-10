@@ -35,7 +35,10 @@ _template_mtime: Optional[float] = None
 
 
 def _load_template_to_cache() -> bytes:
-    """Load master template into memory cache (lazy loading, auto-invalidates on file change)."""
+    """Load master template into memory cache (lazy loading, auto-invalidates on file change).
+
+    Applies worksheet XML repair to clean corrupt formula cells before caching.
+    """
     global _template_cache, _template_mtime
     template_path = TEMPLATES_DIR / MASTER_TEMPLATE_FILENAME
     if not template_path.exists():
@@ -44,11 +47,27 @@ def _load_template_to_cache() -> bytes:
     current_mtime = template_path.stat().st_mtime
     if _template_cache is None or _template_mtime != current_mtime:
         with open(template_path, 'rb') as f:
-            _template_cache = f.read()
+            raw_template = f.read()
+
+        # Repair all worksheets in template to fix corrupt cells (t= attr without <v>)
+        from .openpyxl_handler import OpenpyxlHandler
+        import zipfile
+        import io
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(raw_template), "r") as src:
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
+                for entry in src.namelist():
+                    data = src.read(entry)
+                    if entry.startswith("xl/worksheets/") and entry.endswith(".xml"):
+                        data = OpenpyxlHandler._repair_worksheet_xml_for_safe_open(data)
+                    dst.writestr(entry, data)
+
+        _template_cache = buf.getvalue()
         _template_mtime = current_mtime
 
         size_mb = len(_template_cache) / (1024 * 1024)
-        logger.info(f"Loaded master template into memory cache ({size_mb:.2f} MB)")
+        logger.info(f"Loaded and repaired master template into memory cache ({size_mb:.2f} MB)")
 
     return _template_cache
 

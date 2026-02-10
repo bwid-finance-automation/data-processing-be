@@ -736,9 +736,17 @@ async def download_session_result(
         with zipfile.ZipFile(_io.BytesIO(raw), "r") as src:
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
                 for entry in src.namelist():
+                    if "calcChain" in entry:
+                        continue
                     data = src.read(entry)
                     if entry.startswith("xl/worksheets/") and entry.endswith(".xml"):
-                        data = OpenpyxlHandler._sanitize_worksheet_xml_for_download(data)
+                        data = OpenpyxlHandler._repair_worksheet_xml_for_safe_open(data)
+                    elif entry == "xl/workbook.xml":
+                        data = OpenpyxlHandler._set_full_calc_on_load(data)
+                    elif entry == "xl/_rels/workbook.xml.rels":
+                        data = OpenpyxlHandler._remove_calcchain_relationships(data)
+                    elif entry == "[Content_Types].xml":
+                        data = OpenpyxlHandler._remove_calcchain_content_type(data)
                     dst.writestr(entry, data)
         content = buf.getvalue()
 
@@ -987,9 +995,17 @@ async def download_test_result(
         with zipfile.ZipFile(_io.BytesIO(raw), "r") as src:
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
                 for entry in src.namelist():
+                    if "calcChain" in entry:
+                        continue
                     data = src.read(entry)
                     if entry.startswith("xl/worksheets/") and entry.endswith(".xml"):
-                        data = OpenpyxlHandler._sanitize_worksheet_xml_for_download(data)
+                        data = OpenpyxlHandler._repair_worksheet_xml_for_safe_open(data)
+                    elif entry == "xl/workbook.xml":
+                        data = OpenpyxlHandler._set_full_calc_on_load(data)
+                    elif entry == "xl/_rels/workbook.xml.rels":
+                        data = OpenpyxlHandler._remove_calcchain_relationships(data)
+                    elif entry == "[Content_Types].xml":
+                        data = OpenpyxlHandler._remove_calcchain_content_type(data)
                     dst.writestr(entry, data)
         content = buf.getvalue()
 

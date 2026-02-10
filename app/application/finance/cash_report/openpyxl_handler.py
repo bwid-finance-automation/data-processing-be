@@ -89,9 +89,8 @@ class OpenpyxlHandler:
             extra_entries: Optional dict of {zip_entry_path: new_bytes} for additional files
                            to update in the same pass (e.g. table XML)
         """
-        # Strip shared formulas from the modified sheet to prevent Excel corruption
-        new_xml = cls._strip_shared_formulas_bytes(new_xml)
-        new_xml = cls._sanitize_worksheet_xml_for_download(new_xml)
+        # Normalize worksheet XML to prevent Excel "Removed Records" repairs.
+        new_xml = cls._repair_worksheet_xml_for_safe_open(new_xml)
         if extra_entries is None:
             extra_entries = {}
 
@@ -110,20 +109,20 @@ class OpenpyxlHandler:
                         dst_zip.writestr(entry, styles_xml)
                     elif entry == "[Content_Types].xml":
                         ct_xml = src_zip.read(entry)
-                        ct_xml = re.sub(
-                            rb'<Override[^>]*calcChain[^>]*/>', b'', ct_xml
-                        )
+                        ct_xml = OpenpyxlHandler._remove_calcchain_content_type(ct_xml)
                         dst_zip.writestr(entry, ct_xml)
                     elif entry == "xl/workbook.xml":
                         wb_xml = src_zip.read(entry)
                         wb_xml = OpenpyxlHandler._set_full_calc_on_load(wb_xml)
                         dst_zip.writestr(entry, wb_xml)
+                    elif entry == "xl/_rels/workbook.xml.rels":
+                        rels_xml = src_zip.read(entry)
+                        rels_xml = OpenpyxlHandler._remove_calcchain_relationships(rels_xml)
+                        dst_zip.writestr(entry, rels_xml)
                     elif entry.startswith("xl/worksheets/") and entry.endswith(".xml"):
-                        # Strip shared formulas from ALL worksheets to prevent
-                        # "Removed Records: Shared formula" errors on any sheet
+                        # Apply full worksheet repair to every sheet.
                         sheet_data = src_zip.read(entry)
-                        sheet_data = cls._strip_shared_formulas_bytes(sheet_data)
-                        sheet_data = cls._sanitize_worksheet_xml_for_download(sheet_data)
+                        sheet_data = cls._repair_worksheet_xml_for_safe_open(sheet_data)
                         dst_zip.writestr(entry, sheet_data)
                     else:
                         dst_zip.writestr(entry, src_zip.read(entry))
@@ -144,10 +143,9 @@ class OpenpyxlHandler:
         if extra_entries is None:
             extra_entries = {}
 
-        # Pre-strip shared formulas from all modified sheets
+        # Normalize all modified sheets before writing.
         for path in list(modified_sheets):
-            modified_sheets[path] = cls._strip_shared_formulas_bytes(modified_sheets[path])
-            modified_sheets[path] = cls._sanitize_worksheet_xml_for_download(modified_sheets[path])
+            modified_sheets[path] = cls._repair_worksheet_xml_for_safe_open(modified_sheets[path])
 
         output = io.BytesIO()
         with zipfile.ZipFile(io.BytesIO(zip_data), "r") as src_zip:
@@ -161,16 +159,19 @@ class OpenpyxlHandler:
                         dst_zip.writestr(entry, extra_entries[entry])
                     elif entry == "[Content_Types].xml":
                         ct_xml = src_zip.read(entry)
-                        ct_xml = re.sub(rb'<Override[^>]*calcChain[^>]*/>', b'', ct_xml)
+                        ct_xml = cls._remove_calcchain_content_type(ct_xml)
                         dst_zip.writestr(entry, ct_xml)
                     elif entry == "xl/workbook.xml":
                         wb_xml = src_zip.read(entry)
                         wb_xml = cls._set_full_calc_on_load(wb_xml)
                         dst_zip.writestr(entry, wb_xml)
+                    elif entry == "xl/_rels/workbook.xml.rels":
+                        rels_xml = src_zip.read(entry)
+                        rels_xml = cls._remove_calcchain_relationships(rels_xml)
+                        dst_zip.writestr(entry, rels_xml)
                     elif entry.startswith("xl/worksheets/") and entry.endswith(".xml"):
                         sheet_data = src_zip.read(entry)
-                        sheet_data = cls._strip_shared_formulas_bytes(sheet_data)
-                        sheet_data = cls._sanitize_worksheet_xml_for_download(sheet_data)
+                        sheet_data = cls._repair_worksheet_xml_for_safe_open(sheet_data)
                         dst_zip.writestr(entry, sheet_data)
                     else:
                         dst_zip.writestr(entry, src_zip.read(entry))
@@ -193,6 +194,36 @@ class OpenpyxlHandler:
                 b'<calcPr fullCalcOnLoad="1"/></workbook>',
             )
         return wb_xml
+
+    @staticmethod
+    def _remove_calcchain_relationships(wb_rels_xml: bytes) -> bytes:
+        """Remove dangling calcChain relationships from workbook rels."""
+        # Remove by relationship type (canonical) and by explicit calcChain target as fallback.
+        wb_rels_xml = re.sub(
+            rb'<Relationship[^>]*Type="[^"]*/calcChain"[^>]*/>',
+            b'',
+            wb_rels_xml,
+        )
+        wb_rels_xml = re.sub(
+            rb'<Relationship[^>]*Target="calcChain\.xml"[^>]*/>',
+            b'',
+            wb_rels_xml,
+        )
+        wb_rels_xml = re.sub(
+            rb'<Relationship[^>]*Target="\.\./calcChain\.xml"[^>]*/>',
+            b'',
+            wb_rels_xml,
+        )
+        return wb_rels_xml
+
+    @staticmethod
+    def _remove_calcchain_content_type(content_types_xml: bytes) -> bytes:
+        """Remove calcChain override from [Content_Types].xml."""
+        return re.sub(
+            rb'<Override[^>]*PartName="/xl/calcChain\.xml"[^>]*/>',
+            b'',
+            content_types_xml,
+        )
 
     @classmethod
     def _find_row_byte_positions(
@@ -955,9 +986,11 @@ class OpenpyxlHandler:
 
         def _clean(c_match):
             cell = c_match.group(0)
-            # Check for <v> or <v  with attributes (e.g. <v xml:space="preserve">)
-            has_value = b'<v>' in cell or b'<v ' in cell
-            if b'<f' in cell and not has_value:
+            # Only keep type when formula has a non-empty cached value.
+            # Empty cache (<v></v> or <v/>) should not keep t=.
+            v_match = re.search(rb'<v(?:\s[^>]*)?>(.*?)</v>', cell, flags=re.DOTALL)
+            has_non_empty_value = bool(v_match and v_match.group(1).strip())
+            if b'<f' in cell and not has_non_empty_value:
                 cell = re.sub(rb'\s+t="(?:str|n|b|e|s)"', b'', cell)
             return cell
 
@@ -974,6 +1007,21 @@ class OpenpyxlHandler:
         """
         xml_bytes = cls._remove_orphan_cells_outside_rows(xml_bytes)
         xml_bytes = cls._clean_formula_type_attrs(xml_bytes)
+        return xml_bytes
+
+    @classmethod
+    def _repair_worksheet_xml_for_safe_open(cls, xml_bytes: bytes) -> bytes:
+        """
+        Strong worksheet repair pipeline used before download.
+
+        Order matters:
+        1. Normalize shared formulas
+        2. Remove duplicate row blocks / orphan cells
+        3. Clean formula type attributes
+        """
+        xml_bytes = cls._strip_shared_formulas_bytes(xml_bytes)
+        xml_bytes = cls._dedupe_rows_by_number(xml_bytes)
+        xml_bytes = cls._sanitize_worksheet_xml_for_download(xml_bytes)
         return xml_bytes
 
     @classmethod
@@ -1929,6 +1977,28 @@ class OpenpyxlHandler:
                 )
         raise ValueError("Cannot find <sheetData> in sheet XML")
 
+    @staticmethod
+    def _replace_row_xml(sheet_xml: bytes, row_num: int, new_row_xml: bytes) -> Tuple[bytes, bool]:
+        """
+        Replace an existing row XML block by row number.
+
+        Supports both normal row blocks (<row ...>...</row>) and self-closing
+        rows (<row .../>). Returns (updated_xml, replaced_flag).
+        """
+        row_num_b = str(row_num).encode()
+
+        row_pat = rb'<row[^>]*\sr="' + row_num_b + rb'"[^>]*>.*?</row>'
+        m = re.search(row_pat, sheet_xml, re.DOTALL)
+        if m:
+            return (sheet_xml[:m.start()] + new_row_xml + sheet_xml[m.end():], True)
+
+        row_self_pat = rb'<row[^>]*\sr="' + row_num_b + rb'"[^>]*/\s*>'
+        m2 = re.search(row_self_pat, sheet_xml)
+        if m2:
+            return (sheet_xml[:m2.start()] + new_row_xml + sheet_xml[m2.end():], True)
+
+        return (sheet_xml, False)
+
     def _modify_prior_period_xml(
         self, xml_bytes: bytes, old_period_name: str, cb_rows: List[tuple]
     ) -> bytes:
@@ -2883,13 +2953,18 @@ class OpenpyxlHandler:
                                 shared_strings: list = None) -> str:
         """Extract cell value for a specific column from a row's XML."""
         cell_ref = f"{col_letter}{row_num}".encode()
-        cell_pat = rb'<c\s[^>]*r="' + cell_ref + rb'"[^>]*>.*?</c>'
+        # Check self-closing cell first.
+        # If we check normal <c>...</c> first, regex can incorrectly start at
+        # <c .../> and consume the next cell block until a later </c>.
+        cell_pat2 = rb'<c\s[^>]*r="' + cell_ref + rb'"[^/>]*\s*/>'
+        cm2 = re.search(cell_pat2, row_xml)
+        if cm2:
+            return ""
+
+        cell_pat = rb'<c\s[^>]*r="' + cell_ref + rb'"[^/>]*>.*?</c>'
         cm = re.search(cell_pat, row_xml, re.DOTALL)
         if not cm:
-            # Check self-closing cell (empty)
-            cell_pat2 = rb'<c\s[^>]*r="' + cell_ref + rb'"[^/>]*\s*/>'
-            cm2 = re.search(cell_pat2, row_xml)
-            return "" if cm2 else ""
+            return ""
         cell_xml = cm.group(0)
         if b't="inlineStr"' in cell_xml:
             t_match = re.search(rb'<t[^>]*>([^<]*)</t>', cell_xml)
@@ -3262,11 +3337,19 @@ class OpenpyxlHandler:
         if not source_row:
             source_row = 4
 
-        # Select the nearest template row after Big X:
-        # formula-empty rows first by position, with small-x rows as additional candidates.
-        formula_templates = self._find_all_template_rows(sheet_xml, "D", "B", start_row=x_row + 1)
-        small_x_rows = self._find_small_x_rows(sheet_xml, "B", start_row=x_row + 1, zip_data=zip_data)
-        template_rows = sorted(set(formula_templates + small_x_rows))
+        # Select the nearest insertable row after Big X:
+        # include empty account rows (formula or style placeholders) and small-x markers.
+        search_window_end = x_row + 1000
+        missing_row_slots = self._find_missing_row_slots(
+            sheet_xml, start_row=x_row + 1, end_row=search_window_end,
+        )
+        insertable_rows = self._find_all_insertable_rows(
+            sheet_xml, "B", start_row=x_row + 1, zip_data=zip_data, end_row=search_window_end,
+        )
+        small_x_rows = self._find_small_x_rows(
+            sheet_xml, "B", start_row=x_row + 1, zip_data=zip_data, end_row=search_window_end,
+        )
+        template_rows = sorted(set(missing_row_slots + insertable_rows + small_x_rows))
         first_tpl = template_rows[0] if template_rows else 0
 
         extra_entries = {}
@@ -3284,7 +3367,10 @@ class OpenpyxlHandler:
             return m.group(1).decode() if m else "999"
 
         def _build_overrides(rn_str):
+            prev_row = max(int(rn_str) - 1, 1)
             return {
+                # Keep Acc_Char index formula stable even when source template is stale.
+                "A": f'<c r="A{rn_str}" s="{_get_s("A")}"><f>A{prev_row}+1</f></c>'.encode(),
                 "B": f'<c r="B{rn_str}" s="{_get_s("B")}" t="inlineStr"><is><t>{_esc(account_no)}</t></is></c>'.encode(),
                 "C": f'<c r="C{rn_str}" s="{_get_s("C")}" t="inlineStr"><is><t>{_esc(code)}</t></is></c>'.encode(),
                 "E": f'<c r="E{rn_str}" s="{_get_s("E")}" t="inlineStr"><is><t>{_esc(branch)}</t></is></c>'.encode(),
@@ -3300,10 +3386,9 @@ class OpenpyxlHandler:
             row_xml = self._clone_row_for_insert(
                 sheet_xml, source_row, insert_row_num, data_overrides
             )
-            old_row_pat = rb'<row[^>]*\sr="' + str(first_tpl).encode() + rb'"[^>]*>.*?</row>'
-            old_row_match = re.search(old_row_pat, sheet_xml, re.DOTALL)
-            if old_row_match:
-                sheet_xml = sheet_xml[:old_row_match.start()] + row_xml + sheet_xml[old_row_match.end():]
+            sheet_xml, replaced = self._replace_row_xml(sheet_xml, first_tpl, row_xml)
+            if not replaced:
+                sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, row_xml)
             used_row = insert_row_num
             logger.info(f"Cloned row {source_row} → Acc_Char row {insert_row_num} with account {account_no}")
         else:
@@ -3857,11 +3942,19 @@ class OpenpyxlHandler:
         if not source_row:
             source_row = 4  # fallback to row 4
 
-        # Select the nearest template row after Big X:
-        # formula-empty rows first by position, with small-x rows as additional candidates.
-        formula_templates = self._find_all_template_rows(sheet_xml, "A", "C", start_row=x_row + 1)
-        small_x_rows = self._find_small_x_rows(sheet_xml, "C", start_row=x_row + 1, zip_data=zip_data)
-        template_rows = sorted(set(formula_templates + small_x_rows))
+        # Select the nearest insertable row after Big X:
+        # include empty account rows (formula or style placeholders) and small-x markers.
+        search_window_end = x_row + 1000
+        missing_row_slots = self._find_missing_row_slots(
+            sheet_xml, start_row=x_row + 1, end_row=search_window_end,
+        )
+        insertable_rows = self._find_all_insertable_rows(
+            sheet_xml, "C", start_row=x_row + 1, zip_data=zip_data, end_row=search_window_end,
+        )
+        small_x_rows = self._find_small_x_rows(
+            sheet_xml, "C", start_row=x_row + 1, zip_data=zip_data, end_row=search_window_end,
+        )
+        template_rows = sorted(set(missing_row_slots + insertable_rows + small_x_rows))
         first_tpl = template_rows[0] if template_rows else 0
 
         extra_entries = {}
@@ -3885,10 +3978,9 @@ class OpenpyxlHandler:
             row_xml = self._clone_row_for_insert(
                 sheet_xml, source_row, insert_row_num, data_overrides
             )
-            old_row_pat = rb'<row[^>]*\sr="' + str(first_tpl).encode() + rb'"[^>]*>.*?</row>'
-            old_row_match = re.search(old_row_pat, sheet_xml, re.DOTALL)
-            if old_row_match:
-                sheet_xml = sheet_xml[:old_row_match.start()] + row_xml + sheet_xml[old_row_match.end():]
+            sheet_xml, replaced = self._replace_row_xml(sheet_xml, first_tpl, row_xml)
+            if not replaced:
+                sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, row_xml)
             used_row = insert_row_num
             logger.info(f"Cloned row {source_row} → Saving Account row {insert_row_num} with account {account_no}")
         else:
@@ -3999,11 +4091,19 @@ class OpenpyxlHandler:
         if not source_row:
             source_row = 4
 
-        # Select the nearest template row after Big X:
-        # formula-empty rows first by position, with small-x rows as additional candidates.
-        formula_templates = self._find_all_template_rows(sheet_xml, "A", "C", start_row=x_row + 1)
-        small_x_rows = self._find_small_x_rows(sheet_xml, "C", start_row=x_row + 1, zip_data=zip_data)
-        template_rows = sorted(set(formula_templates + small_x_rows))
+        # Select the nearest insertable row after Big X:
+        # include empty account rows (formula or style placeholders) and small-x markers.
+        search_window_end = x_row + 1000
+        missing_row_slots = self._find_missing_row_slots(
+            sheet_xml, start_row=x_row + 1, end_row=search_window_end,
+        )
+        insertable_rows = self._find_all_insertable_rows(
+            sheet_xml, "C", start_row=x_row + 1, zip_data=zip_data, end_row=search_window_end,
+        )
+        small_x_rows = self._find_small_x_rows(
+            sheet_xml, "C", start_row=x_row + 1, zip_data=zip_data, end_row=search_window_end,
+        )
+        template_rows = sorted(set(missing_row_slots + insertable_rows + small_x_rows))
         first_tpl = template_rows[0] if template_rows else 0
 
         extra_entries = {}
@@ -4037,10 +4137,9 @@ class OpenpyxlHandler:
             row_xml = self._clone_row_for_insert(
                 sheet_xml, source_row, insert_row_num, data_overrides
             )
-            old_row_pat = rb'<row[^>]*\sr="' + str(first_tpl).encode() + rb'"[^>]*>.*?</row>'
-            old_row_match = re.search(old_row_pat, sheet_xml, re.DOTALL)
-            if old_row_match:
-                sheet_xml = sheet_xml[:old_row_match.start()] + row_xml + sheet_xml[old_row_match.end():]
+            sheet_xml, replaced = self._replace_row_xml(sheet_xml, first_tpl, row_xml)
+            if not replaced:
+                sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, row_xml)
             used_row = insert_row_num
             logger.info(f"Cloned row {source_row} → Cash Balance row {insert_row_num} with account {account_no}")
         else:
@@ -4102,6 +4201,7 @@ class OpenpyxlHandler:
     @staticmethod
     def _find_all_template_rows(
         sheet_xml: bytes, formula_col: str, data_col: str, start_row: int = 4,
+        end_row: Optional[int] = None,
     ) -> list:
         """Find ALL template rows (has formula in formula_col, empty data_col).
 
@@ -4113,6 +4213,8 @@ class OpenpyxlHandler:
             rn = int(rm.group(1))
             if rn < start_row:
                 continue
+            if end_row is not None and rn > end_row:
+                break
             row_content = rm.group(0)
 
             # formula_col must have <f>
@@ -4145,11 +4247,80 @@ class OpenpyxlHandler:
         return sorted(results)
 
     @staticmethod
+    def _find_all_insertable_rows(
+        sheet_xml: bytes,
+        data_col: str,
+        start_row: int = 4,
+        zip_data: bytes = None,
+        end_row: Optional[int] = None,
+    ) -> list:
+        """
+        Find rows where ``data_col`` is empty and therefore safe to overwrite.
+
+        This includes formula-template rows and style-only placeholder rows.
+        It intentionally excludes rows that already contain account data.
+        """
+        shared_strings = []
+        if zip_data:
+            shared_strings = OpenpyxlHandler._load_shared_strings(zip_data)
+
+        results = []
+        row_pattern = rb'<row[^>]*\sr="(\d+)"[^>]*>(.*?)</row>'
+        for rm in re.finditer(row_pattern, sheet_xml, re.DOTALL):
+            rn = int(rm.group(1))
+            if rn < start_row:
+                continue
+            if end_row is not None and rn > end_row:
+                break
+            row_content = rm.group(0)
+            data_val = OpenpyxlHandler._get_cell_value_in_row(
+                row_content, data_col, rn, shared_strings
+            )
+            if (data_val or "").strip() == "":
+                results.append(rn)
+        return sorted(results)
+
+    @staticmethod
+    def _find_missing_row_slots(
+        sheet_xml: bytes,
+        start_row: int = 4,
+        end_row: Optional[int] = None,
+    ) -> list:
+        """
+        Find missing row indices between existing rows in a row window.
+
+        Example: if rows 259 and 261 exist but 260 is absent, returns 260.
+        Filling these gaps first prevents visible blank insert rows in Excel.
+        """
+        row_nums = []
+        row_pattern = rb'<row[^>]*\sr="(\d+)"'
+        for rm in re.finditer(row_pattern, sheet_xml):
+            rn = int(rm.group(1))
+            if rn < start_row:
+                continue
+            if end_row is not None and rn > end_row:
+                break
+            row_nums.append(rn)
+
+        if not row_nums:
+            return []
+
+        missing = []
+        prev = start_row - 1
+        for rn in row_nums:
+            if rn > prev + 1:
+                missing.extend(range(prev + 1, rn))
+            prev = rn
+
+        return missing
+
+    @staticmethod
     def _find_small_x_rows(
         sheet_xml: bytes,
         data_col: str,
         start_row: int = 4,
         zip_data: bytes = None,
+        end_row: Optional[int] = None,
     ) -> list:
         """
         Find rows where ``data_col`` contains lowercase/uppercase ``x`` marker.
@@ -4168,6 +4339,8 @@ class OpenpyxlHandler:
             rn = int(rm.group(1))
             if rn < start_row:
                 continue
+            if end_row is not None and rn > end_row:
+                break
             row_content = rm.group(0)
             data_val = OpenpyxlHandler._get_cell_value_in_row(
                 row_content, data_col, rn, shared_strings
@@ -4228,9 +4401,17 @@ class OpenpyxlHandler:
             src_m = re.search(src_pat, ac_xml, re.DOTALL)
             src_xml = src_m.group(0) if src_m else b""
 
-            small_x_rows = self._find_small_x_rows(ac_xml, "B", x_row + 1, zip_data=zip_data)
-            formula_templates = self._find_all_template_rows(ac_xml, "D", "B", x_row + 1)
-            templates = sorted(set(formula_templates + small_x_rows))
+            search_window_end = x_row + max(1000, len(entries) * 20)
+            missing_row_slots = self._find_missing_row_slots(
+                ac_xml, x_row + 1, end_row=search_window_end,
+            )
+            insertable_rows = self._find_all_insertable_rows(
+                ac_xml, "B", x_row + 1, zip_data=zip_data, end_row=search_window_end,
+            )
+            small_x_rows = self._find_small_x_rows(
+                ac_xml, "B", x_row + 1, zip_data=zip_data, end_row=search_window_end,
+            )
+            templates = sorted(set(missing_row_slots + insertable_rows + small_x_rows))
             tpl_idx = 0
             seen = set()
             max_row = 0
@@ -4256,7 +4437,9 @@ class OpenpyxlHandler:
                     logger.info(f"No template row left in Acc_Char; inserting {acc} at new row {row_num}")
 
                 rn = str(row_num)
+                prev_row = max(row_num - 1, 1)
                 overrides = {
+                    "A": f'<c r="A{rn}" s="{_get_style(src_xml, "A", "998")}"><f>A{prev_row}+1</f></c>'.encode(),
                     "B": f'<c r="B{rn}" s="{_get_style(src_xml, "B")}" t="inlineStr"><is><t>{_esc(acc)}</t></is></c>'.encode(),
                     "C": f'<c r="C{rn}" s="{_get_style(src_xml, "C")}" t="inlineStr"><is><t>{_esc(entry.get("code", ""))}</t></is></c>'.encode(),
                     "E": f'<c r="E{rn}" s="{_get_style(src_xml, "E")}" t="inlineStr"><is><t>{_esc(entry.get("bank", ""))}</t></is></c>'.encode(),
@@ -4267,10 +4450,9 @@ class OpenpyxlHandler:
                 row_xml = self._clone_row_for_insert(ac_xml, source_row, row_num, overrides)
 
                 if is_tpl:
-                    old_pat = rb'<row[^>]*\sr="' + rn.encode() + rb'"[^>]*>.*?</row>'
-                    old_m = re.search(old_pat, ac_xml, re.DOTALL)
-                    if old_m:
-                        ac_xml = ac_xml[:old_m.start()] + row_xml + ac_xml[old_m.end():]
+                    ac_xml, replaced = self._replace_row_xml(ac_xml, row_num, row_xml)
+                    if not replaced:
+                        ac_xml = self._insert_row_before_sheet_data_close(ac_xml, row_xml)
                 else:
                     ins = None
                     for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', ac_xml):
@@ -4311,9 +4493,17 @@ class OpenpyxlHandler:
             src_m = re.search(src_pat, sa_xml, re.DOTALL)
             src_xml = src_m.group(0) if src_m else b""
 
-            small_x_rows = self._find_small_x_rows(sa_xml, "C", x_row + 1, zip_data=zip_data)
-            formula_templates = self._find_all_template_rows(sa_xml, "A", "C", x_row + 1)
-            templates = sorted(set(formula_templates + small_x_rows))
+            search_window_end = x_row + max(1000, len(entries) * 20)
+            missing_row_slots = self._find_missing_row_slots(
+                sa_xml, x_row + 1, end_row=search_window_end,
+            )
+            insertable_rows = self._find_all_insertable_rows(
+                sa_xml, "C", x_row + 1, zip_data=zip_data, end_row=search_window_end,
+            )
+            small_x_rows = self._find_small_x_rows(
+                sa_xml, "C", x_row + 1, zip_data=zip_data, end_row=search_window_end,
+            )
+            templates = sorted(set(missing_row_slots + insertable_rows + small_x_rows))
             tpl_idx = 0
             seen = set()
             max_row = 0
@@ -4362,10 +4552,9 @@ class OpenpyxlHandler:
                 row_xml = self._clone_row_for_insert(sa_xml, source_row, row_num, overrides)
 
                 if is_tpl:
-                    old_pat = rb'<row[^>]*\sr="' + rn.encode() + rb'"[^>]*>.*?</row>'
-                    old_m = re.search(old_pat, sa_xml, re.DOTALL)
-                    if old_m:
-                        sa_xml = sa_xml[:old_m.start()] + row_xml + sa_xml[old_m.end():]
+                    sa_xml, replaced = self._replace_row_xml(sa_xml, row_num, row_xml)
+                    if not replaced:
+                        sa_xml = self._insert_row_before_sheet_data_close(sa_xml, row_xml)
                 else:
                     ins = None
                     for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', sa_xml):
@@ -4406,9 +4595,17 @@ class OpenpyxlHandler:
             src_m = re.search(src_pat, cb_xml, re.DOTALL)
             src_xml = src_m.group(0) if src_m else b""
 
-            small_x_rows = self._find_small_x_rows(cb_xml, "C", x_row + 1, zip_data=zip_data)
-            formula_templates = self._find_all_template_rows(cb_xml, "A", "C", x_row + 1)
-            templates = sorted(set(formula_templates + small_x_rows))
+            search_window_end = x_row + max(1000, len(entries) * 20)
+            missing_row_slots = self._find_missing_row_slots(
+                cb_xml, x_row + 1, end_row=search_window_end,
+            )
+            insertable_rows = self._find_all_insertable_rows(
+                cb_xml, "C", x_row + 1, zip_data=zip_data, end_row=search_window_end,
+            )
+            small_x_rows = self._find_small_x_rows(
+                cb_xml, "C", x_row + 1, zip_data=zip_data, end_row=search_window_end,
+            )
+            templates = sorted(set(missing_row_slots + insertable_rows + small_x_rows))
             tpl_idx = 0
             seen = set()
             max_row = 0
@@ -4442,10 +4639,9 @@ class OpenpyxlHandler:
                 row_xml = self._clone_row_for_insert(cb_xml, source_row, row_num, overrides)
 
                 if is_tpl:
-                    old_pat = rb'<row[^>]*\sr="' + rn.encode() + rb'"[^>]*>.*?</row>'
-                    old_m = re.search(old_pat, cb_xml, re.DOTALL)
-                    if old_m:
-                        cb_xml = cb_xml[:old_m.start()] + row_xml + cb_xml[old_m.end():]
+                    cb_xml, replaced = self._replace_row_xml(cb_xml, row_num, row_xml)
+                    if not replaced:
+                        cb_xml = self._insert_row_before_sheet_data_close(cb_xml, row_xml)
                 else:
                     ins = None
                     for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', cb_xml):
