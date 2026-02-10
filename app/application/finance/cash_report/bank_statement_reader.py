@@ -8,6 +8,8 @@ from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
+import math
+import re
 
 import openpyxl
 import pandas as pd
@@ -56,6 +58,16 @@ class BankStatementReader:
 
     # Sheet name
     SHEET_NAME = "Template details"
+
+    # Required headers in Template details sheet (0-indexed column -> expected keyword)
+    REQUIRED_HEADERS = {
+        4: "bank code",
+        5: "bank account number",
+        7: "trans date",
+        8: "description",
+        10: "debit",
+        11: "credit",
+    }
 
     def __init__(self):
         pass
@@ -114,6 +126,7 @@ class BankStatementReader:
                 raise ValueError(f"Sheet '{self.SHEET_NAME}' not found in the Excel file")
 
             ws = wb[sheet_name]
+            self._validate_template_details_schema(ws)
             transactions = []
 
             # Skip header row (row 1)
@@ -142,6 +155,28 @@ class BankStatementReader:
                 return sheet_name
         return None
 
+    @staticmethod
+    def _normalize_header(value) -> str:
+        if value is None:
+            return ""
+        # Keep alnum and spaces; normalize to lowercase single-space text.
+        text = re.sub(r"[^a-zA-Z0-9 ]+", " ", str(value)).lower().strip()
+        return re.sub(r"\s+", " ", text)
+
+    def _validate_template_details_schema(self, ws) -> None:
+        """
+        Ensure we are reading the expected ERP statement structure from Template details.
+        This prevents importing data from any non-standard worksheet layout.
+        """
+        for col_idx, keyword in self.REQUIRED_HEADERS.items():
+            header_value = ws.cell(row=1, column=col_idx + 1).value
+            header_norm = self._normalize_header(header_value)
+            if keyword not in header_norm:
+                raise ValueError(
+                    f"Invalid statement format in '{self.SHEET_NAME}': "
+                    f"column {col_idx + 1} header '{header_value}' does not contain '{keyword}'"
+                )
+
     def _parse_row_openpyxl(
         self,
         ws,
@@ -159,13 +194,20 @@ class BankStatementReader:
         Returns:
             MovementTransaction or None if row is empty/invalid
         """
-        # Get cell values (column numbers are 1-indexed in openpyxl)
-        bank_code = ws.cell(row=row_num, column=self.COL_BANK_CODE + 1).value
-        account_number = ws.cell(row=row_num, column=self.COL_ACCOUNT_NUMBER + 1).value
-        trans_date = ws.cell(row=row_num, column=self.COL_TRANS_DATE + 1).value
-        description = ws.cell(row=row_num, column=self.COL_DESCRIPTION + 1).value
-        debit = ws.cell(row=row_num, column=self.COL_DEBIT + 1).value
-        credit = ws.cell(row=row_num, column=self.COL_CREDIT + 1).value
+        # Get cells (column numbers are 1-indexed in openpyxl)
+        bank_cell = ws.cell(row=row_num, column=self.COL_BANK_CODE + 1)
+        account_cell = ws.cell(row=row_num, column=self.COL_ACCOUNT_NUMBER + 1)
+        date_cell = ws.cell(row=row_num, column=self.COL_TRANS_DATE + 1)
+        description_cell = ws.cell(row=row_num, column=self.COL_DESCRIPTION + 1)
+        debit_cell = ws.cell(row=row_num, column=self.COL_DEBIT + 1)
+        credit_cell = ws.cell(row=row_num, column=self.COL_CREDIT + 1)
+
+        bank_code = bank_cell.value
+        account_number = self._parse_text_value(account_cell.value, account_cell.number_format)
+        trans_date = date_cell.value
+        description = self._parse_text_value(description_cell.value, description_cell.number_format)
+        debit = debit_cell.value
+        credit = credit_cell.value
 
         # Skip empty rows
         if not account_number:
@@ -191,13 +233,72 @@ class BankStatementReader:
         return MovementTransaction(
             source=source_name,
             bank=str(bank_code) if bank_code else "",
-            account=str(account_number),
+            account=account_number,
             date=parsed_date,
-            description=str(description) if description else "",
+            description=description,
             debit=parsed_debit,
             credit=parsed_credit,
             nature="",  # Will be classified later
         )
+
+    @staticmethod
+    def _extract_zero_pad_width(number_format: Optional[str]) -> int:
+        """
+        Extract zero-padding width from formats like "00000000000000".
+        Returns 0 when not a pure zero-pad format.
+        """
+        if not number_format:
+            return 0
+        primary = number_format.split(";")[0].strip()
+        return len(primary) if re.fullmatch(r"0+", primary) else 0
+
+    def _parse_text_value(self, value, number_format: Optional[str] = None) -> str:
+        """
+        Parse text-like fields (account/description) and preserve numeric identifiers.
+        Handles Excel numeric conversion that may append ".0" or apply scientific notation.
+        """
+        if value is None:
+            return ""
+
+        if isinstance(value, str):
+            return value.strip()
+
+        if isinstance(value, Decimal):
+            if value == value.to_integral_value():
+                return str(value.to_integral_value())
+            return format(value.normalize(), "f")
+
+        if isinstance(value, int):
+            text = str(value)
+            width = self._extract_zero_pad_width(number_format)
+            return text.zfill(width) if width and len(text) < width else text
+
+        if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value):
+                return ""
+            dec = Decimal(str(value))
+            if dec == dec.to_integral_value():
+                text = str(dec.to_integral_value())
+                width = self._extract_zero_pad_width(number_format)
+                return text.zfill(width) if width and len(text) < width else text
+            return format(dec.normalize(), "f")
+
+        return str(value).strip()
+
+    @staticmethod
+    def _looks_like_thousands_format(text: str, sep: str) -> bool:
+        """
+        True when separators likely represent thousands groups:
+        e.g., 1.234.567 or 1,234,567
+        """
+        parts = text.split(sep)
+        if len(parts) <= 1:
+            return False
+        if not all(part.isdigit() for part in parts):
+            return False
+        if len(parts[0]) < 1 or len(parts[0]) > 3:
+            return False
+        return all(len(part) == 3 for part in parts[1:])
 
     def _parse_date(self, value) -> Optional[date]:
         """Parse date from various formats."""
@@ -242,6 +343,8 @@ class BankStatementReader:
             return None
 
         if isinstance(value, (int, float)):
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                return None
             if value == 0:
                 return None
             return Decimal(str(value))
@@ -256,11 +359,38 @@ class BankStatementReader:
             if not value or value == "0":
                 return None
 
-            # Remove commas and spaces
-            value = value.replace(",", "").replace(" ", "")
+            # Support negatives in parentheses: (123) => -123
+            is_negative = value.startswith("(") and value.endswith(")")
+            if is_negative:
+                value = value[1:-1].strip()
+
+            # Normalize spaces and NBSP
+            value = value.replace("\u00A0", "").replace(" ", "")
+
+            # Locale-aware normalization:
+            # - 1.234.567,89 -> 1234567.89
+            # - 1,234,567.89 -> 1234567.89
+            # - 1.234.567 -> 1234567
+            # - 1,234,567 -> 1234567
+            if "." in value and "," in value:
+                if value.rfind(",") > value.rfind("."):
+                    # Comma is decimal separator
+                    value = value.replace(".", "").replace(",", ".")
+                else:
+                    # Dot is decimal separator
+                    value = value.replace(",", "")
+            elif "," in value:
+                if self._looks_like_thousands_format(value, ","):
+                    value = value.replace(",", "")
+                else:
+                    value = value.replace(",", ".")
+            elif "." in value and self._looks_like_thousands_format(value, "."):
+                value = value.replace(".", "")
 
             try:
                 result = Decimal(value)
+                if is_negative:
+                    result = -result
                 return result if result != 0 else None
             except:
                 return None

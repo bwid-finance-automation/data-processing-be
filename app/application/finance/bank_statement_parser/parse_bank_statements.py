@@ -1059,11 +1059,10 @@ class ParseBankStatementsUseCase:
             # Date handling
             if tx.date:
                 date_str_yyyymmdd = tx.date.strftime("%Y%m%d")
-                # Format: M/D/YYYY (no leading zeros)
-                formatted_date = f"{tx.date.month}/{tx.date.day}/{tx.date.year}"
+                formatted_date = tx.date.strftime("%d/%m/%Y")
             else:
                 date_str_yyyymmdd = now.strftime("%Y%m%d")
-                formatted_date = f"{now.month}/{now.day}/{now.year}"
+                formatted_date = now.strftime("%d/%m/%Y")
 
             # Bank Statement Daily format: BS/{Bank}/{Currency}-{AccNo}{TxID}/{YYYYMMDD}
             trans_id = tx.transaction_id or ""
@@ -1266,11 +1265,11 @@ class ParseBankStatementsUseCase:
 
                 # Date handling
                 if tx.date:
-                    tx_date = tx.date
                     date_str_yyyymmdd = tx.date.strftime("%Y%m%d")
+                    formatted_date = tx.date.strftime("%d/%m/%Y")
                 else:
-                    tx_date = now
                     date_str_yyyymmdd = now.strftime("%Y%m%d")
+                    formatted_date = now.strftime("%d/%m/%Y")
 
                 # Bank Statement Daily format: BS/{Bank}/{Currency}-{AccNo}{TxID}/{YYYYMMDD}
                 trans_id = tx.transaction_id or ""
@@ -1303,7 +1302,7 @@ class ParseBankStatementsUseCase:
                     "Bank Code (*)": tx.bank_name,
                     "Bank Account Number (*)": str(tx.acc_no) if tx.acc_no else "",
                     "TRANS ID": trans_id,
-                    "Trans Date (*)": tx_date,
+                    "Trans Date (*)": formatted_date,
                     "Description (*)": tx.description or "",
                     "Currency(*)": currency,
                     "DEBIT (*)": debit_val,
@@ -1564,14 +1563,11 @@ class ParseBankStatementsUseCase:
 
                 # Date handling
                 if tx.date:
-                    tx_date = tx.date
                     date_str_yyyymmdd = tx.date.strftime("%Y%m%d")
-                    # Format: M/D/YYYY (no leading zeros)
-                    formatted_date = f"{tx.date.month}/{tx.date.day}/{tx.date.year}"
+                    formatted_date = tx.date.strftime("%d/%m/%Y")
                 else:
-                    tx_date = now
                     date_str_yyyymmdd = now.strftime("%Y%m%d")
-                    formatted_date = f"{now.month}/{now.day}/{now.year}"
+                    formatted_date = now.strftime("%d/%m/%Y")
 
                 # Bank Statement Daily format: BS/{Bank}/{Currency}-{AccNo}{TxID}/{YYYYMMDD}
                 trans_id = tx.transaction_id or ""
