@@ -1846,12 +1846,15 @@ class OpenpyxlHandler:
     @staticmethod
     def _dedupe_rows_by_number(sheet_xml: bytes) -> bytes:
         """
-        Remove duplicate <row r="N"> blocks, keeping the richer row payload.
+        Remove duplicate <row r="N"> blocks AND fix out-of-order rows.
 
-        Excel can emit "Removed Records: Cell information" when duplicated row
-        indices exist in the same worksheet XML. This keeps one row per index:
-        - Prefer row with more cell nodes (<c ...>)
-        - Tie-breaker: prefer longer XML payload
+        Excel emits "Removed Records: Cell information" when:
+        - Duplicated row indices exist in the same worksheet XML
+        - Rows are not in strictly ascending order
+
+        This method:
+        1. Deduplicates rows (keeps richer payload)
+        2. Re-sorts rows by row number if any are out of order
         """
         # Also remove malformed standalone cells outside row blocks first.
         sheet_xml = OpenpyxlHandler._remove_orphan_cells_outside_rows(sheet_xml)
@@ -1890,16 +1893,59 @@ class OpenpyxlHandler:
             else:
                 remove_ranges.append((start, end))
 
-        if not remove_ranges:
+        if remove_ranges:
+            remove_ranges.sort(key=lambda x: x[0], reverse=True)
+            out = bytearray(sheet_xml)
+            for start, end in remove_ranges:
+                del out[start:end]
+            sheet_xml = bytes(out)
+            logger.warning(f"Removed {len(remove_ranges)} duplicate row blocks from worksheet XML")
+
+        # Check if rows are in order; if not, re-sort them
+        row_pattern2 = rb'(<row[^>]*\sr="(\d+)"[^>]*/\s*>|<row[^>]*\sr="(\d+)"[^>]*>.*?</row>)'
+        matches2 = list(re.finditer(row_pattern2, sheet_xml, re.DOTALL))
+        if not matches2:
             return sheet_xml
 
-        remove_ranges.sort(key=lambda x: x[0], reverse=True)
-        out = bytearray(sheet_xml)
-        for start, end in remove_ranges:
-            del out[start:end]
+        row_nums_ordered = []
+        for m in matches2:
+            rn = m.group(2) or m.group(3)
+            if rn:
+                row_nums_ordered.append(int(rn))
 
-        logger.warning(f"Removed {len(remove_ranges)} duplicate row blocks from worksheet XML")
-        return bytes(out)
+        is_sorted = all(row_nums_ordered[i] < row_nums_ordered[i + 1]
+                        for i in range(len(row_nums_ordered) - 1))
+        if is_sorted:
+            return sheet_xml
+
+        # Rows are out of order — extract all rows, sort, and rebuild sheetData
+        logger.warning(f"Detected out-of-order rows in worksheet XML, re-sorting...")
+
+        # Find sheetData boundaries
+        sd_open = re.search(rb'<sheetData[^>]*>', sheet_xml)
+        sd_close_m = re.search(rb'</sheetData>', sheet_xml)
+        if not sd_open or not sd_close_m:
+            return sheet_xml
+
+        before_rows = sheet_xml[:sd_open.end()]
+        after_rows = sheet_xml[sd_close_m.start():]
+
+        # Extract all row blocks with their row numbers
+        rows_with_nums: List[Tuple[int, bytes]] = []
+        for m in matches2:
+            row_xml_bytes = m.group(1)
+            rn = m.group(2) or m.group(3)
+            if rn:
+                rows_with_nums.append((int(rn), row_xml_bytes))
+
+        # Sort by row number
+        rows_with_nums.sort(key=lambda x: x[0])
+
+        # Rebuild sheetData
+        sorted_rows = b'\n'.join(row_bytes for _, row_bytes in rows_with_nums)
+        result = before_rows + b'\n' + sorted_rows + b'\n' + after_rows
+        logger.warning(f"Re-sorted {len(rows_with_nums)} rows in worksheet XML")
+        return result
 
     @staticmethod
     def _xml_has_account(
@@ -1960,6 +2006,28 @@ class OpenpyxlHandler:
                     if raw_val == account_str:
                         return True
         return False
+
+    @staticmethod
+    def _insert_row_sorted(sheet_xml: bytes, row_num: int, row_xml: bytes) -> bytes:
+        """Insert row XML at the correct sorted position within <sheetData>.
+
+        Scans existing rows and inserts before the first row with a higher
+        row number, maintaining ascending order. Falls back to appending
+        before </sheetData> if no higher row exists.
+        """
+        insert_pos = None
+        for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', sheet_xml):
+            if int(rm.group(1)) >= row_num:
+                insert_pos = rm.start()
+                break
+        if insert_pos:
+            return sheet_xml[:insert_pos] + row_xml + b'\n' + sheet_xml[insert_pos:]
+
+        # No higher row found — append before </sheetData>
+        sd_close = sheet_xml.rfind(b'</sheetData>')
+        if sd_close >= 0:
+            return sheet_xml[:sd_close] + row_xml + b'\n' + sheet_xml[sd_close:]
+        return sheet_xml
 
     def _insert_row_before_sheet_data_close(self, sheet_xml: bytes, row_xml: bytes) -> bytes:
         """Insert a row XML before </sheetData>, handling both normal and self-closing tags."""
@@ -3388,7 +3456,7 @@ class OpenpyxlHandler:
             )
             sheet_xml, replaced = self._replace_row_xml(sheet_xml, first_tpl, row_xml)
             if not replaced:
-                sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, row_xml)
+                sheet_xml = self._insert_row_sorted(sheet_xml, insert_row_num, row_xml)
             used_row = insert_row_num
             logger.info(f"Cloned row {source_row} → Acc_Char row {insert_row_num} with account {account_no}")
         else:
@@ -4032,7 +4100,8 @@ class OpenpyxlHandler:
             )
             sheet_xml, replaced = self._replace_row_xml(sheet_xml, first_tpl, row_xml)
             if not replaced:
-                sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, row_xml)
+                # Row doesn't exist in XML — insert at correct sorted position
+                sheet_xml = self._insert_row_sorted(sheet_xml, insert_row_num, row_xml)
             used_row = insert_row_num
 
             # If this was the last template row, create a new empty template row after it
@@ -4044,16 +4113,7 @@ class OpenpyxlHandler:
                 template_xml = self._clone_row_for_insert(
                     sheet_xml, source_row, new_template_row, template_overrides
                 )
-                # Insert the new template row after the data row
-                insert_pos = None
-                for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', sheet_xml):
-                    if int(rm.group(1)) > insert_row_num:
-                        insert_pos = rm.start()
-                        break
-                if insert_pos:
-                    sheet_xml = sheet_xml[:insert_pos] + template_xml + b'\n' + sheet_xml[insert_pos:]
-                else:
-                    sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, template_xml)
+                sheet_xml = self._insert_row_sorted(sheet_xml, new_template_row, template_xml)
                 logger.info(f"Created new template row at {new_template_row} to maintain insert row")
 
             logger.info(f"Cloned row {source_row} → Saving Account row {insert_row_num} with account {account_no}")
@@ -4215,7 +4275,8 @@ class OpenpyxlHandler:
             )
             sheet_xml, replaced = self._replace_row_xml(sheet_xml, first_tpl, row_xml)
             if not replaced:
-                sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, row_xml)
+                # Row doesn't exist in XML — insert at correct sorted position
+                sheet_xml = self._insert_row_sorted(sheet_xml, insert_row_num, row_xml)
             used_row = insert_row_num
 
             # If this was the last template row, create a new empty template row after it
@@ -4228,16 +4289,7 @@ class OpenpyxlHandler:
                 template_xml = self._clone_row_for_insert(
                     sheet_xml, source_row, new_template_row, template_overrides
                 )
-                # Insert the new template row after the data row
-                insert_pos = None
-                for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', sheet_xml):
-                    if int(rm.group(1)) > insert_row_num:
-                        insert_pos = rm.start()
-                        break
-                if insert_pos:
-                    sheet_xml = sheet_xml[:insert_pos] + template_xml + b'\n' + sheet_xml[insert_pos:]
-                else:
-                    sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, template_xml)
+                sheet_xml = self._insert_row_sorted(sheet_xml, new_template_row, template_xml)
                 logger.info(f"Created new template row at {new_template_row} to maintain insert row")
 
             logger.info(f"Cloned row {source_row} → Cash Balance row {insert_row_num} with account {account_no}")
@@ -4553,7 +4605,7 @@ class OpenpyxlHandler:
                 if is_tpl:
                     ac_xml, replaced = self._replace_row_xml(ac_xml, row_num, row_xml)
                     if not replaced:
-                        ac_xml = self._insert_row_before_sheet_data_close(ac_xml, row_xml)
+                        ac_xml = self._insert_row_sorted(ac_xml, row_num, row_xml)
                 else:
                     ins = None
                     for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', ac_xml):
@@ -4655,7 +4707,7 @@ class OpenpyxlHandler:
                 if is_tpl:
                     sa_xml, replaced = self._replace_row_xml(sa_xml, row_num, row_xml)
                     if not replaced:
-                        sa_xml = self._insert_row_before_sheet_data_close(sa_xml, row_xml)
+                        sa_xml = self._insert_row_sorted(sa_xml, row_num, row_xml)
                 else:
                     ins = None
                     for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', sa_xml):
@@ -4742,7 +4794,7 @@ class OpenpyxlHandler:
                 if is_tpl:
                     cb_xml, replaced = self._replace_row_xml(cb_xml, row_num, row_xml)
                     if not replaced:
-                        cb_xml = self._insert_row_before_sheet_data_close(cb_xml, row_xml)
+                        cb_xml = self._insert_row_sorted(cb_xml, row_num, row_xml)
                 else:
                     ins = None
                     for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', cb_xml):
