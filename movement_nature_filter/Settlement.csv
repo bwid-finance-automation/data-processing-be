@@ -1,0 +1,25 @@
+﻿#;Keyword;Regex;Meaning
+GROUP A — Tất toán / Rút tiền (Current Account ← Savings): 23 patterns;;;
+1;TAT TOAN;TAT\s*TOAN;Tất toán — đóng/thanh lý HDTG
+2;TT HDTG;TT\s+HDTG;Viết tắt: Tất toán HDTG
+3;TERMINATE SAVING;TERMINATE\s*(PARTIAL\s*)?SAVING;Terminate saving (EN) — VTB
+4;WITHDRAWAL TERM DEPOSIT;WITHDRAWAL\s*(OF\s*)?(THE\s*)?TERM\s*DEPOSIT;Withdrawal term deposit (EN) — VTB
+5;FULL WITHDRAWAL FROM SAVINGS;FULL\s*WITHDRAWAL\s*FROM\s*SAVINGS;Full withdrawal (EN) — VTB
+6;WITHDRAW FIXED DEPOSIT;WITHDRAW\s*FIXED\s*DEPOSIT;Withdraw fixed deposit (EN) — BIDV
+7;PARTIALLY WITHDRAW TERM DEPOSIT;PARTIALLY\s*WITHDRAW\s*TERM\s*DEPOSIT;Partially withdraw (EN) — BIDV
+8;CLOSE TD ACCT;CLOSE\s*TD\s*ACC;Close Term Deposit — Kbank
+9;CLOSING TERM DEPOSIT;CLOSING\s*TERM\s*DEPOSIT;Closing term deposit — Escrow
+10;RUT TIEN GUI;RUT\s*TIEN\s*GUI;Rút tiền gửi online — BIDV
+11;RUT TIEN + TIET KIEM;RUT\s*TIEN.*TIET\s*KIEM;Rút tiền từ TK tiết kiệm
+12;RUT TIEN + HDTG;RUT\s*TIEN.*HDTG;Rút tiền theo HDTG
+13;RUT MOT PHAN;RUT\s*MOT\s*PHAN;Rút một phần tiền gửi
+14;RUT 1 PHAN;RUT\s*1\s*PHAN;Rút 1 phần — variant số
+15;RUT GOC MOT PHAN;RUT\s*GOC\s*MOT\s*PHAN;Rút gốc một phần HDTG
+16;RUT TRUOC HAN;RUT\s*TRUOC\s*HAN;Rút trước hạn
+17;DONG TKKH;DONG\s*TKKH;Đóng TK kỳ hạn
+18;DONG TK + KY HAN;DONG\s*TK.*KY\s*HAN;Đóng TK + kỳ hạn
+19;DONG TK + TIET KIEM;DONG\s*TK.*TIET\s*KIEM;Đóng TK tiết kiệm
+20;DONG TK + account ref;DONG\s*TK\s*(BIDV|THEO\s*DE|\d{3,});Đóng TK + mã NH/số TK
+21;DONG HDTG;DONG\s*HDTG;Đóng HDTG
+22;TRA GOC + TIEN GUI;TRA\s*GOC.*TK\s*TIEN\s*GUI;Trả gốc TK tiền gửi
+23;TRA GOC + HDTG;TRA\s*GOC.*HDTG;Trả gốc HDTG

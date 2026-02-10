@@ -641,6 +641,19 @@ class UnifiedConfig(BaseSettings):
 
         return values
 
+    @model_validator(mode='after')
+    def load_standalone_subconfigs(self):
+        """Load nested configs that have their own env_prefix.
+
+        UnifiedConfig uses env_prefix="VARIANCE_" which overrides nested models'
+        own env_prefix (e.g. RedisConfig's "REDIS_"). This validator re-creates
+        those sub-configs standalone so they read from the correct env vars.
+        """
+        self.redis = RedisConfig()
+        self.brute_force = BruteForceConfig()
+        self.security = SecurityConfig()
+        return self
+
     def to_legacy_dict(self) -> Dict[str, Any]:
         """
         Convert unified config to legacy dictionary format for backward compatibility.

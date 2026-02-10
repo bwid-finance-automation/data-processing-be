@@ -32,7 +32,8 @@ class MovementTransaction:
     description: str  # Column E - Bank description
     debit: Optional[Decimal]  # Column F - Nợ (Debit)
     credit: Optional[Decimal]  # Column G - Có (Credit)
-    nature: str  # Column I - Nature (AI classified)
+    nature: str  # Column I - Nature (classified)
+    _classified_by: str = ""  # "rule" or "ai" - not written to Excel
 
     def __post_init__(self):
         # Ensure account is string
@@ -215,8 +216,8 @@ class MovementDataWriter:
                 'account': tx.account,
                 'date': tx.date,
                 'description': tx.description,
-                'debit': float(tx.debit) if tx.debit else 0,
-                'credit': float(tx.credit) if tx.credit else 0,
+                'debit': tx.debit if tx.debit is not None else 0,
+                'credit': tx.credit if tx.credit is not None else 0,
                 'nature': tx.nature,
             }
             for tx in transactions
@@ -227,6 +228,36 @@ class MovementDataWriter:
         )
         logger.info(f"Appended {rows_added} transactions, total: {total_rows}")
         return rows_added, total_rows
+
+    def modify_cell_values(self, modifications: dict) -> None:
+        """
+        Modify specific cell values in existing Movement rows.
+        Uses byte-level XML manipulation to preserve drawings/charts.
+
+        Args:
+            modifications: {row_num: {col_letter: new_value_str}}
+                e.g. {30: {"F": "4000000000"}}
+        """
+        if not modifications:
+            return
+        handler = get_openpyxl_handler()
+        handler.modify_cell_values(self.working_file_path, "Movement", modifications)
+
+    def insert_rows_after(self, insertions: dict) -> dict:
+        """
+        Insert new rows after specified row numbers in Movement sheet.
+        Used to place interest split rows directly below their settlement row.
+
+        Args:
+            insertions: {original_row_num: tx_data_dict}
+
+        Returns:
+            {original_row_num: new_row_num} mapping for all data rows
+        """
+        if not insertions:
+            return {}
+        handler = get_openpyxl_handler()
+        return handler.insert_rows_after(self.working_file_path, "Movement", insertions)
 
     def highlight_settlement_rows(self, row_numbers: List[int]) -> None:
         """
@@ -241,6 +272,26 @@ class MovementDataWriter:
 
         handler = get_openpyxl_handler()
         handler.highlight_rows(self.working_file_path, "Movement", row_numbers)
+
+    def highlight_open_new_rows(self, row_numbers: List[int]) -> None:
+        """
+        Apply green highlight to open-new (mở mới) rows in Movement sheet.
+        Uses byte-level XML manipulation to avoid corrupting drawings/charts.
+
+        Args:
+            row_numbers: List of 1-based row numbers to highlight
+        """
+        if not row_numbers:
+            return
+
+        green_fill = (
+            b'<fill><patternFill patternType="solid">'
+            b'<fgColor rgb="FF92D050"/>'
+            b'</patternFill></fill>'
+        )
+
+        handler = get_openpyxl_handler()
+        handler.highlight_rows(self.working_file_path, "Movement", row_numbers, fill_xml=green_fill)
 
     def remove_transactions_by_source(self, source_name: str) -> int:
         """

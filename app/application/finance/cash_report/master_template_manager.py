@@ -27,7 +27,7 @@ TEMPLATES_DIR = BASE_DIR / "templates" / "cash_report"
 WORKING_DIR = BASE_DIR / "working" / "cash_report"
 
 # Master template filename - use original file directly to preserve all formulas
-MASTER_TEMPLATE_FILENAME = "master_data.xlsx"
+MASTER_TEMPLATE_FILENAME = "[0] Cash report Template.xlsx"
 
 # In-memory template cache (shared across all instances)
 _template_cache: Optional[bytes] = None

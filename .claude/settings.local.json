@@ -1,44 +1,25 @@
 {
   "permissions": {
     "allow": [
-      "Bash(tree:*)",
-      "Bash(python:*)",
-      "Bash(netstat:*)",
-      "Bash(findstr:*)",
-      "Bash(dir:*)",
-      "Bash(set:*)",
-      "Bash(psql:*)",
-      "Bash(pip show:*)",
-      "Bash(pip install:*)",
-      "Bash(cd:*)",
-      "Bash(alembic stamp:*)",
-      "Bash(del \"D:\\Project\\data-processing-be\\create_db_doc.py\")",
-      "Bash(find:*)",
-      "Bash(alembic revision:*)",
-      "Bash(chcp:*)",
-      "Bash(grep:*)",
-      "Bash(wmic logicaldisk:*)",
-      "Bash(powershell -Command:*)",
-      "Bash(powershell.exe:*)",
-      "Bash(cmd.exe /c \"echo %USERPROFILE%\")",
-      "Bash(cmd.exe /c \"echo %USERPROFILE% && echo %TEMP%\")",
-      "Bash(echo:*)",
-      "Bash(du:*)",
-      "Bash(xargs:*)",
-      "Bash(yarn cache clean)",
-      "Bash(pip cache:*)",
-      "Bash(npm cache clean:*)",
-      "Bash(docker system prune:*)",
-      "Bash(wmic product:*)",
-      "Bash(msiexec /x \"{8A033D83-DF0B-48E9-ACD3-EC33AA2A4639}\" /qn /norestart)",
-      "Bash(tasklist:*)",
-      "Bash(sc query:*)",
-      "Bash(net stop:*)",
-      "Bash(del \"d:\\\\Project\\\\data-processing-be\\\\app\\\\application\\\\finance\\\\bank_statement_parser\\\\bank_parsers\\\\ctbc_parser.py\")",
-      "Bash(del:*)",
-      "Bash(ls -la \"d:\\\\Project\\\\data-processing-be\\\\app\\\\application\\\\finance\\\\bank_statement_parser\\\\bank_parsers\"\" | findstr \".py \")"
+      "Bash(*)"
     ],
     "deny": [],
-    "ask": []
+    "ask": [],
+    "additionalDirectories": [
+      "d:\\Project\\data-processing-be\\templates\\cash_report"
+    ]
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -Command \"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Claude Code can ban!', 'Claude Code')\""
+          }
+        ]
+      }
+    ]
   }
 }

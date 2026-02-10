@@ -259,7 +259,7 @@ async def shutdown_event():
     except Exception as e:
         logger.warning(f"Error closing database: {e}")
 
-    # Close Redis connection
+    # Close Redis connection    
     try:
         from app.infrastructure.cache.redis_cache import RedisCacheService
         if RedisCacheService._instance:

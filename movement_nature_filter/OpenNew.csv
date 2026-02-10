@@ -1,0 +1,44 @@
+﻿#;Keyword;Regex;Meaning
+1;GUI TIEN + HDTG;GUI\s*TIEN.*HDTG;Gửi tiền theo HDTG
+2;GUI TIEN + HOP DONG;GUI\s*TIEN.*HOP\s*DONG;Gửi tiền theo hợp đồng
+3;GUI TIEN VAO HOP DONG;GUI\s*TIEN\s*VAO\s*HOP\s*DONG;Gửi tiền vào HDTG
+4;GUI TIEN GUI KY HAN;GUI\s*TIEN\s*GUI\s*KY\s*HAN;Gửi tiền gửi kỳ hạn
+5;GUI TIEN VAO TAI KHOAN TIEN GUI;GUI\s*TIEN\s*VAO\s*TAI\s*KHOAN\s*TIEN\s*GUI;Gửi tiền vào TKTG có kỳ hạn
+6;GUI TIEN TK;GUI\s*TIEN\s*TK;Gửi tiền TK — BIDV
+7;GUI TIEN GUI CKH;GUI\s*TIEN\s*GUI\s*CKH;Gửi tiền gửi CKH — ACB
+8;GUI TIEN NGAY;GUI\s*TIEN\s*NGAY;Gửi tiền ngày — TCB
+9;GUI HDTG;GUI\s*HDTG;Gửi HDTG
+10;GUI TK THEO HDTG;GUI\s*TK\s*THEO\s*HDTG;Gửi TK theo HDTG
+11;GUI TIET KIEM;GUI\s*TIET\s*KIEM;Gửi tiết kiệm
+12;GUI KY HAN;GUI\s*KY\s*HAN;Gửi kỳ hạn
+13;GUI TK + THANG;GUI\s*TK\s*\d+\s*THANG;Gửi TK + tháng — VTB
+14;GUI TKLH (linh hoạt);GUI\s*TKLH;Gửi TK linh hoạt — BIDV
+15;GUI TGCKH (ACB);GUI\s*TGCKH;Gửi tiền gửi CKH — ACB
+16;MO HDTG;MO\s*HDTG;Mở HDTG
+17;MO HOP DONG TIEN GUI;MO\s*HOP\s*DONG\s*TIEN\s*GUI;Mở hợp đồng tiền gửi
+18;MO HGTG (typo);MO\s*HGTG;Mở HGTG — typo = MO HDTG
+19;TRICH TK MO HDTG;TRICH\s*TK\s*MO.*HDTG;Trích TK mở HDTG
+20;HACH TOAN HDTG;HACH\s*TOAN\s*HDTG;Hạch toán HDTG
+21;HT HDTG;HT\s+HDTG;Viết tắt: Hạch toán HDTG
+22;CHUYEN KHOAN VAO HDTG;CHUYEN\s*KHOAN\s*VAO\s*HDTG;Chuyển khoản vào HDTG
+23;HDTG KH + digit;HDTG\s*KH\s*\d;HDTG kỳ hạn + số
+24;HDTG RGLH;HDTG\s*RGLH;HDTG rút gốc linh hoạt
+25;HDTG + term (THANG/NGAY);HDTG\s*\d+\s*(THANG|NGAY|TH|THT);HDTG + kỳ hạn tháng/ngày
+26;HDTG SO + digit;HDTG\s*SO\s*\d;HDTG số — BIDV
+27;HDTG + 3-digit branch;HDTG\s+\d{3}[\s/];HDTG + mã chi nhánh
+28;HDTG: + 3-digit;HDTG:\s*\d{3};HDTG: + mã HĐ
+29;HDTG CKH;HDTG\s+CKH;HDTG có kỳ hạn
+30;HGTD SO (typo);HGTD\s*SO;HGTD — typo = HDTG
+31;number/number/HDTG;\d+/\d+/HDTG;Mã HĐ dạng số/năm/HDTG
+32;CK SANG TK TIME;CK\s*SANG\s*TK\s*TIME;CK sang TK TIMEMO/CT — VCB
+33;TIMEMO;TIMEMO;TK TIMEMO — VCB savings
+34;TIMECT;TIMECT;TK TIMECT — VCB savings
+35;DEPOSIT FOR NEXT PRINCIPAL (KEB);DEPOSIT\s*FOR\s*NEXT\s*PRINCIPAL;KEB Hana escrow savings
+36;OPEN TD (Kbank);OPEN\s*TD;Open Term Deposit — Kbank
+37;Completed transfer to CD (BIDV);COMPLETED\s*TRANSFER\s*TO\s*BIDV\s*CD;Transfer to BIDV CD account
+38;SETTLEMENT CONTRACT (VIB);SETTLEMENT\s*CONTRACT;Settlement contract — VIB
+39;AUTO ROLLOVER (Woori);AUTO\s*ROLLOVER;Auto rollover — Woori
+40;WITHDRAWAL (Woori);^WITHDRAWAL$;Withdrawal — Woori Saving
+41;KY HAN + RGLH;KY\s*HAN.*RGLH;Kỳ hạn + RGLH
+42;RGLH + KY HAN;RGLH.*KY\s*HAN;RGLH + kỳ hạn
+43;DAO HAN + QUAY VONG;DAO\s*HAN.*QUAY\s*VONG;Đáo hạn quay vòng

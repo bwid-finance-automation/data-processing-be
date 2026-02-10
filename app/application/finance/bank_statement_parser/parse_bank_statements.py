@@ -951,16 +951,15 @@ class ParseBankStatementsUseCase:
             if agg["max_date"]:
                 tx_date = agg["max_date"]
                 date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
-                # Format: M/D/YYYY (no leading zeros)
-                formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
+                formatted_date = tx_date.strftime("%d/%m/%Y")
             elif bal.statement_date:
                 # Use statement period end date from parsed file
                 tx_date = bal.statement_date
                 date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
-                formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
+                formatted_date = tx_date.strftime("%d/%m/%Y")
             else:
                 date_str_yyyymmdd = now.strftime("%Y%m%d")
-                formatted_date = f"{now.month}/{now.day}/{now.year}"
+                formatted_date = now.strftime("%d/%m/%Y")
 
             # Currency default
             currency = bal.currency if bal.currency else "VND"
@@ -1188,13 +1187,16 @@ class ParseBankStatementsUseCase:
                 if agg["max_date"]:
                     tx_date = agg["max_date"]
                     date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
+                    formatted_date = tx_date.strftime("%d/%m/%Y")
                 elif bal.statement_date:
                     # Use statement period end date from parsed file
                     tx_date = bal.statement_date
                     date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
+                    formatted_date = tx_date.strftime("%d/%m/%Y")
                 else:
                     tx_date = now
                     date_str_yyyymmdd = now.strftime("%Y%m%d")
+                    formatted_date = now.strftime("%d/%m/%Y")
 
                 # Currency default
                 currency = bal.currency if bal.currency else "VND"
@@ -1224,7 +1226,7 @@ class ParseBankStatementsUseCase:
                     "Total Debit (*)": debit_val,
                     "Total Credit (*)": credit_val,
                     "Currency (*)": currency,
-                    "Date (*)": tx_date
+                    "Date (*)": formatted_date
                 })
 
             if balance_data:
@@ -1482,17 +1484,16 @@ class ParseBankStatementsUseCase:
                 if agg["max_date"]:
                     tx_date = agg["max_date"]
                     date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
-                    # Format: M/D/YYYY (no leading zeros)
-                    formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
+                    formatted_date = tx_date.strftime("%d/%m/%Y")
                 elif bal.statement_date:
                     # Use statement period end date from parsed file
                     tx_date = bal.statement_date
                     date_str_yyyymmdd = tx_date.strftime("%Y%m%d")
-                    formatted_date = f"{tx_date.month}/{tx_date.day}/{tx_date.year}"
+                    formatted_date = tx_date.strftime("%d/%m/%Y")
                 else:
                     tx_date = now
                     date_str_yyyymmdd = now.strftime("%Y%m%d")
-                    formatted_date = f"{now.month}/{now.day}/{now.year}"
+                    formatted_date = now.strftime("%d/%m/%Y")
 
                 # Currency default
                 currency = bal.currency if bal.currency else "VND"
