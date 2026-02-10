@@ -3749,6 +3749,58 @@ class OpenpyxlHandler:
         return overrides
 
     @staticmethod
+    def _build_saving_template_row_overrides(
+        row_num: int,
+        source_row_xml: bytes = b"",
+    ) -> Dict[str, bytes]:
+        """Build empty template row overrides for Saving Account insert row.
+        Creates formula cells but leaves data cells empty, maintaining the
+        table's insert row functionality.
+        """
+        rn = str(row_num)
+
+        def _get_style(col: str) -> str:
+            """Extract style index from source row for a given column."""
+            pat = rb'<c\s[^>]*r="' + col.encode() + rb'\d+"[^>]*'
+            m = re.search(pat, source_row_xml)
+            if m:
+                s = re.search(rb's="(\d+)"', m.group(0))
+                return s.group(1).decode() if s else ""
+            return ""
+
+        overrides = {}
+
+        # C: Account number - empty but styled (data cell)
+        s_c = _get_style("C") or "1142"
+        overrides["C"] = f'<c r="C{rn}" s="{s_c}"/>'.encode()
+
+        # H: Term months - empty (data cell)
+        s_h = _get_style("H") or "1130"
+        overrides["H"] = f'<c r="H{rn}" s="{s_h}"/>'.encode()
+
+        # I: Term days - empty (data cell)
+        s_i = _get_style("I") or "1130"
+        overrides["I"] = f'<c r="I{rn}" s="{s_i}"/>'.encode()
+
+        # J: Opening date - empty (data cell)
+        s_j = _get_style("J") or "1130"
+        overrides["J"] = f'<c r="J{rn}" s="{s_j}"/>'.encode()
+
+        # K: Maturity date - empty (data cell)
+        s_k = _get_style("K") or "1131"
+        overrides["K"] = f'<c r="K{rn}" s="{s_k}"/>'.encode()
+
+        # L: Interest rate - empty (data cell)
+        s_l = _get_style("L") or "927"
+        overrides["L"] = f'<c r="L{rn}" s="{s_l}"/>'.encode()
+
+        # AD: Clear marker column
+        s_ad = _get_style("AD") or "1130"
+        overrides["AD"] = f'<c r="AD{rn}" s="{s_ad}"/>'.encode()
+
+        return overrides
+
+    @staticmethod
     def _build_cash_balance_row_xml(row_num: int, account_no: str) -> bytes:
         """Build Cash Balance row XML with account number + ALL formula cells.
 
@@ -3982,6 +4034,28 @@ class OpenpyxlHandler:
             if not replaced:
                 sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, row_xml)
             used_row = insert_row_num
+
+            # If this was the last template row, create a new empty template row after it
+            if len(template_rows) == 1:
+                new_template_row = insert_row_num + 1
+                template_overrides = self._build_saving_template_row_overrides(
+                    new_template_row, source_row_xml
+                )
+                template_xml = self._clone_row_for_insert(
+                    sheet_xml, source_row, new_template_row, template_overrides
+                )
+                # Insert the new template row after the data row
+                insert_pos = None
+                for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', sheet_xml):
+                    if int(rm.group(1)) > insert_row_num:
+                        insert_pos = rm.start()
+                        break
+                if insert_pos:
+                    sheet_xml = sheet_xml[:insert_pos] + template_xml + b'\n' + sheet_xml[insert_pos:]
+                else:
+                    sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, template_xml)
+                logger.info(f"Created new template row at {new_template_row} to maintain insert row")
+
             logger.info(f"Cloned row {source_row} → Saving Account row {insert_row_num} with account {account_no}")
         else:
             # No template — find last data row after Big X, then insert after it
@@ -4026,7 +4100,7 @@ class OpenpyxlHandler:
             used_row = insert_row_num
             logger.info(f"Inserted account {account_no} at Saving Account row {insert_row_num} (after last data)")
 
-        # Expand Table1218 only if used_row exceeds current table range
+        # Expand Table1218 to include both data row and any new template row
         table_path = self._find_table_for_sheet(zip_data, sheet_path, "Table1218")
         if table_path:
             with zipfile.ZipFile(io.BytesIO(zip_data), "r") as z:
@@ -4034,10 +4108,12 @@ class OpenpyxlHandler:
             ref_m = re.search(rb'ref="[A-Z]+\d+:[A-Z]+(\d+)"', table_xml)
             if ref_m:
                 current_last = int(ref_m.group(1))
-                if used_row > current_last:
-                    table_xml = self._expand_table_ref(table_xml, used_row)
+                # Find the actual last row in the sheet (might include new template row)
+                final_row = self._find_last_xml_row_num(sheet_xml)
+                if final_row > current_last:
+                    table_xml = self._expand_table_ref(table_xml, final_row)
                     extra_entries[table_path] = table_xml
-                    logger.info(f"Expanded Table1218 ref to row {used_row} (was {current_last})")
+                    logger.info(f"Expanded Table1218 ref to row {final_row} (was {current_last})")
 
         self._write_sheet_xml(file_path, zip_data, sheet_path, sheet_xml,
                               extra_entries=extra_entries)
@@ -4141,6 +4217,29 @@ class OpenpyxlHandler:
             if not replaced:
                 sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, row_xml)
             used_row = insert_row_num
+
+            # If this was the last template row, create a new empty template row after it
+            if len(template_rows) == 1:
+                new_template_row = insert_row_num + 1
+                template_overrides = {
+                    "C": f'<c r="C{new_template_row}" s="{s_c}"/>'.encode(),
+                    "Z": f'<c r="Z{new_template_row}" s="{s_z}"/>'.encode(),
+                }
+                template_xml = self._clone_row_for_insert(
+                    sheet_xml, source_row, new_template_row, template_overrides
+                )
+                # Insert the new template row after the data row
+                insert_pos = None
+                for rm in re.finditer(rb'<row[^>]*\sr="(\d+)"', sheet_xml):
+                    if int(rm.group(1)) > insert_row_num:
+                        insert_pos = rm.start()
+                        break
+                if insert_pos:
+                    sheet_xml = sheet_xml[:insert_pos] + template_xml + b'\n' + sheet_xml[insert_pos:]
+                else:
+                    sheet_xml = self._insert_row_before_sheet_data_close(sheet_xml, template_xml)
+                logger.info(f"Created new template row at {new_template_row} to maintain insert row")
+
             logger.info(f"Cloned row {source_row} → Cash Balance row {insert_row_num} with account {account_no}")
         else:
             # No template — insert before boundary (shift it down)
@@ -4179,7 +4278,7 @@ class OpenpyxlHandler:
             used_row = insert_row_num
             logger.info(f"Cloned row {source_row} → Cash Balance row {insert_row_num} with account {account_no}")
 
-        # Expand Table11 only if used_row exceeds current table range
+        # Expand Table11 to include both data row and any new template row
         table_path = self._find_table_for_sheet(zip_data, sheet_path, "Table11")
         if table_path:
             with zipfile.ZipFile(io.BytesIO(zip_data), "r") as z:
@@ -4187,10 +4286,12 @@ class OpenpyxlHandler:
             ref_m = re.search(rb'ref="[A-Z]+\d+:[A-Z]+(\d+)"', table_xml)
             if ref_m:
                 current_last = int(ref_m.group(1))
-                if used_row > current_last:
-                    table_xml = self._expand_table_ref(table_xml, used_row)
+                # Find the actual last row in the sheet (might include new template row)
+                final_row = self._find_last_xml_row_num(sheet_xml)
+                if final_row > current_last:
+                    table_xml = self._expand_table_ref(table_xml, final_row)
                     extra_entries[table_path] = table_xml
-                    logger.info(f"Expanded Table11 ref to row {used_row} (was {current_last})")
+                    logger.info(f"Expanded Table11 ref to row {final_row} (was {current_last})")
 
         self._write_sheet_xml(file_path, zip_data, sheet_path, sheet_xml,
                               extra_entries=extra_entries)
