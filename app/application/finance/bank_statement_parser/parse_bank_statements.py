@@ -722,12 +722,12 @@ class ParseBankStatementsUseCase:
                     # Skip invalid transactions (no TX ID, no amounts, no date)
                     if not _is_valid_transaction(tx):
                         continue
-                        tx_data.append({
+                    tx_data.append({
                         "Bank Name": tx.bank_name,
                         "Acc No": str(tx.acc_no) if tx.acc_no else "",
                         "Debit": tx.debit,
                         "Credit": tx.credit,
-                        "Date": tx.date,
+                        "Date": tx.date.strftime("%d/%m/%Y") if tx.date else "",
                         "Description": tx.description,
                         "Currency": tx.currency,
                         "Transaction ID": tx.transaction_id,

@@ -1,6 +1,7 @@
 """SINOPAC bank statement parser."""
 
 import io
+from datetime import datetime
 from typing import List, Optional, Tuple
 import pandas as pd
 import math
@@ -179,7 +180,7 @@ class SINOPACParser(BaseBankParser):
                     acc_no=acc_no,
                     debit=debit_val,
                     credit=credit_val,
-                    date=self.fix_date(row.get("Trans Date (*)")),
+                    date=self._fix_date_sinopac(row.get("Trans Date (*)")),
                     description=self.to_text(row.get("Description (*)", "")),
                     currency=currency,
                     transaction_id=self.to_text(row.get("TRANS ID", "")),
@@ -227,7 +228,7 @@ class SINOPACParser(BaseBankParser):
                 closing = self._fix_number_sinopac(row.get("Closing Balance (*)"))
 
                 # Parse statement date
-                stmt_date = self.fix_date(row.get("Date (*)"))
+                stmt_date = self._fix_date_sinopac(row.get("Date (*)"))
 
                 balances.append(BankBalance(
                     bank_name="SINOPAC",
@@ -323,7 +324,7 @@ class SINOPACParser(BaseBankParser):
                     acc_no=acc_no,
                     debit=debit_val,
                     credit=credit_val,
-                    date=self.fix_date(row.get("Date")) if "Date" in row else None,
+                    date=self._fix_date_sinopac(row.get("Date")) if "Date" in row else None,
                     description=self.to_text(row.get("Description", "")) if "Description" in row else "",
                     currency=currency,
                     transaction_id="",
@@ -389,7 +390,7 @@ class SINOPACParser(BaseBankParser):
 
             # ========== Parse Types ==========
             if "Date" in data.columns:
-                data["Date"] = data["Date"].apply(self.fix_date)
+                data["Date"] = data["Date"].apply(self._fix_date_sinopac)
             if "Balance" in data.columns:
                 data["Balance"] = data["Balance"].apply(self._fix_number_sinopac)
             if "Deposit" in data.columns:
@@ -454,6 +455,44 @@ class SINOPACParser(BaseBankParser):
             return None
 
     # ========== SINOPAC-Specific Helper Methods ==========
+
+    def _fix_date_sinopac(self, value):
+        """
+        SINOPAC-specific date parser.
+        SINOPAC is a Taiwanese bank that uses MM/DD/YYYY format (US standard),
+        not DD/MM/YYYY (Vietnamese standard).
+        """
+        if value is None or pd.isna(value):
+            return None
+
+        # If already a datetime/date object (from openpyxl Excel date serial)
+        if hasattr(value, 'date') and callable(value.date):
+            return value.date()
+
+        txt = str(value).strip()
+        if not txt:
+            return None
+
+        if " " in txt:
+            txt = txt.split(" ")[0]
+
+        # Try MM/DD/YYYY format first (SINOPAC standard)
+        try:
+            return datetime.strptime(txt, "%m/%d/%Y").date()
+        except (ValueError, TypeError):
+            pass
+
+        # Try YYYY-MM-DD (ISO format)
+        try:
+            return datetime.strptime(txt, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback to pandas with dayfirst=False (US format)
+        try:
+            return pd.to_datetime(txt, dayfirst=False).date()
+        except:
+            return None
 
     def _find_header_row_sinopac(self, top_df: pd.DataFrame) -> int:
         """

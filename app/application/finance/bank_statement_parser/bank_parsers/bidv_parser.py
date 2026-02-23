@@ -431,18 +431,16 @@ class BIDVParser(BaseBankParser):
         """
         BIDV-specific date parser.
         Handles:
-        - Excel date numbers
+        - Excel date objects (datetime/Timestamp from openpyxl)
         - DD/MM/YYYY format (Vietnamese culture)
         - Datetime strings with space separator
         """
         if value is None or pd.isna(value):
             return None
 
-        # Try as Excel date number first
-        try:
-            return pd.to_datetime(value, dayfirst=True).date()
-        except:
-            pass
+        # If already a datetime/date object (from openpyxl Excel date serial)
+        if hasattr(value, 'date') and callable(value.date):
+            return value.date()
 
         # Try parsing text
         txt = str(value).strip()
@@ -453,13 +451,19 @@ class BIDVParser(BaseBankParser):
         if " " in txt:
             txt = txt.split(" ")[0]
 
-        # Try DD/MM/YYYY format
+        # Strict DD/MM/YYYY format (Vietnamese standard)
         try:
             return datetime.strptime(txt, "%d/%m/%Y").date()
-        except:
+        except (ValueError, TypeError):
             pass
 
-        # Fallback to pandas
+        # Try YYYY-MM-DD (ISO format)
+        try:
+            return datetime.strptime(txt, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback to pandas with dayfirst=True
         try:
             return pd.to_datetime(txt, dayfirst=True).date()
         except:

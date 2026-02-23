@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
+from datetime import datetime
 import io
 import zipfile
 import xml.etree.ElementTree as ET
@@ -491,12 +492,12 @@ class BaseBankParser(ABC):
         Convert value to date.
 
         Vietnamese date format: DD/MM/YYYY
-        Uses dayfirst=True to handle DD/MM correctly.
+        Uses explicit strptime for strict DD/MM/YYYY parsing.
         """
         if value is None or pd.isna(value):
             return None
 
-        # If already a datetime/date object
+        # If already a datetime/date object (from openpyxl Excel date serial)
         if hasattr(value, 'date'):
             return value.date()
 
@@ -505,8 +506,20 @@ class BaseBankParser(ABC):
         if ' ' in txt:
             txt = txt.split(' ')[0]  # Take date part only
 
+        # Strict DD/MM/YYYY format (Vietnamese standard)
         try:
-            # Use dayfirst=True for Vietnamese DD/MM/YYYY format
+            return datetime.strptime(txt, "%d/%m/%Y").date()
+        except (ValueError, TypeError):
+            pass
+
+        # Try YYYY-MM-DD (ISO format)
+        try:
+            return datetime.strptime(txt, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback to pandas with dayfirst=True
+        try:
             parsed = pd.to_datetime(txt, dayfirst=True, errors='coerce')
             if pd.notna(parsed):
                 return parsed.date()

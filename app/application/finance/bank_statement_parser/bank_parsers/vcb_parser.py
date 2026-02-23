@@ -863,6 +863,10 @@ class VCBParser(BaseBankParser):
         if value is None or pd.isna(value):
             return None
 
+        # If already a datetime/date object (from openpyxl Excel date serial)
+        if hasattr(value, 'date') and callable(value.date):
+            return value.date()
+
         # Try parsing text first
         txt = str(value).strip()
         if not txt:
@@ -875,22 +879,16 @@ class VCBParser(BaseBankParser):
         # Try DD/MM/YYYY format (most common VCB format)
         try:
             return datetime.strptime(txt, "%d/%m/%Y").date()
-        except:
+        except (ValueError, TypeError):
             pass
 
         # Try YYYY-MM-DD format (HTML format)
         try:
             return datetime.strptime(txt, "%Y-%m-%d").date()
-        except:
+        except (ValueError, TypeError):
             pass
 
-        # Try as Excel date number (fallback)
-        try:
-            return pd.to_datetime(value, dayfirst=True).date()
-        except:
-            pass
-
-        # Fallback to pandas
+        # Fallback to pandas with dayfirst=True
         try:
             return pd.to_datetime(txt, dayfirst=True).date()
         except:

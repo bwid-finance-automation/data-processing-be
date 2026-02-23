@@ -357,11 +357,9 @@ class WooriParser(BaseBankParser):
         if value is None or pd.isna(value):
             return None
 
-        # Try as Excel date number first
-        try:
-            return pd.to_datetime(value).date()
-        except:
-            pass
+        # If already a datetime/date object (from openpyxl Excel date serial)
+        if hasattr(value, 'date') and callable(value.date):
+            return value.date()
 
         # Try parsing text
         txt = str(value).strip()
@@ -372,19 +370,25 @@ class WooriParser(BaseBankParser):
         if " " in txt:
             txt = txt.split(" ")[0]
 
-        # Try DD.MM.YYYY format
+        # Try DD.MM.YYYY format (Woori standard)
         try:
             return datetime.strptime(txt, "%d.%m.%Y").date()
-        except:
+        except (ValueError, TypeError):
             pass
 
         # Try DD/MM/YYYY format
         try:
             return datetime.strptime(txt, "%d/%m/%Y").date()
-        except:
+        except (ValueError, TypeError):
             pass
 
-        # Fallback to pandas
+        # Try YYYY-MM-DD (ISO format)
+        try:
+            return datetime.strptime(txt, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback to pandas with dayfirst=True
         try:
             return pd.to_datetime(txt, dayfirst=True).date()
         except:
