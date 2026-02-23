@@ -21,31 +21,23 @@ class VTBParser(BaseBankParser):
         """
         Detect if file is VTB bank statement.
 
-        Logic from fxLooksLike_VTB:
-        - Read first 40 rows
-        - Look for markers:
-          * "VIETINBANK"
-          * "NGÂN HÀNG TMCP CÔNG THƯƠNG"
-          * "LICH SỬ GIAO DỊCH - TRANSACTION HISTORY"
+        Bank-name markers checked in header only (first 15 rows) to avoid
+        false positives from transaction descriptions mentioning VietinBank.
         """
         try:
             xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
-            # Get first 40 rows
-            top_40 = df.head(40)
+            # Bank-name markers — only check HEADER area (first 15 rows)
+            top_15 = df.head(15)
+            header_text = []
+            for col in top_15.columns:
+                header_text.extend([self.to_text(cell).upper() for cell in top_15[col]])
+            header_flat = " ".join(header_text)
 
-            # Flatten all cells to uppercase text
-            all_text = []
-            for col in top_40.columns:
-                all_text.extend([self.to_text(cell).upper() for cell in top_40[col]])
-
-            txt = " ".join(all_text)
-
-            # Check for VTB markers
-            is_vtb = "VIETINBANK" in txt or \
-                     "NGÂN HÀNG TMCP CÔNG THƯƠNG" in txt or \
-                     "LICH SỬ GIAO DỊCH - TRANSACTION HISTORY" in txt
+            is_vtb = "VIETINBANK" in header_flat or \
+                     "NGÂN HÀNG TMCP CÔNG THƯƠNG" in header_flat or \
+                     "LICH SỬ GIAO DỊCH - TRANSACTION HISTORY" in header_flat
 
             return is_vtb
 

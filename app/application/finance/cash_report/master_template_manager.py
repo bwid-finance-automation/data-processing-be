@@ -114,6 +114,7 @@ class MasterTemplateManager:
         ending_date: date,
         fx_rate: Decimal = Decimal("26175"),
         period_name: str = "",
+        template_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """
         Create a new session with a fresh copy of the master template.
@@ -123,9 +124,12 @@ class MasterTemplateManager:
             ending_date: Report period end date
             fx_rate: VND/USD exchange rate
             period_name: Period name (e.g., "W3-4Jan26")
+            template_bytes: Optional user-uploaded template bytes. If provided,
+                            this file is used as the base instead of the system
+                            template, and Movement prep runs immediately.
 
         Returns:
-            Dict with session_id and file path
+            Dict with session_id, file path, and movement_prepared flag
         """
         # Generate session ID
         session_id = str(uuid.uuid4())
@@ -134,18 +138,20 @@ class MasterTemplateManager:
         session_dir = self._get_session_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write template from memory cache (fast)
+        # Write base file: user-uploaded template takes priority over system template
         working_file = self._get_working_file_path(session_id)
-
-        template_bytes = _load_template_to_cache()
+        base_bytes = template_bytes if template_bytes else _load_template_to_cache()
         with open(working_file, 'wb') as f:
-            f.write(template_bytes)
+            f.write(base_bytes)
 
-        logger.info(f"Created session {session_id}, wrote template from memory cache")
+        if template_bytes:
+            logger.info(f"Created session {session_id}, wrote user-uploaded template ({len(template_bytes)} bytes)")
+        else:
+            logger.info(f"Created session {session_id}, wrote template from memory cache")
 
-        # Initialize session in single optimized operation
-        # (combines: step 0 prior period copy, update_config, clear_movement_data)
         handler = get_openpyxl_handler()
+
+        # Step 1: Update Summary sheet (dates, FX rate, period name)
         handler.initialize_session_optimized(
             file_path=working_file,
             opening_date=opening_date,
@@ -154,9 +160,21 @@ class MasterTemplateManager:
             period_name=period_name,
         )
 
+        # Step 2: If user uploaded their own template, run Movement prep immediately:
+        #   - Copy Cash Balance → Prior Period
+        #   - Clear Movement sheet
+        # For the system blank template this is deferred to first bank upload
+        # (Movement is already empty, Prior Period has no data to copy yet).
+        movement_prepared = False
+        if template_bytes:
+            handler.prepare_movement_for_writing(working_file)
+            movement_prepared = True
+            logger.info(f"Session {session_id}: Movement prep completed immediately (user template)")
+
         return {
             "session_id": session_id,
             "working_file": str(working_file),
+            "movement_prepared": movement_prepared,
             "config": {
                 "opening_date": opening_date.isoformat(),
                 "ending_date": ending_date.isoformat(),
@@ -334,11 +352,17 @@ class MasterTemplateManager:
             # Count Movement data rows only if requested
             movement_rows = 0
             if include_movement_count:
-                movement_ws = wb["Movement"]
-                for row in movement_ws.iter_rows(min_row=4, min_col=3, max_col=3):
-                    for cell in row:
-                        if cell.value:
-                            movement_rows += 1
+                try:
+                    movement_ws = wb["Movement"]
+                    for row in movement_ws.iter_rows(min_row=4, min_col=3, max_col=3):
+                        for cell in row:
+                            if cell.value:
+                                movement_rows += 1
+                except (ValueError, TypeError):
+                    # openpyxl _cast_number may fail on cells with text values
+                    # but missing t= attribute (defaults to numeric).
+                    # Fall back to 0 — the count is informational only.
+                    pass
 
             # Helper to extract date properly (handle timezone offset from Excel)
             def extract_date(value) -> str:

@@ -272,9 +272,10 @@ Detection patterns:
 - Savings/Deposit operations: "HDTG", "GUI HDTG", "MO HDTG", "TAT TOAN", "CK SANG TK TIME", "TIMEMO", "TKKH", "tien gui co ky han", "HOP DONG TIEN GUI", "Completed transfer to BIDV CD"
 - Internal transfer keywords: "INTERNAL TRANSFER", "CHUYEN KHOAN", "Rut tien gui", "ROLLOVER", "VCBCSH"
 - "Tra goc TK tien gui" (return of deposit principal) → Internal transfer in
+- "Tra lai TK tien gui" (deposit interest from bank) → Other receipts (NOT Internal transfer)
 - "MISC CREDIT" → Internal transfer in; "MISC DEBIT" → Internal transfer out
 - Management fees BETWEEN group entities (e.g., "BDG_VC3_MANAGEMENT FEE", "BTU-Payment management fee to VC3") = Internal transfer, NOT Operating expense or Receipt from tenants
-- "CA - TARGET" (SINOPAC settlement) → Internal transfer in
+- "CA - TARGET" (SINOPAC) → depends on amount: round amount >= 100M = Internal transfer in (settlement), non-round small amount = Other receipts (interest)
 - "CLOSING TDA" (close term deposit) → Internal transfer in
 - Capital contribution / gop von between entities → Internal transfer
 
@@ -322,8 +323,8 @@ Share Purchase Agreement payments: "SPA", "Final payment SPA"
 [RECEIPT] "TAT TOAN HDTG SO 285.2025.38679" → Internal transfer in (savings withdrawal)
 [PAYMENT] "GUI HDTG SO 285.2026.46820, KY HAN: 1M" → Internal transfer out (savings deposit)
 [RECEIPT] "Tra goc TK tien gui 217000486074" → Internal transfer in (deposit principal return)
-[RECEIPT] "Tra lai TK tien gui 212000488544" → Internal transfer in (deposit interest - same entity's own deposit)
-[RECEIPT] "CA - TARGET" → Internal transfer in (SINOPAC settlement)
+[RECEIPT] "Tra lai TK tien gui 212000488544" → Other receipts (bank deposit interest credit)
+[RECEIPT] "CA - TARGET" → Other receipts (SINOPAC - typically bank interest; round amounts may be Internal transfer in)
 [RECEIPT] "CLOSING TDA - CLOSING TDA" → Internal transfer in
 [RECEIPT] "MISC CREDIT | MIR601281251C01 | BTPVC3Tra lai BCC" → Internal transfer in
 [PAYMENT] "MISC DEBIT | ..." → Internal transfer out
@@ -338,7 +339,7 @@ Share Purchase Agreement payments: "SPA", "Final payment SPA"
 [PAYMENT] "Thu no goc (LD-PR) - So khe uoc MMD20253243541/01" → Loan repayment
 [PAYMENT] "Thu no LAI U2628493" → Loan interest
 [PAYMENT] "Thu no lai (LD-IN) - So khe uoc MMD20253243541/01" → Loan interest
-[RECEIPT] "Tra lai TK tien gui 217000486074" → Internal transfer in (NOT Other receipts - this is own deposit interest)
+[RECEIPT] "Tra lai TK tien gui 217000486074" → Other receipts (bank deposit interest credit, NOT Internal transfer)
 [RECEIPT] "DDA Interest Paid..." → Other receipts (bank interest)
 [RECEIPT] "CRIN" → Other receipts (bank interest credit)
 [RECEIPT] "ghi co lai tien gui" → Other receipts

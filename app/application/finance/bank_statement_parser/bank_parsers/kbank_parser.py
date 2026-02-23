@@ -22,36 +22,39 @@ class KBANKParser(BaseBankParser):
         Detect if file is KBANK bank statement.
 
         Logic from fxLooksLike_KBANK:
-        - Read first 80 rows
-        - Look for markers:
-          * "kasi", "kasionbank", "kasikorn"
-          * "ngân hàng kasikorn"
-          * "demand deposit account information"
-          * OR ("transaction date" + "debit amount" + "credit amount")
+        - Bank-name markers checked in HEADER only (first 15 rows) to avoid
+          false positives from transaction descriptions mentioning Kasikorn.
+        - Structural column pattern ("transaction date" + "debit amount" +
+          "credit amount") checked in first 30 rows.
         """
         try:
             xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
-            # Get first 80 rows
-            top_80 = df.head(80)
+            # Bank-name markers — only check HEADER area (first 15 rows)
+            # to avoid false positives from beneficiary names in transactions
+            top_15 = df.head(15)
+            header_text = []
+            for col in top_15.columns:
+                header_text.extend([self.to_text(cell).lower() for cell in top_15[col]])
+            header_flat = " ".join(header_text)
 
-            # Flatten all cells to lowercase text
-            all_text = []
-            for col in top_80.columns:
-                all_text.extend([self.to_text(cell).lower() for cell in top_80[col]])
+            has_kasi = "kasi" in header_flat
+            has_kasionbank = "kasionbank" in header_flat
+            has_kasikorn = "kasikorn" in header_flat
+            has_kasikorn_vn = "ngân hàng kasikorn" in header_flat
+            has_demand = "demand deposit account information" in header_flat
 
-            flat = " ".join(all_text)
+            # Structural pattern — check wider area (first 30 rows)
+            top_30 = df.head(30)
+            wider_text = []
+            for col in top_30.columns:
+                wider_text.extend([self.to_text(cell).lower() for cell in top_30[col]])
+            wider_flat = " ".join(wider_text)
 
-            # Check for KBANK markers
-            has_kasi = "kasi" in flat
-            has_kasionbank = "kasionbank" in flat
-            has_kasikorn = "kasikorn" in flat
-            has_kasikorn_vn = "ngân hàng kasikorn" in flat
-            has_demand = "demand deposit account information" in flat
-            has_transaction_pattern = "transaction date" in flat and \
-                                     "debit amount" in flat and \
-                                     "credit amount" in flat
+            has_transaction_pattern = "transaction date" in wider_flat and \
+                                     "debit amount" in wider_flat and \
+                                     "credit amount" in wider_flat
 
             is_kbank = has_kasi or has_kasionbank or has_kasikorn or \
                        has_kasikorn_vn or has_demand or has_transaction_pattern

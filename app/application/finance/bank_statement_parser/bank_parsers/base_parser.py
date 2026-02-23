@@ -71,6 +71,44 @@ class BaseBankParser(ABC):
         """
         pass
 
+    def parse_statement(
+        self, file_bytes: bytes, file_name: str
+    ) -> Tuple[List[BankTransaction], List[BankBalance]]:
+        """
+        Parse both transactions and balances in a single pass.
+
+        Shadows ``get_excel_file`` on this instance with a caching wrapper
+        so that ``parse_transactions`` and ``parse_balances`` share the
+        same ``ExcelFile`` object instead of opening the file twice.
+
+        Subclasses may override for deeper optimisation (e.g. sharing the
+        parsed DataFrame as well).
+
+        Returns:
+            Tuple of (transactions, balances_list)
+        """
+        _cached: dict = {}
+        _cls = type(self)
+
+        def _cached_get_excel_file(fb: bytes) -> "pd.ExcelFile":
+            fid = id(fb)
+            if fid not in _cached:
+                _cached[fid] = _cls.get_excel_file(fb)
+            return _cached[fid]
+
+        # Shadow the classmethod on this instance so every internal call
+        # to self.get_excel_file() returns the cached ExcelFile.
+        self.get_excel_file = _cached_get_excel_file  # type: ignore[assignment]
+        try:
+            transactions = self.parse_transactions(file_bytes, file_name)
+            balance = self.parse_balances(file_bytes, file_name)
+            return transactions, [balance] if balance else []
+        finally:
+            # Remove the instance shadow to restore the classmethod.
+            if "get_excel_file" in self.__dict__:
+                del self.get_excel_file
+            _cached.clear()
+
     # ========== OCR Text Parsing Methods (Optional - Override in subclass) ==========
 
     def can_parse_text(self, text: str) -> bool:

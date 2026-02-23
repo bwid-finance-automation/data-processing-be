@@ -757,6 +757,14 @@ async def parse_bank_statements(
             combined_result["summary"]["failed"] += len(zip_errors)
             combined_result["summary"]["failed_files"].extend(zip_errors)
 
+        # Re-reconcile balances across all batches (Excel + PDF) to deduplicate
+        # accounts that appear in multiple source files/formats
+        if combined_result["all_balances"]:
+            combined_result["all_balances"] = use_case._reconcile_balances_with_transactions(
+                combined_result["all_balances"],
+                combined_result["all_transactions"]
+            )
+
         # Update totals
         combined_result["summary"]["total_transactions"] = len(combined_result["all_transactions"])
         combined_result["summary"]["total_balances"] = len(combined_result["all_balances"])

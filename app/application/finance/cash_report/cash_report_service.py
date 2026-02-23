@@ -93,12 +93,15 @@ import re as _re
 SETTLEMENT_PATTERNS_COMPILED = [_re.compile(p, _re.IGNORECASE) for p in SETTLEMENT_PATTERNS]
 
 # Natures eligible for settlement detection.
-# Many genuine settlement transactions (e.g. VTB "Tra goc", SINOPAC "CA - TARGET")
-    # are misclassified as "Other receipts" or "Loan receipts" by the AI classifier.
 SETTLEMENT_ELIGIBLE_NATURES = frozenset({
-    "internal transfer in",   # Primary / correct nature
-    "other receipts",         # VTB "Tra goc", SINOPAC "CA - TARGET" / bare account numbers
-    "loan receipts",          # Misclassified VTB "Tra goc"
+    "internal transfer in",   # Only Internal transfer in triggers settlement
+})
+
+# Natures that are NEVER settlement candidates, regardless of description.
+# Counter entries and automation-generated interest rows must be excluded.
+SETTLEMENT_BLOCKED_NATURES = frozenset({
+    "internal transfer out",
+    "other receipts",
 })
 
 # Special handling for numeric-only bank descriptions (account-like values).
@@ -301,6 +304,7 @@ class CashReportService:
         fx_rate: Decimal = Decimal("26175"),
         period_name: str = "",
         user_id: Optional[int] = None,
+        template_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """
         Get existing active session or create a new one.
@@ -351,7 +355,7 @@ class CashReportService:
                 }
 
         # No existing session, create new one
-        return await self._create_new_session(opening_date, ending_date, fx_rate, period_name, user_id=user_id)
+        return await self._create_new_session(opening_date, ending_date, fx_rate, period_name, user_id=user_id, template_bytes=template_bytes)
 
     async def _create_new_session(
         self,
@@ -360,6 +364,7 @@ class CashReportService:
         fx_rate: Decimal,
         period_name: str,
         user_id: Optional[int] = None,
+        template_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """Internal method to create a new session."""
         # Create session with template manager
@@ -368,6 +373,7 @@ class CashReportService:
             ending_date=ending_date,
             fx_rate=fx_rate,
             period_name=period_name,
+            template_bytes=template_bytes,
         )
 
         # Persist to database if session available
@@ -383,6 +389,8 @@ class CashReportService:
                 total_transactions=0,
                 total_files_uploaded=0,
                 user_id=user_id,
+                # Track whether Movement prep already ran (user-uploaded template)
+                metadata_json={"movement_prepared": session_info.get("movement_prepared", False)},
             )
             self.db_session.add(db_model)
             await self.db_session.commit()
@@ -688,6 +696,7 @@ class CashReportService:
                 data={
                     "files_processed": len(files),
                     "total_transactions_added": rows_added,
+                    "total_transactions_skipped": total_skipped,
                     "total_rows_in_movement": total_rows,
                 },
             ))
@@ -712,6 +721,212 @@ class CashReportService:
             },
         }
 
+    # ------------------------------------------------------------------ #
+    #  Upload Movement NS/Manual file                                      #
+    # ------------------------------------------------------------------ #
+
+    async def upload_movement_file(
+        self,
+        session_id: str,
+        file: Tuple[str, bytes],  # (filename, content)
+        filter_by_date: bool = True,
+        progress_callback: Optional[callable] = None,
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Upload pre-classified Movement data (Netsuite & Manual).
+
+        Unlike bank statement uploads, these transactions already have their
+        Nature category populated and do NOT require AI classification.
+
+        Workflow:
+        1. Read Movement file (filter out Automation rows)
+        2. Filter by session date range (if enabled)
+        3. Prepare Movement sheet on first upload (copy Cash Balance → Prior Period)
+        4. Append transactions to Movement sheet
+        5. Update session stats
+
+        Args:
+            session_id: The session ID
+            file: Tuple of (filename, file_content)
+            filter_by_date: Whether to filter transactions by session date range
+            progress_callback: SSE progress callback
+            user_id: Owner user ID for access control
+
+        Returns:
+            Upload result summary (no AI usage since pre-classified)
+        """
+        filename, content = file
+
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
+
+        # Get session info
+        session_info = self.template_manager.get_session_info(session_id)
+        if not session_info:
+            raise ValueError(f"Session {session_id} not found")
+
+        working_file = self.template_manager.get_working_file_path(session_id)
+        if not working_file:
+            raise ValueError(f"Working file for session {session_id} not found")
+
+        # Get date range for filtering
+        opening_date = None
+        ending_date = None
+        if filter_by_date and session_info.get("config"):
+            config = session_info["config"]
+            if config.get("opening_date"):
+                date_str = config["opening_date"]
+                if "T" in date_str:
+                    opening_date = datetime.fromisoformat(date_str).date()
+                else:
+                    opening_date = date.fromisoformat(date_str)
+            if config.get("ending_date"):
+                date_str = config["ending_date"]
+                if "T" in date_str:
+                    ending_date = datetime.fromisoformat(date_str).date()
+                else:
+                    ending_date = date.fromisoformat(date_str)
+
+        # --- Step 1: Read Movement file ---
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="step_start",
+                step="reading",
+                message=f"Reading Movement file: {filename}...",
+                percentage=10,
+            ))
+            await asyncio.sleep(0)
+
+        transactions = self.statement_reader.read_movement_file(content, filename)
+        found_count = len(transactions)
+
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="step_complete",
+                step="reading",
+                message=f"Found {found_count} Movement transactions",
+                percentage=30,
+                data={"count": found_count},
+            ))
+
+        # --- Step 2: Filter by date range ---
+        total_skipped = 0
+        if filter_by_date and opening_date and ending_date:
+            if progress_callback:
+                progress_callback(ProgressEvent(
+                    event_type="step_start",
+                    step="filtering",
+                    message=f"Filtering by date range {opening_date} - {ending_date}...",
+                    percentage=40,
+                ))
+            transactions, skipped = self.statement_reader.filter_by_date_range(
+                transactions, opening_date, ending_date
+            )
+            total_skipped = skipped
+            if progress_callback:
+                progress_callback(ProgressEvent(
+                    event_type="step_complete",
+                    step="filtering",
+                    message=f"{len(transactions)} within range, {skipped} skipped",
+                    percentage=50,
+                ))
+
+        if not transactions:
+            if progress_callback:
+                progress_callback(ProgressEvent(
+                    event_type="complete",
+                    step="done",
+                    message="No valid Movement transactions to process",
+                    percentage=100,
+                ))
+            return {
+                "session_id": session_id,
+                "total_transactions_found": found_count,
+                "total_transactions_added": 0,
+                "total_transactions_skipped": total_skipped,
+                "message": "No valid Movement transactions found after filtering",
+            }
+
+        # --- Step 3: Prepare Movement sheet on first upload ---
+        is_first_upload = await self._is_first_upload(session_id)
+        if is_first_upload:
+            if progress_callback:
+                progress_callback(ProgressEvent(
+                    event_type="step_start",
+                    step="preparing",
+                    message="First upload: Copying Cash Balance to Prior Period...",
+                    percentage=55,
+                ))
+                await asyncio.sleep(0)
+
+            from .openpyxl_handler import get_openpyxl_handler
+            handler = get_openpyxl_handler()
+            rows_cleared = await asyncio.to_thread(
+                handler.prepare_movement_for_writing, working_file
+            )
+
+            if progress_callback:
+                progress_callback(ProgressEvent(
+                    event_type="step_complete",
+                    step="preparing",
+                    message=f"Cleared {rows_cleared} old rows, Cash Balance copied",
+                    percentage=65,
+                ))
+
+        # --- Step 4: Write to Movement sheet ---
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="step_start",
+                step="writing",
+                message=f"Writing {len(transactions)} transactions to Movement sheet...",
+                percentage=70,
+            ))
+            await asyncio.sleep(0)
+
+        writer = MovementDataWriter(working_file)
+        rows_added, total_rows = await asyncio.to_thread(
+            writer.append_transactions, transactions
+        )
+
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="step_complete",
+                step="writing",
+                message=f"Written {rows_added} rows (total: {total_rows})",
+                percentage=90,
+            ))
+
+        # --- Step 5: Update session stats ---
+        if self.db_session:
+            await self._update_session_stats(session_id, rows_added, 1)
+
+        # Emit completion
+        if progress_callback:
+            progress_callback(ProgressEvent(
+                event_type="complete",
+                step="done",
+                message=f"Upload complete! {rows_added} Movement transactions processed (from {found_count} found).",
+                percentage=100,
+                data={
+                    "total_transactions_found": found_count,
+                    "total_transactions_added": rows_added,
+                    "total_transactions_skipped": total_skipped,
+                    "total_rows_in_movement": total_rows,
+                },
+            ))
+
+        return {
+            "session_id": session_id,
+            "total_transactions_found": found_count,
+            "total_transactions_added": rows_added,
+            "total_transactions_skipped": total_skipped,
+            "total_rows_in_movement": total_rows,
+            "message": f"Successfully uploaded {rows_added} Movement transactions",
+        }
+
+    # ------------------------------------------------------------------ #
+
     def _rule_based_classify(self, description: str, is_receipt: bool) -> Optional[str]:
         """
         Rule-based classification using KeyPaymentClassifier.
@@ -720,7 +935,7 @@ class CashReportService:
             Nature category string if confidently matched, None if needs AI.
         """
         key_payment, category, _ = self.rule_classifier.classify(description, is_receipt)
-        # Default fallbacks mean no specific keyword matched â†’ needs AI
+        # Default fallbacks mean no specific keyword matched â†' needs AI
         if key_payment in ("Other receipts", "Other payment"):
             return None
         return category
@@ -1148,14 +1363,18 @@ class CashReportService:
             tx._classified_by = "rule_guardrail"
             return
 
+        # Don't override ground-truth classifications from Transactions.csv reference
+        classified_by = getattr(tx, "_classified_by", "") or ""
+        is_reference = classified_by.startswith("reference")
+
         if is_receipt:
-            if any(pattern.search(description) for pattern in self._settlement_patterns_compiled):
+            if not is_reference and any(pattern.search(description) for pattern in self._settlement_patterns_compiled):
                 principal, _ = self._split_settlement_amount(tx.debit or Decimal("0"))
                 tx.nature = "Internal transfer in" if principal > 0 else "Other receipts"
                 tx._classified_by = "rule_guardrail"
                 nature_now = tx.nature
         else:
-            if any(pattern.search(description) for pattern in self._open_new_patterns_compiled):
+            if not is_reference and any(pattern.search(description) for pattern in self._open_new_patterns_compiled):
                 tx.nature = "Internal transfer out"
                 tx._classified_by = "rule_guardrail"
                 return
@@ -1184,9 +1403,9 @@ class CashReportService:
     def _apply_receipt_amount_nature_constraints(self, tx: MovementTransaction, current_nature: str) -> Optional[str]:
         """
         Additional user-defined constraints for receipt-side natures:
-        - Receipt from tenants: non-round amounts only.
-        - Other receipts: non-round amounts and < 100M.
-        - Internal transfer in: only for round amounts (>=100M, divisible by 100M).
+        - Round (>=100M, divisible by 100M) → Internal transfer in
+        - Non-round + >=100M                → Receipt from tenants
+        - Internal transfer in + <100M      → Other receipts
         """
         if not tx.debit or tx.debit <= 0:
             return None
@@ -1201,26 +1420,22 @@ class CashReportService:
             return None
 
         amount = tx.debit
-        description = (tx.description or "").strip()
-        desc_lower = description.lower()
-        is_settlement_like = any(pattern.search(description) for pattern in self._settlement_patterns_compiled) or any(
-            keyword in desc_lower for keyword in SETTLEMENT_KEYWORDS
-        )
-        if self._is_round_receipt_amount(amount):
+        UNIT_100M = Decimal("100000000")
+        is_round = amount >= UNIT_100M and amount % UNIT_100M == 0
+
+        # Rule 1: Round → Internal transfer in
+        if is_round:
             return "Internal transfer in"
 
-        # Non-round amounts:
-        # - "Other receipts" only when below 100M.
-        if nature == "other receipts" and amount >= Decimal("100000000"):
-            if is_settlement_like:
-                return None
+        # Below: non-round
+
+        # Rule 2: >=100M → Receipt from tenants
+        if amount >= UNIT_100M:
             return "Receipt from tenants"
+
+        # Rule 3: Internal transfer in + <100M → Other receipts
         if nature == "internal transfer in":
-            if is_settlement_like:
-                return "Other receipts"
-            if amount < Decimal("100000000"):
-                return "Other receipts"
-            return "Receipt from tenants"
+            return "Other receipts"
 
         return None
 
@@ -1717,15 +1932,28 @@ class CashReportService:
         }
 
     async def _is_first_upload(self, session_id: str) -> bool:
-        """Check if this is the first upload for a session (DB total_transactions == 0)."""
+        """Check if this is the first upload for a session.
+
+        Returns False (skip prep) if:
+        - total_transactions > 0 (already uploaded before), OR
+        - metadata_json.movement_prepared == True (prep already ran at session init
+          because user uploaded their own template)
+        """
         if not self.db_session:
             return True  # No DB = always prepare (safe default)
         result = await self.db_session.execute(
-            select(CashReportSessionModel.total_transactions).where(
-                CashReportSessionModel.session_id == session_id
-            )
+            select(
+                CashReportSessionModel.total_transactions,
+                CashReportSessionModel.metadata_json,
+            ).where(CashReportSessionModel.session_id == session_id)
         )
-        total = result.scalar_one_or_none()
+        row = result.one_or_none()
+        if row is None:
+            return True
+        total, metadata = row
+        # Skip prep if Movement was already prepared at session init
+        if metadata and metadata.get("movement_prepared"):
+            return False
         return total is None or total == 0
 
     async def _track_uploaded_file(
@@ -1996,14 +2224,173 @@ class CashReportService:
         writer = MovementDataWriter(working_file)
         return writer.get_data_preview(limit)
 
+    async def generate_movement_data(
+        self,
+        file: Tuple[str, bytes],
+        period_name: str = "",
+        progress_callback: Optional[callable] = None,
+    ) -> bytes:
+        """
+        Generate a Movement Data Export file from a Movement Data Upload file.
+
+        Upload format (no header, 7 columns):
+            A=Source, B=Bank, C=Account, D=Date, E=Description, F=Debit(Nợ), G=Credit(Có)
+
+        Export format (with header row, 16 columns):
+            A=Source, B=Bank, C=Account, D=Date, E=Description,
+            F=Nợ, G=Có, H=Net(F-G), I=Nature, J=Entity,
+            K=Grouping, L=Key payment, M=Currency, N=Account type,
+            O=Period, P=Text
+
+        Args:
+            file: (filename, bytes) tuple of the uploaded Upload-format file
+            period_name: Period label to fill in column O (e.g. "W3-4Jan26")
+            progress_callback: Optional progress callback
+
+        Returns:
+            bytes of the generated Export-format .xlsx file
+        """
+        import openpyxl
+        from openpyxl import Workbook
+        from io import BytesIO
+        from datetime import datetime
+
+        def emit(event_type, step, message, percentage=0):
+            if progress_callback:
+                progress_callback(ProgressEvent(
+                    event_type=event_type, step=step,
+                    message=message, percentage=percentage,
+                ))
+
+        filename, content = file
+        emit("progress", "reading", f"Reading upload file: {filename}", percentage=10)
+
+        # ── Read upload file ──────────────────────────────────────────────────
+        wb_in = openpyxl.load_workbook(BytesIO(content), data_only=True, read_only=True)
+        ws_in = wb_in.active
+
+        transactions: List[MovementTransaction] = []
+        for row in ws_in.iter_rows(min_row=1, values_only=True):
+            # Skip completely empty rows
+            if not any(c for c in row):
+                continue
+
+            # Parse each column (0-based)
+            def _s(v):
+                return str(v).strip() if v is not None else ""
+
+            def _d(v):
+                """Parse a decimal value (debit/credit). 0 or None → None."""
+                if v is None:
+                    return None
+                try:
+                    dec = Decimal(str(v))
+                    return dec if dec > 0 else None
+                except Exception:
+                    return None
+
+            source = _s(row[0]) if len(row) > 0 else ""
+            bank = _s(row[1]) if len(row) > 1 else ""
+            account = _s(row[2]) if len(row) > 2 else ""
+            date_raw = row[3] if len(row) > 3 else None
+            description = _s(row[4]) if len(row) > 4 else ""
+            debit = _d(row[5]) if len(row) > 5 else None
+            credit = _d(row[6]) if len(row) > 6 else None
+
+            # Parse date
+            tx_date: Optional[date] = None
+            if isinstance(date_raw, datetime):
+                tx_date = date_raw.date()
+            elif isinstance(date_raw, date):
+                tx_date = date_raw
+            elif date_raw:
+                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"):
+                    try:
+                        tx_date = datetime.strptime(str(date_raw).strip()[:10], fmt).date()
+                        break
+                    except Exception:
+                        pass
+
+            if not bank and not account and not description:
+                continue
+
+            transactions.append(MovementTransaction(
+                source=source or "Manual",
+                bank=bank,
+                account=account,
+                date=tx_date or date.today(),
+                description=description,
+                debit=debit,
+                credit=credit,
+                nature="",
+            ))
+
+        wb_in.close()
+        emit("progress", "classifying", f"Classifying {len(transactions)} transactions...", percentage=30)
+
+        # ── Classify transactions ─────────────────────────────────────────────
+        if transactions:
+            transactions = await self._classify_transactions(transactions, progress_callback=None)
+
+        emit("progress", "building", "Building export file...", percentage=80)
+
+        # ── Build export workbook ─────────────────────────────────────────────
+        wb_out = Workbook()
+        ws_out = wb_out.active
+        ws_out.title = "Sheet1"
+
+        # Header row
+        headers = [
+            "Source", "Bank", "Account", "Date", "Bank description",
+            "Nợ", "Có", "Net", "Nature", "Entity",
+            "Grouping", "Key payment", "Currcency", "Account type",
+            "Period", "Text",
+        ]
+        ws_out.append(headers)
+
+        for tx in transactions:
+            debit_val = float(tx.debit) if tx.debit else 0
+            credit_val = float(tx.credit) if tx.credit else 0
+            net_val = debit_val - credit_val
+
+            # "Text" column = last N digits of account number (strip leading zeros)
+            text_val = tx.account.lstrip("0") if tx.account else ""
+
+            ws_out.append([
+                tx.source,
+                tx.bank,
+                tx.account,
+                tx.date,
+                tx.description,
+                debit_val if debit_val else None,
+                credit_val if credit_val else None,
+                net_val if net_val != 0 else None,
+                tx.nature or "",
+                tx.entity or "",
+                tx.grouping or "",
+                tx.key_payment or tx.nature or "",
+                tx.currency or "VND",
+                tx.account_type or "Current Account",
+                period_name,
+                text_val,
+            ])
+
+        emit("complete", "done", f"Generated export file with {len(transactions)} rows", percentage=100)
+
+        out = BytesIO()
+        wb_out.save(out)
+        return out.getvalue()
+
     def _read_saving_accounts(self, working_file: str) -> List[Dict[str, Any]]:
         """
         Read Saving Account sheet from working file.
 
         Returns:
-            List of dicts with keys: account, bank_1, bank, entity, branch
+            List of dicts with keys: account, bank_1, bank, entity, branch,
+            closing_balance_vnd, maturity_date
         """
         import openpyxl
+        from datetime import datetime
         wb = openpyxl.load_workbook(working_file, data_only=True, read_only=True)
         saving_accounts = []
         try:
@@ -2014,17 +2401,56 @@ class CashReportService:
             ws = wb["Saving Account"]
             # Row 3 = headers, Row 4+ = data
             # Col A=Entity, B=Branch, C=Account Number, D=Type, E=Currency,
+            # Col F=CLOSING BALANCE (VND), Col K=Maturity date,
             # Col N(14)=Bank_1 (short code like TCB, BIDV), Col O(15)=Bank (full name)
             for row_data in ws.iter_rows(min_row=4, values_only=False):
                 account = row_data[2].value if len(row_data) > 2 else None
                 if not account:
                     continue
+
+                # Col F (index 5): CLOSING BALANCE (VND)
+                closing_raw = row_data[5].value if len(row_data) > 5 else None
+                closing_balance = Decimal("0")
+                if closing_raw is not None:
+                    try:
+                        closing_balance = Decimal(str(closing_raw))
+                    except Exception:
+                        pass
+
+                # Col K (index 10): Maturity date
+                maturity_raw = row_data[10].value if len(row_data) > 10 else None
+                maturity_date = None
+                if isinstance(maturity_raw, datetime):
+                    maturity_date = maturity_raw.date()
+                elif maturity_raw:
+                    try:
+                        maturity_date = datetime.strptime(str(maturity_raw).strip(), "%Y-%m-%d").date()
+                    except Exception:
+                        try:
+                            maturity_date = datetime.strptime(str(maturity_raw).strip(), "%d/%m/%Y").date()
+                        except Exception:
+                            pass
+
+                # Col L (index 11): Interest rate
+                rate_raw = row_data[11].value if len(row_data) > 11 else None
+                interest_rate = None
+                if rate_raw is not None:
+                    try:
+                        rv = float(rate_raw)
+                        # Stored as decimal (e.g. 0.0475) or percentage (4.75)
+                        interest_rate = rv if rv < 1 else rv / 100
+                    except (ValueError, TypeError):
+                        pass
+
                 saving_accounts.append({
                     "entity": str(row_data[0].value or "").strip(),
                     "branch": str(row_data[1].value or "").strip(),
                     "account": str(account).strip(),
                     "bank_1": str(row_data[13].value or "").strip() if len(row_data) > 13 else "",
                     "bank": str(row_data[14].value or "").strip() if len(row_data) > 14 else "",
+                    "closing_balance_vnd": closing_balance,
+                    "maturity_date": maturity_date,
+                    "interest_rate": interest_rate,
                 })
         finally:
             wb.close()
@@ -2064,6 +2490,87 @@ class CashReportService:
         except Exception as e:
             logger.warning(f"Failed to read Acc_Char account map: {e}")
         return account_to_code
+
+    @staticmethod
+    def _read_acc_char_full_data(working_file) -> Dict[str, Dict[str, str]]:
+        """
+        Read full account data from Acc_Char sheet (columns B-H).
+
+        Returns:
+            {account_no: {
+                "code": str, "entity": str, "branch": str,
+                "currency": str, "account_type": str, "grouping": str
+            }}
+        """
+        import openpyxl
+        acc_data: Dict[str, Dict[str, str]] = {}
+        try:
+            wb = openpyxl.load_workbook(working_file, data_only=True, read_only=True)
+            if "Acc_Char" not in wb.sheetnames:
+                wb.close()
+                return {}
+            ws = wb["Acc_Char"]
+            for row in ws.iter_rows(min_row=2, max_col=8):  # B..H = indices 1..7
+                acc = row[1].value if len(row) > 1 else None   # B: Account No.
+                if not acc:
+                    continue
+                acc_str = str(acc).strip()
+                # Normalize float account numbers
+                try:
+                    if "." in acc_str and float(acc_str) == int(float(acc_str)):
+                        acc_str = str(int(float(acc_str)))
+                except (ValueError, OverflowError):
+                    pass
+                if not acc_str or acc_str.lower() == "x":
+                    continue
+
+                code_val = row[2].value if len(row) > 2 else None       # C: CODE
+                entity_val = row[3].value if len(row) > 3 else None     # D: ENTITY (formula)
+                branch_val = row[4].value if len(row) > 4 else None     # E: BRANCH
+                currency_val = row[5].value if len(row) > 5 else None   # F: CURRENCY
+                acc_type_val = row[6].value if len(row) > 6 else None   # G: ACCOUNT TYPE
+                grouping_val = row[7].value if len(row) > 7 else None   # H: NAME/Grouping (formula)
+
+                acc_data[acc_str] = {
+                    "code": str(code_val).strip() if code_val else "",
+                    "entity": str(entity_val).strip() if entity_val else "",
+                    "branch": str(branch_val).strip() if branch_val else "",
+                    "currency": str(currency_val).strip() if currency_val else "",
+                    "account_type": str(acc_type_val).strip() if acc_type_val else "",
+                    "grouping": str(grouping_val).strip() if grouping_val else "",
+                }
+            wb.close()
+        except Exception as e:
+            logger.warning(f"Failed to read Acc_Char full data: {e}")
+        logger.info(f"Read Acc_Char full data: {len(acc_data)} accounts")
+        return acc_data
+
+    @staticmethod
+    def _resolve_acc_char_for_saving_account(
+        saving_acc: str,
+        acc_char_data: Dict[str, Dict[str, str]],
+        max_suffix: int = 20,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Look up saving account in Acc_Char data, trying suffix variations.
+
+        Search order:
+        1. Exact match: saving_acc
+        2. Suffixed: saving_acc_1, saving_acc_2, ..., saving_acc_{max_suffix}
+
+        Returns:
+            The Acc_Char data dict if found, or None.
+        """
+        # 1) Exact match
+        if saving_acc in acc_char_data:
+            return acc_char_data[saving_acc]
+        # 2) Suffixed variations
+        base_acc = saving_acc.split("_")[0]
+        for suffix in range(1, max_suffix + 1):
+            suffixed = f"{base_acc}_{suffix}"
+            if suffixed in acc_char_data:
+                return acc_char_data[suffixed]
+        return None
 
     @staticmethod
     def _build_account_entity_map(working_file: str) -> Dict[str, str]:
@@ -2278,19 +2785,21 @@ class CashReportService:
         """
         Split a settlement amount into principal (round) and interest.
 
-        Bank deposits always have round principal amounts (divisible by 100M VND).
-        If the total amount is NOT round, it means the bank combined principal
-        and interest into a single transaction.
+        >= 1B  → always split at 1B boundary (principal = floor(amount/1B)*1B)
+        < 1B & divisible by 100M → no split (round, full amount is principal)
+        < 1B & not divisible by 100M → principal=0, pure interest
 
         Returns:
-            (principal, interest) â€” both Decimal.
-            If amount is already round: (amount, 0).
+            (principal, interest) — both Decimal.
         """
-        UNIT = Decimal("100000000")  # 100M VND
-        if amount % UNIT == 0:
-            return amount, Decimal("0")
-        principal = (amount // UNIT) * UNIT
+        UNIT_100M = Decimal("100000000")   # 100M VND
+        UNIT_1B = Decimal("1000000000")    # 1B VND
+        # Always split at 1B boundary first
+        principal = (amount // UNIT_1B) * UNIT_1B
         interest = amount - principal
+        # Small round amount (< 1B, divisible by 100M) → no split
+        if principal == 0 and amount % UNIT_100M == 0:
+            return amount, Decimal("0")
         return principal, interest
 
     @staticmethod
@@ -2327,17 +2836,23 @@ class CashReportService:
         entity: str,
         saving_accounts: List[Dict[str, Any]],
         description: str = "",
+        principal: Decimal = None,
+        tx_date=None,
     ) -> Optional[str]:
         """
         Find saving account for settlement transaction.
 
         Priority:
         1. Extract account number from description (for TAT TOAN transactions)
-        2. Lookup from Saving Account sheet by bank + entity
+        2. Match by CLOSING BALANCE (VND) = principal AND Maturity date ±3 days
+           (filtered by bank + entity first)
+        3. Fallback: bank + entity only (single match)
 
         Returns:
             Saving account number or None
         """
+        from datetime import timedelta
+
         # First try to extract from description
         extracted = self._extract_saving_account_from_description(description)
         if extracted:
@@ -2346,18 +2861,79 @@ class CashReportService:
 
         entity_upper = entity.upper().strip() if entity else ""
 
-        # Match by bank AND entity
-        matches = [
+        # Filter by bank + entity
+        bank_entity_matches = [
             sa for sa in saving_accounts
             if self._bank_matches(bank, sa["bank_1"])
             and sa["entity"].upper() == entity_upper
         ]
-        if len(matches) == 1:
-            logger.info(f"Settlement: found saving account {matches[0]['account']} by bank={bank} + entity={entity}")
-            return matches[0]["account"]
-        elif len(matches) > 1:
-            logger.warning(f"Settlement: multiple saving accounts for bank={bank}, entity={entity}: {[m['account'] for m in matches]}")
-            return matches[0]["account"]
+
+        # Try matching by CLOSING BALANCE + Maturity date ±3 days
+        if principal and tx_date and bank_entity_matches:
+            amount_date_matches = []
+            for sa in bank_entity_matches:
+                # Check closing balance matches principal
+                if sa.get("closing_balance_vnd") != principal:
+                    continue
+                # Check maturity date within ±3 days
+                mat_date = sa.get("maturity_date")
+                if mat_date is None:
+                    continue
+                delta = abs((mat_date - tx_date).days)
+                if delta <= 3:
+                    amount_date_matches.append((sa, delta))
+
+            if amount_date_matches:
+                # Pick the closest maturity date
+                amount_date_matches.sort(key=lambda x: x[1])
+                best = amount_date_matches[0][0]
+                logger.info(
+                    f"Settlement: found saving account {best['account']} by "
+                    f"closing_balance={principal}, maturity_date={best['maturity_date']}, "
+                    f"tx_date={tx_date}, bank={bank}, entity={entity}"
+                )
+                return best["account"]
+
+            # Partial withdrawal fallback: principal < closing_balance + maturity ±3 days
+            # For "TAT TOAN MOT PHAN" / partial withdrawals, the principal is less than
+            # the full deposit balance, so exact match fails.
+            partial_matches = []
+            for sa in bank_entity_matches:
+                bal = sa.get("closing_balance_vnd") or Decimal("0")
+                if bal <= 0 or principal >= bal:
+                    continue
+                mat_date = sa.get("maturity_date")
+                if mat_date is None:
+                    continue
+                delta = abs((mat_date - tx_date).days)
+                if delta <= 3:
+                    partial_matches.append((sa, delta))
+
+            if len(partial_matches) == 1:
+                best = partial_matches[0][0]
+                logger.info(
+                    f"Settlement: found saving account {best['account']} by "
+                    f"partial withdrawal (principal={principal} < balance={best['closing_balance_vnd']}), "
+                    f"maturity_date={best['maturity_date']}, tx_date={tx_date}, "
+                    f"bank={bank}, entity={entity}"
+                )
+                return best["account"]
+            elif len(partial_matches) > 1:
+                logger.info(
+                    f"Settlement: {len(partial_matches)} partial-withdrawal matches for "
+                    f"bank={bank}, entity={entity}, principal={principal}, tx_date={tx_date}: "
+                    f"{[(m[0]['account'], m[0]['closing_balance_vnd']) for m in partial_matches]}"
+                )
+
+        # Fallback: single match by bank + entity
+        if len(bank_entity_matches) == 1:
+            logger.info(f"Settlement: found saving account {bank_entity_matches[0]['account']} by bank={bank} + entity={entity}")
+            return bank_entity_matches[0]["account"]
+        elif len(bank_entity_matches) > 1:
+            logger.warning(
+                f"Settlement: multiple saving accounts for bank={bank}, entity={entity}, "
+                f"principal={principal}, tx_date={tx_date}: {[m['account'] for m in bank_entity_matches]} — no amount/date match"
+            )
 
         # Fallback: match by bank only
         matches_bank = [sa for sa in saving_accounts if self._bank_matches(bank, sa["bank_1"])]
@@ -2405,17 +2981,11 @@ class CashReportService:
         if not tx.debit or tx.debit <= 0:
             return False
 
-        source_is_automation = bool(tx.source and tx.source.strip() == "Automation")
         nature = (tx.nature or "").strip().lower()
 
-        # Skip generated rows from previous settlement runs:
-        # - counter entries (Internal transfer out)
-        # - split interest rows (Other receipts)
-        if source_is_automation and ("transfer out" in nature or nature == "other receipts"):
-            return False
-
-        # Nature must be one of the settlement-eligible natures
-        if nature not in SETTLEMENT_ELIGIBLE_NATURES:
+        # Hard-block counter entries and interest rows — these are NEVER settlement
+        # candidates regardless of description content.
+        if nature in SETTLEMENT_BLOCKED_NATURES:
             return False
 
         description = (tx.description or "").strip()
@@ -2453,8 +3023,6 @@ class CashReportService:
         """
         if not tx.debit or tx.debit <= 0:
             return False
-        if tx.source and tx.source.strip() == "Automation":
-            return False
         nature = (tx.nature or "").strip().lower()
         if nature != "other receipts":
             return False
@@ -2485,12 +3053,9 @@ class CashReportService:
         if not tx.credit or tx.credit <= 0:
             return False
 
-        # Skip existing counter entries (created by previous open-new runs)
-        if (tx.source and tx.source.strip() == "Automation"
-                and tx.nature and "transfer in" in tx.nature.lower()):
-            return False
-
         # Nature must be "Internal transfer out" (mandatory)
+        # This implicitly skips counter entries ("Internal transfer in")
+        # regardless of source (Automation, NS, Manual)
         nature = (tx.nature or "").strip().lower()
         if nature != "internal transfer out":
             return False
@@ -2632,6 +3197,7 @@ class CashReportService:
         session_id: str,
         user_id: Optional[int] = None,
         progress_callback=None,
+        dry_run: bool = False,
     ) -> Dict[str, Any]:
         """
         Run settlement (táº¥t toÃ¡n) automation on Movement data.
@@ -2645,9 +3211,11 @@ class CashReportService:
             session_id: The session ID
             user_id: Owner user ID for access control
             progress_callback: Optional callable for SSE progress events
+            dry_run: If True, run detect+lookup but do NOT write to Excel.
+                     Returns candidate preview data instead.
 
         Returns:
-            Dict with results summary
+            Dict with results summary (or preview data when dry_run=True)
         """
         from .progress_store import ProgressEvent
 
@@ -2690,39 +3258,93 @@ class CashReportService:
         # resolve entity from Cash Balance (which has value columns).
         account_entity_map = self._build_account_entity_map(working_file)
 
+        # Build comprehensive Acc_Char lookup for populating cached VLOOKUP values
+        # on settlement counter entries (prevents #N/A in Entity/Currency/etc.)
+        acc_char_data = self._read_acc_char_full_data(working_file)
+
+        # Load entity→code and branch mappings for inserting new Acc_Char rows
+        def_entity_to_code = self._read_def_entity_to_code(working_file)
+        entity_branches = self._read_prior_period_branches(working_file)
+
         emit("step_complete", "scanning",
              f"Found {len(transactions)} transactions",
              percentage=20,
              data={"total_transactions": len(transactions)})
         await asyncio.sleep(0.4)  # Allow SSE to deliver step transition
 
-        # â”€â”€ Step 2: Detect settlement transactions â”€â”€
+        # â"€â"€ Step 2: Detect settlement transactions â"€â"€
         emit("step_start", "detecting", "Detecting settlement transactions...", percentage=20)
         await asyncio.sleep(0.3)
 
         saving_accounts = self._read_saving_accounts(working_file)
 
-        # Detect by keyword patterns + nature fallback
+        # Detect by keyword patterns + amount splitting upfront.
+        # Amount splitting BEFORE detection ensures pure-interest rows
+        # (< 100M, no round principal) are classified correctly from the start.
         settlement_transactions = []
-        interest_row_indices = []  # Interest rows â€” nature correction only, NO highlight
-        _skip_reasons = {"no_debit": 0, "auto_counter": 0, "wrong_nature": 0, "no_pattern": 0}
+        interest_row_indices = []  # Interest rows — nature correction only, NO counter
+        # Track cells that need modification (amount splitting + nature correction)
+        cell_modifications = {}  # {row_num: {"F": new_debit_str, "I": new_nature}}
+        # Interest rows to INSERT right below their settlement row
+        interest_inserts = {}  # {row_idx: tx_data_dict}
+        _skip_reasons = {"no_debit": 0, "wrong_nature": 0, "no_pattern": 0}
+
         for idx, tx in enumerate(transactions):
             row_idx = idx + 4
-            if self._is_settlement_candidate(tx):
-                settlement_transactions.append((tx, row_idx))
-            elif self._is_settlement_interest_row(tx):
-                # Interest row with settlement-like description â€” no highlight, no counter
+
+            if self._is_settlement_interest_row(tx):
                 interest_row_indices.append(row_idx)
-            else:
-                # Debug: log skip reasons
+                continue
+
+            if not self._is_settlement_candidate(tx):
                 if not tx.debit or tx.debit <= 0:
                     _skip_reasons["no_debit"] += 1
-                elif tx.source and tx.source.strip() == "Automation":
-                    _skip_reasons["auto_counter"] += 1
-                elif (tx.nature or "").strip().lower() not in SETTLEMENT_ELIGIBLE_NATURES:
+                elif (tx.nature or "").strip().lower() in SETTLEMENT_BLOCKED_NATURES:
                     _skip_reasons["wrong_nature"] += 1
                 else:
                     _skip_reasons["no_pattern"] += 1
+                continue
+
+            # — Amount splitting: separate principal from interest —
+            # Bank deposits have round principal amounts (divisible by 100M).
+            # If the total debit is NOT round, the bank combined principal + interest.
+            # Settlement prerequisite: principal must be round AND >= 100M.
+            principal, interest = self._split_settlement_amount(tx.debit)
+
+            if principal <= 0:
+                # Pure interest (no round principal, amount < 1B) → NOT a settlement.
+                # Always "Other receipts".
+                interest_row_indices.append(row_idx)
+                nature_now = (tx.nature or "").strip().lower()
+                if nature_now != "other receipts":
+                    cell_modifications[row_idx] = {"I": "Other receipts"}
+                logger.info(f"Settlement: pure interest row {row_idx}, amount={tx.debit}, nature fixed to Other receipts")
+                continue
+
+            if interest > 0:
+                # Combined amount → split: modify original row debit to principal,
+                # insert interest row DIRECTLY BELOW the settlement row.
+                # Interest part is always "Other receipts".
+                cell_modifications[row_idx] = {"F": str(principal)}
+                interest_inserts[row_idx] = {
+                    'source': tx.source or "Automation",
+                    'bank': tx.bank or "",
+                    'account': tx.account or "",
+                    'date': tx.date,
+                    'description': tx.description or "",
+                    'debit': interest,
+                    'credit': 0,
+                    'nature': "Other receipts",
+                }
+                logger.info(
+                    f"Settlement split row {row_idx}: "
+                    f"principal={principal}, interest={interest} (total={tx.debit})"
+                )
+
+            # Store principal for counter entry creation in Step 3
+            tx._principal = principal
+            settlement_transactions.append((tx, row_idx))
+
         logger.info(f"Settlement detect: {len(settlement_transactions)} candidates, {len(interest_row_indices)} interest rows, skip reasons: {_skip_reasons}")
 
         if not settlement_transactions:
@@ -2755,54 +3377,18 @@ class CashReportService:
         original_row_indices = []  # Rows to highlight (exclude nature="Other receipts")
         skipped_no_account = []
         skipped_duplicate = []
-        # Track cells that need modification (amount splitting + nature correction)
-        cell_modifications = {}  # {row_num: {"F": new_debit_str, "I": new_nature}}
-        # Interest rows to INSERT right below their settlement row (not append at end)
-        interest_inserts = {}  # {row_idx: tx_data_dict}
+        acc_char_inserts = []  # Saving accounts to add to Acc_Char (not found anywhere)
+
         for tx, row_idx in settlement_transactions:
             desc = tx.description.strip() if tx.description else ""
             if desc in existing_descs:
                 skipped_duplicate.append(desc)
                 continue
 
-            # â”€â”€ Amount splitting: separate principal from interest â”€â”€
-            # Bank deposits always have round principal amounts (divisible by 100M).
-            # If the total debit is NOT round, the bank combined principal + interest
-            # into one transaction â†’ split into two rows.
-            # Settlement prerequisite: final amount must be round AND >= 100M.
-            principal, interest = self._split_settlement_amount(tx.debit)
+            # Principal was computed in Step 2 (amount splitting)
+            principal = tx._principal
 
-            if principal <= 0:
-                # Pure interest amount (< 100M, no round principal) â†’ NOT a settlement.
-                # Fix nature to "Other receipts" (AI often misclassifies as "Internal
-                # transfer in" because description matches settlement keywords).
-                interest_row_indices.append(row_idx)
-                nature_now = (tx.nature or "").strip().lower()
-                if nature_now != "other receipts":
-                    cell_modifications[row_idx] = {"I": "Other receipts"}
-                logger.info(f"Settlement: pure interest row {row_idx}, amount={tx.debit}, nature fixed to Other receipts")
-                continue
-
-            if interest > 0:
-                # Combined amount â†’ split: modify original row debit to principal,
-                # insert interest row DIRECTLY BELOW the settlement row
-                cell_modifications[row_idx] = {"F": str(principal)}
-                interest_inserts[row_idx] = {
-                    'source': "Automation",
-                    'bank': tx.bank or "",
-                    'account': tx.account or "",
-                    'date': tx.date,
-                    'description': tx.description or "",
-                    'debit': interest,
-                    'credit': 0,
-                    'nature': "Other receipts",
-                }
-                logger.info(
-                    f"Settlement split row {row_idx}: "
-                    f"principal={principal}, interest={interest} (total={tx.debit})"
-                )
-
-            # Resolve entity from Cash Balance accountâ†’entity map
+            # Resolve entity from Cash Balance account→entity map
             tx_account = str(tx.account).strip() if tx.account else ""
             entity = account_entity_map.get(tx_account, "")
 
@@ -2816,6 +3402,8 @@ class CashReportService:
                 entity=entity,
                 saving_accounts=saving_accounts,
                 description=desc,
+                principal=principal,
+                tx_date=tx.date if isinstance(tx.date, date) else None,
             )
 
             if not saving_acc:
@@ -2823,16 +3411,100 @@ class CashReportService:
                 logger.warning(f"Settlement: no saving account found for '{tx.description}', bank={tx.bank}, entity={entity}")
                 continue
 
+            # --- Resolve Acc_Char data for the saving account ---
+            # Populate cached VLOOKUP values to prevent #N/A in Movement formula columns
+            acc_data = self._resolve_acc_char_for_saving_account(saving_acc, acc_char_data)
+
+            # Determine the account number to use in the Movement counter entry
+            counter_account = saving_acc  # Default: use saving account from description
+
+            if acc_data:
+                # Found in Acc_Char (exact or suffixed) — use saving_acc as-is
+                counter_entity = acc_data.get("entity") or account_entity_map.get(saving_acc, "") or entity
+                counter_grouping = acc_data.get("grouping") or "Subsidiaries"
+                counter_currency = acc_data.get("currency") or "VND"
+                counter_account_type = acc_data.get("account_type") or "Saving Account"
+                logger.debug(f"Settlement: found Acc_Char data for {saving_acc}: entity={counter_entity}")
+            else:
+                # Not found by saving_acc — check current_account_1, _2, ... in Acc_Char
+                # If _1 exists → reuse it (no insert needed)
+                # If _1 NOT exist → insert _1. If _1 taken → insert _2, etc.
+                found_existing_suffix = None
+                for s in range(1, 21):
+                    candidate = f"{tx_account}_{s}"
+                    if candidate in acc_char_data:
+                        found_existing_suffix = (candidate, acc_char_data[candidate])
+                        break
+
+                if found_existing_suffix:
+                    # Reuse existing suffixed account — no Acc_Char insert needed
+                    counter_account, existing_data = found_existing_suffix
+                    counter_entity = existing_data.get("entity") or entity
+                    counter_grouping = existing_data.get("grouping") or "Subsidiaries"
+                    counter_currency = existing_data.get("currency") or "VND"
+                    counter_account_type = existing_data.get("account_type") or "Saving Account"
+                    logger.debug(
+                        f"Settlement: {saving_acc} not in Acc_Char, "
+                        f"reusing existing {counter_account} (entity={counter_entity})"
+                    )
+                else:
+                    # No suffixed account exists — create _1 (or next available)
+                    suffix = 1
+                    while f"{tx_account}_{suffix}" in acc_char_data:
+                        suffix += 1
+                    counter_account = f"{tx_account}_{suffix}"
+
+                    current_acc_data = acc_char_data.get(tx_account, {})
+                    code = current_acc_data.get("code", "")
+                    if not code and entity:
+                        code = def_entity_to_code.get(entity.upper(), "")
+                    branch = self._determine_saving_branch(
+                        saving_acc, entity, entity_branches, tx.bank or ""
+                    )
+                    counter_currency = current_acc_data.get("currency") or "VND"
+
+                    acc_char_inserts.append({
+                        "saving_acc": counter_account,
+                        "code": code,
+                        "entity": entity,
+                        "branch": branch,
+                        "currency": counter_currency,
+                        "account_type": "Saving Account",
+                    })
+
+                    # Register so next iteration sees it
+                    acc_char_data[counter_account] = {
+                        "code": code,
+                        "entity": entity,
+                        "branch": branch,
+                        "currency": counter_currency,
+                        "account_type": "Saving Account",
+                        "grouping": "Subsidiaries",
+                    }
+
+                    counter_entity = entity
+                    counter_grouping = "Subsidiaries"
+                    counter_account_type = "Saving Account"
+                    logger.info(
+                        f"Settlement: {saving_acc} not in Acc_Char, "
+                        f"will insert as {counter_account} (code={code}, entity={entity})"
+                    )
+
             counter = MovementTransaction(
-                source="Automation",
+                source=tx.source or "Automation",
                 bank=tx.bank,
-                account=saving_acc,
+                account=counter_account,  # May be saving_acc or current_account_N
                 date=tx.date,
                 description=tx.description or "",
                 debit=Decimal("0"),
                 credit=principal,  # Use principal (round part), NOT full amount
                 nature="Internal transfer out",
+                entity=counter_entity,
+                grouping=counter_grouping,
+                currency=counter_currency,
+                account_type=counter_account_type,
             )
+
             counter_entries.append(counter)
             final_nature = cell_modifications.get(row_idx, {}).get("I", tx.nature or "")
             if final_nature.strip().lower() != "other receipts":
@@ -2847,6 +3519,50 @@ class CashReportService:
                  "skipped_duplicate": len(skipped_duplicate),
              })
         await asyncio.sleep(0.4)
+
+        # ── Dry-run: return preview without writing ──
+        if dry_run:
+            nature_corrections_count = len([m for m in cell_modifications.values() if "I" in m])
+            candidates_preview = []
+            for tx, row_idx in settlement_transactions:
+                principal = getattr(tx, '_principal', tx.debit)
+                # Find the matched counter entry for this tx (by description)
+                matched_counter = next(
+                    (c for c in counter_entries if c.description == (tx.description or "").strip()),
+                    None
+                )
+                desc = (tx.description or "").strip()
+                candidates_preview.append({
+                    "row": row_idx,
+                    "date": tx.date.isoformat() if tx.date else None,
+                    "bank": tx.bank or "",
+                    "account": str(tx.account or ""),
+                    "description": desc,
+                    "debit": float(principal),
+                    "nature": tx.nature or "",
+                    "status": (
+                        "duplicate" if desc in [d for d in skipped_duplicate]
+                        else "no_account" if desc in skipped_no_account
+                        else "matched"
+                    ),
+                    "counter_account": str(matched_counter.account) if matched_counter else None,
+                    "has_interest_split": row_idx in interest_inserts,
+                    "interest_amount": float(interest_inserts[row_idx]["debit"]) if row_idx in interest_inserts else None,
+                })
+            return {
+                "session_id": session_id,
+                "dry_run": True,
+                "status": "preview",
+                "total_transactions_scanned": len(transactions),
+                "settlement_candidates": len(settlement_transactions),
+                "counter_entries_would_create": len(counter_entries),
+                "interest_splits_would_create": len(interest_inserts),
+                "nature_corrections_would_apply": nature_corrections_count,
+                "skipped_no_account": skipped_no_account,
+                "skipped_duplicate": skipped_duplicate,
+                "acc_char_inserts_would_add": [i["saving_acc"] for i in acc_char_inserts],
+                "candidates": candidates_preview,
+            }
 
         if not counter_entries:
             # Even without counter entries, apply modifications and insertions
@@ -2882,7 +3598,7 @@ class CashReportService:
                 "total_transactions_scanned": len(transactions),
             }
 
-        # â”€â”€ Step 4: Write changes â”€â”€
+        # â"€â"€ Step 4: Write changes â"€â"€
         emit("step_start", "writing",
              f"Creating {len(counter_entries)} counter entries"
              + (f", {len(interest_inserts)} interest splits" if interest_inserts else "")
@@ -2921,6 +3637,28 @@ class CashReportService:
             append_start_row, append_start_row + len(counter_entries)
         ))
 
+        # Phase D: Add missing saving accounts to Acc_Char
+        acc_char_added = 0
+        if acc_char_inserts:
+            from .openpyxl_handler import get_openpyxl_handler
+            handler_early = get_openpyxl_handler()
+            for insert_info in acc_char_inserts:
+                try:
+                    row_added = handler_early.add_row_to_acc_char(
+                        Path(working_file),
+                        account_no=insert_info["saving_acc"],
+                        code=insert_info["code"],
+                        entity=insert_info["entity"],
+                        branch=insert_info["branch"],
+                        currency=insert_info["currency"],
+                        account_type=insert_info["account_type"],
+                    )
+                    if row_added > 0:
+                        acc_char_added += 1
+                except Exception as e:
+                    logger.warning(f"Failed to add {insert_info['saving_acc']} to Acc_Char: {e}")
+            logger.info(f"Settlement: added {acc_char_added}/{len(acc_char_inserts)} accounts to Acc_Char")
+
         # Highlight: original settlement rows (excluding nature="Other receipts")
         # + counter entries ONLY. "Other receipts" rows are NEVER highlighted.
         all_highlight_rows = original_row_indices + counter_row_indices
@@ -2932,6 +3670,7 @@ class CashReportService:
         emit("step_complete", "writing",
              f"Created {len(counter_entries)} counter entries"
              + (f", {len(interest_inserts)} interest splits" if interest_inserts else "")
+             + (f", added {acc_char_added} accounts to Acc_Char" if acc_char_added else "")
              + f", highlighted {len(all_highlight_rows)} rows",
              percentage=80,
              data={
@@ -2939,6 +3678,7 @@ class CashReportService:
                  "interest_splits": len(interest_inserts),
                  "rows_appended": rows_added,
                  "rows_inserted": len(interest_inserts),
+                 "acc_char_accounts_added": acc_char_added,
              })
         await asyncio.sleep(0.4)
 
@@ -2949,10 +3689,16 @@ class CashReportService:
         from .openpyxl_handler import get_openpyxl_handler
         handler = get_openpyxl_handler()
         saving_rows_removed = 0
+        # Collect settled saving account numbers from counter entries
+        settled_saving_accounts = {
+            str(c.account).strip() for c in counter_entries if c.account
+        }
         try:
-            saving_rows_removed = handler.remove_zero_closing_balance_saving_rows(Path(working_file))
+            saving_rows_removed = handler.remove_settled_saving_account_rows(
+                Path(working_file), settled_saving_accounts,
+            )
         except Exception as e:
-            logger.warning(f"Failed to remove zero-closing-balance saving rows: {e}")
+            logger.warning(f"Failed to remove settled saving account rows: {e}")
 
         total_new_rows = rows_added + len(interest_inserts)
         if self.db_session:
@@ -2970,7 +3716,8 @@ class CashReportService:
             "session_id": session_id,
             "status": "success",
             "message": f"Created {len(counter_entries)} counter entries"
-                       + (f", {len(interest_inserts)} interest splits" if interest_inserts else ""),
+                       + (f", {len(interest_inserts)} interest splits" if interest_inserts else "")
+                       + (f", added {acc_char_added} accounts to Acc_Char" if acc_char_added else ""),
             "counter_entries_created": len(counter_entries),
             "interest_splits_created": len(interest_inserts),
             "nature_corrections": nature_corrections,
@@ -2982,6 +3729,7 @@ class CashReportService:
             "skipped_duplicate": len(skipped_duplicate),
             "total_transactions_scanned": len(transactions),
             "saving_rows_removed": saving_rows_removed,
+            "acc_char_accounts_added": acc_char_added,
         }
 
         emit("step_complete", "cleanup",
@@ -3006,6 +3754,7 @@ class CashReportService:
         lookup_file_contents: Optional[List[bytes]] = None,
         user_id: Optional[int] = None,
         progress_callback=None,
+        dry_run: bool = False,
     ) -> Dict[str, Any]:
         """
         Run "má»Ÿ má»›i" (open new saving account) automation on Movement data.
@@ -3022,9 +3771,11 @@ class CashReportService:
             lookup_file_contents: Optional list of lookup file bytes (.xls/.xlsx)
             user_id: Owner user ID for access control
             progress_callback: Optional callable for SSE progress events
+            dry_run: If True, run detect+lookup but do NOT write to Excel.
+                     Returns candidate preview data instead.
 
         Returns:
-            Dict with results summary
+            Dict with results summary (or preview data when dry_run=True)
         """
         from .progress_store import ProgressEvent
 
@@ -3076,7 +3827,7 @@ class CashReportService:
         await asyncio.sleep(0.3)
 
         open_new_transactions = []
-        _on_skip = {"no_credit": 0, "auto_counter": 0, "wrong_nature": 0, "no_pattern": 0}
+        _on_skip = {"no_credit": 0, "wrong_nature": 0, "no_pattern": 0}
         for idx, tx in enumerate(transactions):
             row_idx = idx + 4
             if self._is_open_new_candidate(tx):
@@ -3084,8 +3835,6 @@ class CashReportService:
             else:
                 if not tx.credit or tx.credit <= 0:
                     _on_skip["no_credit"] += 1
-                elif tx.source and tx.source.strip() == "Automation":
-                    _on_skip["auto_counter"] += 1
                 elif (tx.nature or "").strip().lower() != "internal transfer out":
                     _on_skip["wrong_nature"] += 1
                 else:
@@ -3146,10 +3895,19 @@ class CashReportService:
         # Load existing saving accounts to filter out non-new accounts
         saving_accounts = self._read_saving_accounts(working_file)
         existing_saving_acc_set = {sa["account"] for sa in saving_accounts}
+        # Map account → old interest rate (for rate-decrease detection)
+        existing_acc_rates: Dict[str, float] = {
+            sa["account"]: sa["interest_rate"]
+            for sa in saving_accounts
+            if sa.get("interest_rate") is not None
+        }
         logger.info(f"Existing saving accounts in template: {len(existing_saving_acc_set)}")
 
+        # Load full Acc_Char data for suffix search (current_account_1, _2...)
+        acc_char_data = self._read_acc_char_full_data(working_file)
+
         # Load lookup maps for CODE and BRANCH determination
-        # 1) accountâ†’code from Acc_Char Bâ†’C (reliable fallback)
+        # 1) accountâ†'code from Acc_Char Bâ†'C (reliable fallback)
         account_to_code = self._read_acc_char_account_to_code(working_file)
         # 2) entityâ†’code from Def sheet (primary CODE source per user spec)
         def_entity_to_code = self._read_def_entity_to_code(working_file)
@@ -3158,9 +3916,10 @@ class CashReportService:
         logger.info(f"Lookups: {len(account_to_code)} accâ†’code, {len(def_entity_to_code)} entâ†’code (Def), {len(entity_branches)} entâ†’branches (Prior)")
 
         # Check for existing counter entries to avoid duplicates
+        # Counter entries have nature "Internal transfer in" (from any source)
         existing_descs = set()
         for tx in transactions:
-            if tx.nature and "transfer in" in tx.nature.lower() and tx.source == "Automation":
+            if tx.nature and "transfer in" in tx.nature.lower():
                 existing_descs.add(tx.description.strip() if tx.description else "")
 
         counter_entries = []
@@ -3404,34 +4163,66 @@ class CashReportService:
                         saving_acc = available_unique[0]
                         logger.info(f"Open-new: matched by amount only: {saving_acc}")
 
-            # NOTE: Do NOT lookup from existing Saving Account sheet for má»Ÿ má»›i.
+            # NOTE: Do NOT lookup from existing Saving Account sheet for mở mới.
             # Step 3 from settlement flow is intentionally omitted here because
-            # má»Ÿ má»›i only creates counter entries for genuinely NEW accounts.
+            # mở mới only creates counter entries for genuinely NEW accounts.
 
+            # Fallback: if no saving account found, create current_account_{next}.
+            # Find the next available suffix: if _1 exists → _2, if _1,_2 exist → _3.
+            is_current_account_fallback = False
             if not saving_acc:
-                skipped_no_account.append(tx.description)
-                logger.warning(f"Open-new: no saving account found for '{tx.description}', bank={tx.bank}, entity={entity}")
-                continue
+                if not tx_account:
+                    skipped_no_account.append(tx.description)
+                    logger.warning(f"Open-new: no saving account and no current account for '{tx.description}'")
+                    continue
 
-            # CRITICAL: Only create counter entry if account is genuinely NEW
+                # Find next available suffix (_1, _2, _3, ...)
+                # Check both Acc_Char and already-reserved accounts in this run
+                suffix = 1
+                while (f"{tx_account}_{suffix}" in acc_char_data
+                       or f"{tx_account}_{suffix}" in existing_saving_acc_set):
+                    suffix += 1
+                saving_acc = f"{tx_account}_{suffix}"
+                logger.info(f"Open-new: created suffixed account {saving_acc} (no lookup match)")
+                is_current_account_fallback = True
+
+            # If saving account already exists, create a suffixed version (_1, _2, _3, ...)
+            # This handles multiple deposits to the same base account in the same period.
             if saving_acc in existing_saving_acc_set:
-                skipped_existing.append(saving_acc)
-                logger.info(f"Open-new: skipped {saving_acc} - already exists in Saving Account (not new)")
-                continue
+                base_acc = saving_acc.split('_')[0]
+                suffix = 1
+                while f"{base_acc}_{suffix}" in existing_saving_acc_set:
+                    suffix += 1
+                saving_acc = f"{base_acc}_{suffix}"
+                logger.info(f"Open-new: created suffixed account {saving_acc} (base already exists)")
 
             # Reserve this account immediately to prevent duplicate inserts in same run.
             existing_saving_acc_set.add(saving_acc)
             used_lookup_accounts.add(saving_acc)
 
             lookup_meta = lookup_account_details.get(saving_acc, {})
-            if not term_info.get("maturity_date") and lookup_meta.get("maturity_date"):
-                term_info["maturity_date"] = lookup_meta["maturity_date"]
-            if not term_info.get("term_months") and lookup_meta.get("term_months"):
-                term_info["term_months"] = lookup_meta["term_months"]
-            if not term_info.get("term_days") and lookup_meta.get("term_days"):
-                term_info["term_days"] = lookup_meta["term_days"]
-            if term_info.get("interest_rate") is None and lookup_meta.get("interest_rate") is not None:
-                term_info["interest_rate"] = lookup_meta["interest_rate"]
+            # Flag: no lookup data → insert row but leave term/rate empty, highlight yellow
+            # Always True for current_account fallback (suffixed accounts never in lookup)
+            no_lookup_data = is_current_account_fallback or not lookup_meta
+            if no_lookup_data:
+                # Clear all term info — cells will be left empty in Saving Account
+                term_info = {"term_months": None, "term_days": None, "interest_rate": None, "maturity_date": None}
+                logger.info(f"Open-new: no lookup data for {saving_acc}, will insert with empty term/rate and highlight yellow")
+            else:
+                # Lookup file is authoritative for dates and term — override
+                # description-extracted values when lookup provides them.
+                if lookup_meta.get("maturity_date"):
+                    term_info["maturity_date"] = lookup_meta["maturity_date"]
+                if lookup_meta.get("term_months"):
+                    term_info["term_months"] = lookup_meta["term_months"]
+                elif lookup_meta.get("term_days"):
+                    term_info["term_days"] = lookup_meta["term_days"]
+                # Interest rate: ONLY use lookup value. Description-extracted rates
+                # are unreliable — clear them so the cell shows "check web" instead.
+                if lookup_meta.get("interest_rate") is not None:
+                    term_info["interest_rate"] = lookup_meta["interest_rate"]
+                else:
+                    term_info["interest_rate"] = None
 
             opening_date_for_insert = tx.date
             if lookup_meta.get("opening_date"):
@@ -3444,12 +4235,12 @@ class CashReportService:
 
             # Create counter entry: swap credit to debit, nature = Internal transfer in
             counter = MovementTransaction(
-                source="Automation",
+                source=tx.source or "Automation",
                 bank=tx.bank,
                 account=saving_acc,
                 date=tx.date,
                 description=tx.description or "",
-                debit=tx.credit,  # Swap: original credit â†’ counter debit
+                debit=tx.credit,  # Swap: original credit â†' counter debit
                 credit=Decimal("0"),
                 nature="Internal transfer in",
             )
@@ -3475,7 +4266,26 @@ class CashReportService:
             if not code:
                 logger.warning(f"Open-new: no CODE found for entity={entity}, current_acc={str(tx.account).strip() if tx.account else ''}")
 
+            # Detect interest rate decrease (1-2%) vs same account's old rate
+            rate_decreased = False
+            new_rate = term_info.get("interest_rate")
+            if new_rate is not None:
+                # For suffixed accounts (e.g. 1064099857_1), check the base account
+                base_acc = saving_acc.split("_")[0]
+                old_rate = existing_acc_rates.get(base_acc)
+                if old_rate is not None:
+                    drop = old_rate - new_rate
+                    if 0.01 <= drop <= 0.02:  # 1-2% decrease (stored as decimal)
+                        rate_decreased = True
+                        logger.info(
+                            f"Open-new: rate decrease detected for {saving_acc}: "
+                            f"{old_rate:.4f} → {new_rate:.4f} (drop {drop:.4f})"
+                        )
+
             # Store additional info for B1-B3 steps
+            # Even for current-account fallback, the suffixed account (e.g. 116632406789_1)
+            # is treated as a Saving Account entry — it goes into all 3 sheets.
+            account_type = "Saving Account"
             counter_entry_info.append({
                 "saving_acc": saving_acc,
                 "entity": entity,
@@ -3485,6 +4295,9 @@ class CashReportService:
                 "currency": currency_for_insert,
                 "term_info": term_info,
                 "opening_date": opening_date_for_insert,
+                "rate_decreased": rate_decreased,
+                "account_type": account_type,
+                "no_lookup_data": no_lookup_data,
             })
 
         emit("step_complete", "lookup",
@@ -3497,6 +4310,62 @@ class CashReportService:
                  "skipped_duplicate": len(skipped_duplicate),
              })
         await asyncio.sleep(0.4)
+
+        # ── Dry-run: return preview without writing ──
+        if dry_run:
+            candidates_preview = []
+            for (tx, row_idx), info in zip(open_new_transactions, counter_entry_info):
+                desc = (tx.description or "").strip()
+                candidates_preview.append({
+                    "row": row_idx,
+                    "date": tx.date.isoformat() if tx.date else None,
+                    "bank": tx.bank or "",
+                    "account": str(tx.account or ""),
+                    "description": desc,
+                    "credit": float(tx.credit) if tx.credit else 0,
+                    "nature": tx.nature or "",
+                    "status": (
+                        "duplicate" if desc in [d for d in skipped_duplicate]
+                        else "no_account" if desc in skipped_no_account
+                        else "matched"
+                    ),
+                    "saving_account": info["saving_acc"],
+                    "entity": info.get("entity", ""),
+                    "code": info.get("code", ""),
+                    "currency": info.get("currency", "VND"),
+                    "no_lookup_data": info.get("no_lookup_data", False),
+                    "term_months": info.get("term_info", {}).get("term_months"),
+                    "interest_rate": info.get("term_info", {}).get("interest_rate"),
+                    "maturity_date": (
+                        info.get("term_info", {}).get("maturity_date").isoformat()
+                        if info.get("term_info", {}).get("maturity_date") else None
+                    ),
+                })
+            # Also add skipped rows
+            for desc in skipped_no_account:
+                candidates_preview.append({
+                    "description": desc,
+                    "status": "no_account",
+                    "saving_account": None,
+                })
+            for desc in skipped_duplicate:
+                candidates_preview.append({
+                    "description": desc,
+                    "status": "duplicate",
+                    "saving_account": None,
+                })
+            return {
+                "session_id": session_id,
+                "dry_run": True,
+                "status": "preview",
+                "total_transactions_scanned": len(transactions),
+                "open_new_candidates": len(open_new_transactions),
+                "counter_entries_would_create": len(counter_entries),
+                "skipped_no_account": skipped_no_account,
+                "skipped_duplicate": skipped_duplicate,
+                "skipped_existing": skipped_existing,
+                "candidates": candidates_preview,
+            }
 
         if not counter_entries:
             msg = "No counter entries created"
@@ -3547,6 +4416,7 @@ class CashReportService:
         from .openpyxl_handler import get_openpyxl_handler
         handler = get_openpyxl_handler()
 
+        sa_acc_to_row: Dict[str, int] = {}
         try:
             batch_result = await asyncio.to_thread(
                 handler.add_rows_to_sheets_batch,
@@ -3556,11 +4426,52 @@ class CashReportService:
             acc_char_added = batch_result["acc_char_added"]
             saving_account_added = batch_result["saving_added"]
             cash_balance_added = batch_result["cash_balance_added"]
+            sa_acc_to_row = batch_result.get("sa_acc_to_row", {})
         except Exception as e:
             logger.error(f"Batch add to catalog sheets failed: {e}", exc_info=True)
             acc_char_added = saving_account_added = cash_balance_added = 0
 
         logger.info(f"B1-B3 completed: Acc_Char +{acc_char_added}, Saving Account +{saving_account_added}, Cash Balance +{cash_balance_added}")
+
+        # Highlight interest-rate cells in red for accounts with rate decrease
+        rate_decrease_cells: List[Tuple[int, str]] = []
+        for info in counter_entry_info:
+            if info.get("rate_decreased") and info["saving_acc"] in sa_acc_to_row:
+                rate_decrease_cells.append((sa_acc_to_row[info["saving_acc"]], "L"))
+        if rate_decrease_cells:
+            try:
+                await asyncio.to_thread(
+                    handler.highlight_cells,
+                    working_file,
+                    "Saving Account",
+                    rate_decrease_cells,
+                )
+                logger.info(f"Highlighted {len(rate_decrease_cells)} rate-decrease cells in red")
+            except Exception as e:
+                logger.warning(f"Failed to highlight rate-decrease cells: {e}")
+
+        # Highlight yellow: rows with no lookup data (missing term/rate info)
+        no_lookup_rows: List[int] = []
+        for info in counter_entry_info:
+            if info.get("no_lookup_data") and info["saving_acc"] in sa_acc_to_row:
+                no_lookup_rows.append(sa_acc_to_row[info["saving_acc"]])
+        if no_lookup_rows:
+            yellow_fill = (
+                b'<fill><patternFill patternType="solid">'
+                b'<fgColor rgb="FFFFFF00"/>'
+                b'</patternFill></fill>'
+            )
+            try:
+                await asyncio.to_thread(
+                    handler.highlight_rows,
+                    Path(working_file),
+                    "Saving Account",
+                    no_lookup_rows,
+                    yellow_fill,
+                )
+                logger.info(f"Highlighted {len(no_lookup_rows)} no-lookup-data rows yellow in Saving Account")
+            except Exception as e:
+                logger.warning(f"Failed to highlight no-lookup-data rows yellow: {e}")
 
         emit("step_complete", "catalog",
              f"Added to catalogs: Acc_Char +{acc_char_added}, Saving Account +{saving_account_added}, Cash Balance +{cash_balance_added}",
@@ -3699,6 +4610,15 @@ class CashReportService:
             if not s:
                 return None
             s = s.split()[0]
+            # Handle string-encoded Excel serial numbers (e.g., "46051" from XML)
+            if s.replace('.', '', 1).isdigit():
+                try:
+                    serial = int(float(s))
+                    if 20000 <= serial <= 80000:
+                        base_ord = datetime(1899, 12, 30).toordinal()
+                        return datetime.fromordinal(base_ord + serial).date()
+                except Exception:
+                    pass
             for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
                 try:
                     return datetime.strptime(s, fmt).date()
@@ -3791,6 +4711,19 @@ class CashReportService:
             maturity_date_val = _parse_lookup_date(maturity_date_raw)
             interest_rate_val = _parse_lookup_rate(rate_raw)
             term_months, term_days = _parse_term_info(term_raw, product_raw)
+
+            # Compute term_months from opening/maturity dates when not
+            # explicitly provided (VCB lookup files have dates but no term column).
+            if term_months is None and term_days is None and opening_date_val and maturity_date_val:
+                # Count complete calendar months between the two dates.
+                m_diff = (maturity_date_val.year - opening_date_val.year) * 12 + (maturity_date_val.month - opening_date_val.month)
+                if maturity_date_val.day < opening_date_val.day:
+                    m_diff -= 1  # not a full month yet
+                if m_diff > 0:
+                    term_months = m_diff
+                elif m_diff == 0 and maturity_date_val > opening_date_val:
+                    # Less than a month apart → compute days instead
+                    term_days = (maturity_date_val - opening_date_val).days
 
             _merge_meta(
                 acc_str,

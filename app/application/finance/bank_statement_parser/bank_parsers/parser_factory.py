@@ -23,6 +23,15 @@ from .uob_parser import UOBParser
 class ParserFactory:
     """Factory to detect bank and return appropriate parser."""
 
+    # Sheet names to skip during multi-sheet bank detection.
+    # These sheets contain balance/summary data, not transaction details.
+    _SKIP_SHEET_NAMES = {
+        "template balance",
+        "balance",
+        "balances",
+        "summary",
+    }
+
     # Register all available parsers here
     # NOTE: Order matters! More specific parsers should come before generic ones
     # - VCB must come early (VCBACCOUNTDETAIL sheet name is unique, but has bilingual "Opening balance :" that matches Woori)
@@ -138,21 +147,49 @@ class ParserFactory:
                 return [(parser, sheet_name, file_bytes)]
             return []
 
+        # Special case: ERP template format (has "Template balance" + "Template details" sheets)
+        # These files have bank data pre-formatted — pass the whole file to matching parsers
+        sheet_names_lower = {s.strip().lower() for s in sheet_names}
+        if "template balance" in sheet_names_lower or "template details" in sheet_names_lower:
+            parser = cls.get_parser(file_bytes)
+            if parser:
+                detail_name = next(
+                    (s for s in sheet_names if s.strip().lower() == "template details"),
+                    sheet_names[0]
+                )
+                logger.info(
+                    f"Multi-bank detection: ERP template format detected -> {parser.bank_name}"
+                )
+                return [(parser, detail_name, file_bytes)]
+
         # Multi-sheet: try each sheet individually
         results: List[Tuple[BaseBankParser, str, bytes]] = []
         detected_sheets = set()
 
         for sheet_name in sheet_names:
-            sheet_bytes = BaseBankParser.extract_sheet_as_bytes(file_bytes, sheet_name)
-            if sheet_bytes is None:
+            # Skip balance/template sheets — they contain account summaries,
+            # not transaction details, and should never be parsed as transactions.
+            if sheet_name.strip().lower() in cls._SKIP_SHEET_NAMES:
+                logger.info(
+                    f"Multi-bank detection: skipping balance/template sheet '{sheet_name}'"
+                )
                 continue
 
-            parser = cls.get_parser(sheet_bytes)
-            if parser and sheet_name not in detected_sheets:
-                results.append((parser, sheet_name, sheet_bytes))
-                detected_sheets.add(sheet_name)
-                logger.info(
-                    f"Multi-bank detection: sheet '{sheet_name}' -> {parser.bank_name}"
+            try:
+                sheet_bytes = BaseBankParser.extract_sheet_as_bytes(file_bytes, sheet_name)
+                if sheet_bytes is None:
+                    continue
+
+                parser = cls.get_parser(sheet_bytes)
+                if parser and sheet_name not in detected_sheets:
+                    results.append((parser, sheet_name, sheet_bytes))
+                    detected_sheets.add(sheet_name)
+                    logger.info(
+                        f"Multi-bank detection: sheet '{sheet_name}' -> {parser.bank_name}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Multi-bank detection: error processing sheet '{sheet_name}': {e}"
                 )
 
         return results

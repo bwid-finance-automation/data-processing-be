@@ -20,35 +20,38 @@ class MBBParser(BaseBankParser):
         """
         Detect if file is MBB bank statement.
 
-        Logic from fxLooksLike_MBB:
-        - Read first 80 rows
-        - Look for any of these markers:
-          * "NGÂN HÀNG TMCP QUÂN ĐỘI"
-          * "MBBANK"
-          * "SAO KÊ CHI TIẾT TÀI KHOẢN"
-          * "ACCOUNT STATEMENT"
-          * ("TÀI KHOẢN/ACCOUNT NO" AND "SỐ DƯ CUỐI KỲ")
+        Bank-name markers checked in header only (first 15 rows) to avoid
+        false positives from transaction descriptions mentioning MB Bank.
+        Structural patterns checked in a wider area (first 30 rows).
         """
         try:
             xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
-            # Get first 80 rows
-            top_80 = df.head(80)
+            # Bank-name markers — only check HEADER area (first 15 rows)
+            top_15 = df.head(15)
+            header_text = []
+            for col in top_15.columns:
+                header_text.extend([self.to_text(cell).upper() for cell in top_15[col]])
+            header_flat = "|".join(header_text)
 
-            # Flatten all cells to uppercase text
-            all_text = []
-            for col in top_80.columns:
-                all_text.extend([self.to_text(cell).upper() for cell in top_80[col]])
+            has_bank_name = "NGÂN HÀNG TMCP QUÂN ĐỘI" in header_flat or \
+                           "MBBANK" in header_flat
+            has_sao_ke = "SAO KÊ CHI TIẾT TÀI KHOẢN" in header_flat
 
-            txt = "|".join(all_text)
+            # Structural patterns — check wider area (first 30 rows)
+            top_30 = df.head(30)
+            wider_text = []
+            for col in top_30.columns:
+                wider_text.extend([self.to_text(cell).upper() for cell in top_30[col]])
+            wider_flat = "|".join(wider_text)
 
-            # Check for MBB markers
-            is_mbb = "NGÂN HÀNG TMCP QUÂN ĐỘI" in txt or \
-                     "MBBANK" in txt or \
-                     "SAO KÊ CHI TIẾT TÀI KHOẢN" in txt or \
-                     "ACCOUNT STATEMENT" in txt or \
-                     ("TÀI KHOẢN/ACCOUNT NO" in txt and "SỐ DƯ CUỐI KỲ" in txt)
+            # "ACCOUNT STATEMENT" alone is too generic (Woori, SCB also use it),
+            # so require it together with a MBB-specific structural marker
+            has_account_stmt_with_structure = "ACCOUNT STATEMENT" in header_flat and \
+                ("TÀI KHOẢN/ACCOUNT NO" in wider_flat or "SỐ DƯ CUỐI KỲ" in wider_flat)
+
+            is_mbb = has_bank_name or has_sao_ke or has_account_stmt_with_structure
 
             return is_mbb
 

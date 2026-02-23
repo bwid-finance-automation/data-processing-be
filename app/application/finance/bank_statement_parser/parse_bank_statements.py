@@ -94,6 +94,9 @@ class ParseBankStatementsUseCase:
 
         This helps PDF/OCR runs where opening/closing balances are missing or
         mis-placed by Gemini, but transaction lines are complete.
+
+        Also deduplicates balances: if the same account (bank_name + acc_no)
+        appears in multiple source files, only the first entry is kept.
         """
         aggregates = defaultdict(lambda: {"debit": 0.0, "credit": 0.0})
 
@@ -102,9 +105,15 @@ class ParseBankStatementsUseCase:
             aggregates[key]["debit"] += tx.debit or 0.0
             aggregates[key]["credit"] += tx.credit or 0.0
 
-        reconciled: List[BankBalance] = []
+        # Deduplicate balances by (bank_name, acc_no) — keep first occurrence
+        unique_balances: dict[str, BankBalance] = {}
         for bal in all_balances:
             key = f"{bal.bank_name}_{bal.acc_no}"
+            if key not in unique_balances:
+                unique_balances[key] = bal
+
+        reconciled: List[BankBalance] = []
+        for key, bal in unique_balances.items():
             totals = aggregates.get(key, {"debit": 0.0, "credit": 0.0})
 
             opening = bal.opening_balance or 0.0
@@ -169,6 +178,10 @@ class ParseBankStatementsUseCase:
         """
         Parse a single bank from file bytes using the given parser.
 
+        Creates a fresh parser instance so that the instance-level
+        ``get_excel_file`` cache in ``parse_statement`` is thread-safe
+        (the parsers in ParserFactory are singletons).
+
         Args:
             parser: The bank parser to use
             file_bytes: Excel file bytes (single-sheet or original)
@@ -178,17 +191,16 @@ class ParseBankStatementsUseCase:
         Returns:
             Tuple of (statement, transactions, balances_list)
         """
-        transactions = parser.parse_transactions(file_bytes, file_name)
-        balance = parser.parse_balances(file_bytes, file_name)
+        # Fresh instance → safe for instance-level caching inside parse_statement
+        fresh_parser = type(parser)()
+        transactions, balances = fresh_parser.parse_statement(file_bytes, file_name)
 
         statement = BankStatement(
             bank_name=parser.bank_name,
             file_name=file_name,
-            balance=balance,
+            balance=balances[0] if balances else None,
             transactions=transactions
         )
-
-        balances = [balance] if balance else []
 
         if sheet_name:
             logger.info(

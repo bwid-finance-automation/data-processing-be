@@ -21,45 +21,47 @@ class WooriParser(BaseBankParser):
         """
         Detect if file is Woori bank statement.
 
-        Look for Woori-specific markers:
-        - "Account holder :" + "Account number :" + "Inquiry Period :" (unique Woori header pattern)
-        - OR "Woori" in content
-        - OR "Amount withdrawn" + "Amount deposited" (unique column headers)
+        Bank-name keyword ("WOORI") checked in header only (first 15 rows)
+        to avoid false positives from transaction descriptions mentioning
+        Woori as a counterparty.  Structural patterns are safe in 30 rows.
         """
         try:
             xls = self.get_excel_file(file_bytes)
             df = pd.read_excel(xls, sheet_name=0, header=None)
 
-            # Get first 30 rows
-            top_30 = df.head(30)
+            # ---- Header area (first 15 rows) for bank-name keyword ----
+            top_15 = df.head(15)
+            header_text = []
+            for col in top_15.columns:
+                header_text.extend([self.to_text(cell) for cell in top_15[col]])
+            header_str = " ".join(header_text)
+            header_upper = header_str.upper()
 
-            # Flatten all cells to text (case-sensitive first for exact patterns)
-            all_text = []
-            for col in top_30.columns:
-                all_text.extend([self.to_text(cell) for cell in top_30[col]])
-
-            txt = " ".join(all_text)
-            txt_upper = txt.upper()
-
-            # Method 1: Check for Woori-specific header pattern with colons
-            # "Account holder :" and "Account number :" and "Inquiry Period :" are unique to Woori
-            has_account_holder_colon = "Account holder :" in txt or "ACCOUNT HOLDER :" in txt_upper
-            has_account_number_colon = "Account number :" in txt or "ACCOUNT NUMBER :" in txt_upper
-            has_inquiry_period = "Inquiry Period :" in txt or "INQUIRY PERIOD :" in txt_upper
+            # Method 1: Woori-specific header pattern with colons
+            has_account_holder_colon = "Account holder :" in header_str or "ACCOUNT HOLDER :" in header_upper
+            has_account_number_colon = "Account number :" in header_str or "ACCOUNT NUMBER :" in header_upper
+            has_inquiry_period = "Inquiry Period :" in header_str or "INQUIRY PERIOD :" in header_upper
             has_woori_header_pattern = has_account_holder_colon and has_account_number_colon and has_inquiry_period
 
-            # Method 2: Check for "Woori" bank name
-            has_woori = "WOORI" in txt_upper
+            # Method 2: "WOORI" bank name — header only
+            has_woori = "WOORI" in header_upper
 
-            # Method 3: Check for unique Woori column headers
-            # "Amount withdrawn" and "Amount deposited" are English column headers unique to Woori
-            has_amount_withdrawn = "AMOUNT WITHDRAWN" in txt_upper
-            has_amount_deposited = "AMOUNT DEPOSITED" in txt_upper
+            # ---- Wider area (first 30 rows) for structural patterns ----
+            top_30 = df.head(30)
+            wider_text = []
+            for col in top_30.columns:
+                wider_text.extend([self.to_text(cell) for cell in top_30[col]])
+            wider_str = " ".join(wider_text)
+            wider_upper = wider_str.upper()
+
+            # Method 3: Unique Woori column headers
+            has_amount_withdrawn = "AMOUNT WITHDRAWN" in wider_upper
+            has_amount_deposited = "AMOUNT DEPOSITED" in wider_upper
             has_woori_columns = has_amount_withdrawn and has_amount_deposited
 
-            # Method 4: Check for Opening/Closing balance with colon format
-            has_opening_balance_colon = "Opening balance :" in txt or "OPENING BALANCE :" in txt_upper
-            has_closing_balance_colon = "Closing balance :" in txt or "CLOSING BALANCE :" in txt_upper
+            # Method 4: Opening/Closing balance with colon format
+            has_opening_balance_colon = "Opening balance :" in wider_str or "OPENING BALANCE :" in wider_upper
+            has_closing_balance_colon = "Closing balance :" in wider_str or "CLOSING BALANCE :" in wider_upper
             has_balance_pattern = has_opening_balance_colon and has_closing_balance_colon
 
             is_woori = has_woori_header_pattern or has_woori or has_woori_columns or has_balance_pattern
@@ -153,6 +155,12 @@ class WooriParser(BaseBankParser):
                 # Skip rows where both are zero/blank
                 if (debit_val is None or (isinstance(debit_val, float) and pd.isna(debit_val)) or debit_val == 0) and \
                    (credit_val is None or (isinstance(credit_val, float) and pd.isna(credit_val)) or credit_val == 0):
+                    continue
+
+                # Skip breakdown/sub-detail rows that have no date
+                # (e.g., bare numbers under a rollover transaction)
+                date_val = row.get("Date") if "Date" in row else None
+                if date_val is None or (isinstance(date_val, float) and pd.isna(date_val)):
                     continue
 
                 # Get row currency or use header currency

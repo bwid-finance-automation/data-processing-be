@@ -56,6 +56,22 @@ class BankStatementReader:
     COL_DEBIT = 10  # DEBIT (*)
     COL_CREDIT = 11  # CREDIT (*)
 
+    # Column indices for Movement NS/Manual file (0-indexed)
+    COL_MOV_SOURCE = 0       # A - Source (Automation/NS/Manual)
+    COL_MOV_BANK = 1         # B - Bank
+    COL_MOV_ACCOUNT = 2      # C - Account
+    COL_MOV_DATE = 3         # D - Date
+    COL_MOV_DESCRIPTION = 4  # E - Bank description
+    COL_MOV_DEBIT = 5        # F - Nợ (Debit)
+    COL_MOV_CREDIT = 6       # G - Có (Credit)
+    # Skip 7 = H (Net formula)
+    COL_MOV_NATURE = 8       # I - Nature
+    COL_MOV_ENTITY = 9       # J - Entity (VLOOKUP cached)
+    COL_MOV_GROUPING = 10    # K - Grouping (VLOOKUP cached)
+    COL_MOV_KEY_PAYMENT = 11 # L - Key payment (=I cached)
+    COL_MOV_CURRENCY = 12    # M - Currency (VLOOKUP cached)
+    COL_MOV_ACCOUNT_TYPE = 13 # N - Account type (VLOOKUP cached)
+
     # Sheet name
     SHEET_NAME = "Template details"
 
@@ -147,6 +163,185 @@ class BankStatementReader:
         except Exception as e:
             logger.error(f"Error reading Excel file: {e}")
             raise
+
+    # ------------------------------------------------------------------ #
+    #  Movement NS/Manual file reader                                      #
+    # ------------------------------------------------------------------ #
+
+    # Required headers for Movement file (0-indexed column -> expected keyword)
+    MOVEMENT_REQUIRED_HEADERS = {
+        0: "source",
+        1: "bank",
+        2: "account",
+        3: "date",
+        4: "description",
+    }
+
+    def read_movement_file(
+        self,
+        content: bytes,
+        source_name: str = "movement_upload",
+    ) -> List[MovementTransaction]:
+        """
+        Read pre-classified transactions from Movement Excel file.
+
+        Expected structure:
+        - Sheet: "Sheet1" (or first sheet)
+        - Columns: A=Source, B=Bank, C=Account, D=Date, E=Description,
+                   F=Debit, G=Credit, I=Nature
+        - All rows are imported with their original source (Automation/NS/Manual)
+
+        Args:
+            content: Excel file content as bytes
+            source_name: Source name for tracking
+
+        Returns:
+            List of MovementTransaction with pre-populated .nature field
+        """
+        try:
+            wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
+
+            # Find sheet (try "Sheet1" first, else use first sheet)
+            sheet_name = self._find_movement_sheet(wb)
+            if not sheet_name:
+                wb.close()
+                raise ValueError("No valid sheet found in Movement file")
+
+            ws = wb[sheet_name]
+
+            # Validate headers
+            self._validate_movement_schema(ws)
+
+            transactions = []
+            skipped_invalid = 0
+
+            # Skip header row (row 1), parse data starting from row 2
+            for row_num in range(2, ws.max_row + 1):
+                try:
+                    tx = self._parse_movement_row(ws, row_num, source_name)
+                    if tx is None:
+                        continue
+                    transactions.append(tx)
+                except Exception as e:
+                    skipped_invalid += 1
+                    logger.warning(f"Movement row {row_num}: {e}")
+                    continue
+
+            wb.close()
+
+            logger.info(
+                f"Read {len(transactions)} transactions from {source_name} "
+                f"(skipped {skipped_invalid} invalid)"
+            )
+            return transactions
+
+        except Exception as e:
+            logger.error(f"Error reading Movement file: {e}")
+            raise
+
+    def _find_movement_sheet(self, wb: openpyxl.Workbook) -> Optional[str]:
+        """Find Sheet1 or return first sheet name."""
+        for sheet_name in wb.sheetnames:
+            if sheet_name.lower() == "sheet1":
+                return sheet_name
+        # Fallback to first sheet
+        return wb.sheetnames[0] if wb.sheetnames else None
+
+    def _validate_movement_schema(self, ws) -> None:
+        """
+        Validate Movement file headers (fuzzy match).
+        Checks columns A-E for expected keywords.
+        """
+        for col_idx, keyword in self.MOVEMENT_REQUIRED_HEADERS.items():
+            header_value = ws.cell(row=1, column=col_idx + 1).value
+            header_norm = self._normalize_header(header_value)
+            if keyword not in header_norm:
+                raise ValueError(
+                    f"Invalid Movement file format: "
+                    f"column {col_idx + 1} header '{header_value}' does not contain '{keyword}'"
+                )
+
+    def _parse_movement_row(
+        self,
+        ws,
+        row_num: int,
+        source_name: str,
+    ) -> Optional[MovementTransaction]:
+        """
+        Parse a single row from Movement file.
+
+        Returns None if row is empty/invalid.
+        All rows (Automation, NS, Manual) are kept with their original source.
+        """
+        # Read Source
+        source_val = str(ws.cell(row=row_num, column=self.COL_MOV_SOURCE + 1).value or "").strip()
+
+        # Read other fields
+        bank = str(ws.cell(row=row_num, column=self.COL_MOV_BANK + 1).value or "").strip()
+        account_raw = ws.cell(row=row_num, column=self.COL_MOV_ACCOUNT + 1)
+        account = self._parse_text_value(account_raw.value, account_raw.number_format)
+        date_val = ws.cell(row=row_num, column=self.COL_MOV_DATE + 1).value
+        description = str(ws.cell(row=row_num, column=self.COL_MOV_DESCRIPTION + 1).value or "").strip()
+        debit_val = ws.cell(row=row_num, column=self.COL_MOV_DEBIT + 1).value
+        credit_val = ws.cell(row=row_num, column=self.COL_MOV_CREDIT + 1).value
+        nature = str(ws.cell(row=row_num, column=self.COL_MOV_NATURE + 1).value or "").strip()
+
+        # Read formula/derived columns (cached values for VLOOKUP columns)
+        entity_val = ws.cell(row=row_num, column=self.COL_MOV_ENTITY + 1).value
+        grouping_val = ws.cell(row=row_num, column=self.COL_MOV_GROUPING + 1).value
+        key_payment_val = ws.cell(row=row_num, column=self.COL_MOV_KEY_PAYMENT + 1).value
+        currency_val = ws.cell(row=row_num, column=self.COL_MOV_CURRENCY + 1).value
+        account_type_val = ws.cell(row=row_num, column=self.COL_MOV_ACCOUNT_TYPE + 1).value
+
+        # Skip empty rows (no account or no description)
+        if not account:
+            return None
+
+        # Skip rows with no financial data
+        if not date_val and not debit_val and not credit_val:
+            return None
+
+        # Parse date
+        parsed_date = self._parse_date(date_val)
+        if not parsed_date:
+            return None
+
+        # Parse amounts
+        parsed_debit = self._parse_amount(debit_val)
+        parsed_credit = self._parse_amount(credit_val)
+
+        # Skip if both debit and credit are 0/None
+        if not parsed_debit and not parsed_credit:
+            return None
+
+        # Helper to clean cached values (skip #N/A, empty strings)
+        def _clean_cached(val):
+            if val is None:
+                return None
+            s = str(val).strip()
+            if not s or s.upper() in ("#N/A", "#REF!", "#VALUE!", "#NAME?", "N/A"):
+                return None
+            return s
+
+        # Use the Source value from file (NS/Manual) as the source column
+        return MovementTransaction(
+            source=source_val,
+            bank=bank,
+            account=account,
+            date=parsed_date,
+            description=description,
+            debit=parsed_debit,
+            credit=parsed_credit,
+            nature=nature,
+            _classified_by="file",
+            entity=_clean_cached(entity_val),
+            grouping=_clean_cached(grouping_val),
+            key_payment=_clean_cached(key_payment_val),
+            currency=_clean_cached(currency_val),
+            account_type=_clean_cached(account_type_val),
+        )
+
+    # ------------------------------------------------------------------ #
 
     def _find_sheet(self, wb: openpyxl.Workbook) -> Optional[str]:
         """Find the Template details sheet (case-insensitive)."""
@@ -316,7 +511,7 @@ class BankStatementReader:
             if not value:
                 return None
 
-            # Try various date formats
+            # Try various date formats (with and without time component)
             formats = [
                 "%Y-%m-%d",
                 "%d/%m/%Y",
@@ -324,6 +519,10 @@ class BankStatementReader:
                 "%Y/%m/%d",
                 "%d-%m-%Y",
                 "%m-%d-%Y",
+                "%d-%m-%Y %H:%M:%S",
+                "%Y-%m-%d %H:%M:%S",
+                "%d/%m/%Y %H:%M:%S",
+                "%m/%d/%Y %H:%M:%S",
             ]
 
             for fmt in formats:

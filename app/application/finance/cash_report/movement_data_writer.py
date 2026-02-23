@@ -35,6 +35,15 @@ class MovementTransaction:
     nature: str  # Column I - Nature (classified)
     _classified_by: str = ""  # "rule" or "ai" - not written to Excel
 
+    # Optional cached values for formula columns (from NS/Manual uploads).
+    # When provided, these are injected as <v> cached values into formula cells
+    # so they display correctly even when VLOOKUP can't resolve the account.
+    entity: Optional[str] = None        # Column J - Entity (VLOOKUP)
+    grouping: Optional[str] = None      # Column K - Grouping (VLOOKUP)
+    key_payment: Optional[str] = None   # Column L - Key payment (=I)
+    currency: Optional[str] = None      # Column M - Currency (VLOOKUP)
+    account_type: Optional[str] = None  # Column N - Account type (VLOOKUP)
+
     def __post_init__(self):
         # Ensure account is string
         if self.account:
@@ -209,8 +218,9 @@ class MovementDataWriter:
         handler = get_openpyxl_handler()
 
         # Convert MovementTransaction to dict for handler
-        tx_dicts = [
-            {
+        tx_dicts = []
+        for tx in transactions:
+            d = {
                 'source': tx.source,
                 'bank': tx.bank,
                 'account': tx.account,
@@ -220,8 +230,21 @@ class MovementDataWriter:
                 'credit': tx.credit if tx.credit is not None else 0,
                 'nature': tx.nature,
             }
-            for tx in transactions
-        ]
+            # Include cached formula values if present (from NS/Manual uploads)
+            formula_cache = {}
+            if tx.entity:
+                formula_cache[10] = tx.entity       # Col J (10)
+            if tx.grouping:
+                formula_cache[11] = tx.grouping     # Col K (11)
+            if tx.key_payment:
+                formula_cache[12] = tx.key_payment  # Col L (12)
+            if tx.currency:
+                formula_cache[13] = tx.currency     # Col M (13)
+            if tx.account_type:
+                formula_cache[14] = tx.account_type # Col N (14)
+            if formula_cache:
+                d['_formula_cache'] = formula_cache
+            tx_dicts.append(d)
 
         rows_added, total_rows = handler.append_transactions(
             self.working_file_path, tx_dicts

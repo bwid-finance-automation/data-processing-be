@@ -2,7 +2,7 @@
 
 import io
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import pandas as pd
 from datetime import datetime
 
@@ -12,6 +12,14 @@ from .base_parser import BaseBankParser
 
 class VCBParser(BaseBankParser):
     """Parser for VCB (Vietcombank) statements - handles multiple templates."""
+
+    # Balance marker keywords — rows containing these are balance info, not transactions
+    _BALANCE_MARKERS = [
+        "Số dư", "số dư",
+        "đầu kỳ", "cuối kỳ",
+        "Opening balance", "Closing balance",
+        "OPENING BALANCE", "CLOSING BALANCE",
+    ]
 
     @property
     def bank_name(self) -> str:
@@ -87,13 +95,12 @@ class VCBParser(BaseBankParser):
 
             # Excel file
             xls = self.get_excel_file(file_bytes)
+            sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Check for CashUp template (VCBACCOUNTDETAIL sheet name)
             sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
             if "VCBACCOUNTDETAIL" in sheet_name.upper():
-                return self._parse_cashup_template(xls)
-
-            sheet = pd.read_excel(xls, sheet_name=0, header=None)
+                return self._parse_cashup_template(sheet)
 
             # ========== Detect Template ==========
             is_simple_template = self._is_simple_template(sheet)
@@ -125,13 +132,12 @@ class VCBParser(BaseBankParser):
 
             # Excel file
             xls = self.get_excel_file(file_bytes)
+            sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Check for CashUp template (VCBACCOUNTDETAIL sheet name)
             sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
             if "VCBACCOUNTDETAIL" in sheet_name.upper():
-                return self._parse_cashup_balances(xls)
-
-            sheet = pd.read_excel(xls, sheet_name=0, header=None)
+                return self._parse_cashup_balances(sheet)
 
             # ========== Find Account Sections ==========
             account_sections = self._find_account_sections(sheet)
@@ -186,11 +192,12 @@ class VCBParser(BaseBankParser):
 
             # Excel file
             xls = self.get_excel_file(file_bytes)
+            sheet = pd.read_excel(xls, sheet_name=0, header=None)
 
             # Check for CashUp template (VCBACCOUNTDETAIL sheet name)
             sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
             if "VCBACCOUNTDETAIL" in sheet_name.upper():
-                return self._parse_all_cashup_balances(xls)
+                return self._parse_all_cashup_balances(sheet)
 
             # Default: single balance
             bal = self.parse_balances(file_bytes, file_name)
@@ -200,12 +207,76 @@ class VCBParser(BaseBankParser):
             print(f"Error parsing VCB all balances: {e}")
             return []
 
-    def _parse_cashup_balances(self, xls: pd.ExcelFile) -> Optional[BankBalance]:
+    def parse_statement(
+        self, file_bytes: bytes, file_name: str
+    ) -> Tuple[List[BankTransaction], List[BankBalance]]:
+        """
+        VCB override: open the file once and share the sheet DataFrame
+        across both transaction and balance parsing, avoiding redundant
+        file reads.
+        """
+        try:
+            # HTML files — no ExcelFile to cache
+            if self._is_html_file(file_bytes):
+                transactions = self._parse_html_template(file_bytes)
+                balance = self._parse_html_balances(file_bytes)
+                return transactions, [balance] if balance else []
+
+            # Open once
+            xls = self.get_excel_file(file_bytes)
+            sheet = pd.read_excel(xls, sheet_name=0, header=None)
+            first_sheet = xls.sheet_names[0] if xls.sheet_names else ""
+            is_cashup = "VCBACCOUNTDETAIL" in first_sheet.upper()
+
+            # ---- transactions ----
+            if is_cashup:
+                transactions = self._parse_cashup_template(sheet)
+            else:
+                if self._is_simple_template(sheet):
+                    transactions = self._parse_simple_template(sheet)
+                else:
+                    transactions = self._parse_multi_template(sheet)
+
+            # ---- balances ----
+            if is_cashup:
+                balances = self._parse_all_cashup_balances(sheet)
+            else:
+                account_sections = self._find_account_sections(sheet)
+                if account_sections:
+                    section = account_sections[0]
+                    section_rows = sheet.iloc[section['start']:section['end'] + 1]
+                    acc_no = self._extract_account_number_vcb(section_rows.head(8))
+                    currency = self._extract_currency_vcb(section_rows.head(15))
+                    opening = self._extract_balance_by_label(
+                        section_rows.head(20), ["Số dư đầu kỳ", "Opening balance"]
+                    )
+                    closing = self._extract_balance_by_label(
+                        section_rows, ["Số dư cuối kỳ", "Closing balance"]
+                    )
+                    if closing is None:
+                        closing = self._extract_last_balance_from_grid(section_rows)
+                    balances = [BankBalance(
+                        bank_name="VCB",
+                        acc_no=acc_no or "",
+                        currency=currency or "VND",
+                        opening_balance=opening or 0.0,
+                        closing_balance=closing or 0.0,
+                    )]
+                else:
+                    balances = []
+
+            return transactions, balances
+
+        except Exception as e:
+            print(f"Error in VCB parse_statement: {e}")
+            return [], []
+
+    def _parse_cashup_balances(self, sheet: pd.DataFrame) -> Optional[BankBalance]:
         """Parse balance from first account in CashUp template."""
-        balances = self._parse_all_cashup_balances(xls)
+        balances = self._parse_all_cashup_balances(sheet)
         return balances[0] if balances else None
 
-    def _parse_all_cashup_balances(self, xls: pd.ExcelFile) -> List[BankBalance]:
+    def _parse_all_cashup_balances(self, sheet: pd.DataFrame) -> List[BankBalance]:
         """
         Parse ALL account balances from CashUp template.
 
@@ -213,7 +284,6 @@ class VCBParser(BaseBankParser):
         - Row with "Số dư đầu kỳ/ Opening balance" has value in column 2 (e.g., "3,359,662,231 VND")
         - Row with "Số dư cuối kỳ/ Closing balance" has value in column 2
         """
-        sheet = pd.read_excel(xls, sheet_name=0, header=None)
         all_balances = []
 
         # Find all account sections
@@ -306,7 +376,7 @@ class VCBParser(BaseBankParser):
                 return True
         return False
 
-    def _parse_cashup_template(self, xls: pd.ExcelFile) -> List[BankTransaction]:
+    def _parse_cashup_template(self, sheet: pd.DataFrame) -> List[BankTransaction]:
         """
         Parse VCB CashUp Template (VCBACCOUNTDETAILBASEXLS format).
 
@@ -316,7 +386,6 @@ class VCBParser(BaseBankParser):
         - 6 columns: STT, Date+Doc, Debit, Credit, Balance, Description
         - Bilingual labels throughout
         """
-        sheet = pd.read_excel(xls, sheet_name=0, header=None)
         all_transactions = []
 
         # Find all account sections by looking for "SAO KÊ TÀI KHOẢN" and "STATEMENT OF ACCOUNT"
@@ -395,6 +464,10 @@ class VCBParser(BaseBankParser):
                 # Stop at totals row
                 if "Tổng số" in row_text or "Total" in row_text:
                     break
+
+                # Skip balance rows (opening/closing balance, not transactions)
+                if any(marker in row_text for marker in self._BALANCE_MARKERS):
+                    continue
 
                 # Skip non-data rows (must have STT number in col 0)
                 stt_val = self.to_text(row.iloc[0]).strip() if len(row) > 0 else ""
@@ -510,6 +583,11 @@ class VCBParser(BaseBankParser):
             if "TỔNG" in tx_id.upper():
                 continue
 
+            # Skip balance rows (opening/closing balance, not transactions)
+            row_text_all = " ".join([self.to_text(cell) for cell in row])
+            if any(marker in row_text_all for marker in self._BALANCE_MARKERS):
+                continue
+
             debit_val = row.get(debit_col) if debit_col else None
             credit_val = row.get(credit_col) if credit_col else None
 
@@ -611,6 +689,11 @@ class VCBParser(BaseBankParser):
                     tx_id_raw = tx_id_raw.iloc[0] if len(tx_id_raw) > 0 else ""
                 tx_id = self.to_text(tx_id_raw)
                 if "TỔNG" in tx_id.upper() or "TOTAL" in tx_id.upper():
+                    continue
+
+                # Skip balance rows (opening/closing balance, not transactions)
+                row_text_all = " ".join([self.to_text(cell) for cell in row])
+                if any(marker in row_text_all for marker in self._BALANCE_MARKERS):
                     continue
 
                 debit_val = row.get(debit_col) if debit_col else None
@@ -866,9 +949,14 @@ class VCBParser(BaseBankParser):
                 row = df.iloc[idx]
 
                 # Stop at total row
-                row_text = " ".join([str(cell) for cell in row if pd.notna(cell)]).upper()
-                if "TỔNG SỐ" in row_text or "TOTAL" in row_text:
+                row_text = " ".join([str(cell) for cell in row if pd.notna(cell)])
+                row_text_upper = row_text.upper()
+                if "TỔNG SỐ" in row_text_upper or "TOTAL" in row_text_upper:
                     break
+
+                # Skip balance rows (opening/closing balance, not transactions)
+                if any(marker in row_text for marker in self._BALANCE_MARKERS):
+                    continue
 
                 # Get transaction data
                 if len(row) < 5:

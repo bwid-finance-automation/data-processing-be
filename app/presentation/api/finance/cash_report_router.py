@@ -42,6 +42,7 @@ async def get_info():
         "features": [
             "Session-based workflow with master template",
             "Upload parsed bank statements",
+            "Upload Movement NS/Manual file (pre-classified, no AI needed)",
             "Hybrid classification: rule-based keywords first, AI for leftovers",
             "Review/confirm classifications before writing to Excel",
             "Settlement automation (tất toán) - close saving accounts",
@@ -51,6 +52,7 @@ async def get_info():
         "endpoints": {
             "POST /init-session": "Initialize a new session",
             "POST /upload-statements/{session_id}": "Upload + classify + write (auto-confirm)",
+            "POST /upload-movement/{session_id}": "Upload Movement NS/Manual file (pre-classified)",
             "POST /upload-preview/{session_id}": "Upload + classify + preview (review before writing)",
             "POST /confirm-upload/{session_id}": "Confirm and write pending classifications to Excel",
             "POST /run-settlement/{session_id}": "Run settlement automation (tất toán)",
@@ -75,6 +77,16 @@ async def init_session(
     ending_date: date = Form(..., description="Report period end date"),
     fx_rate: float = Form(default=26175, description="VND/USD exchange rate"),
     period_name: str = Form(default="", description="Period name (e.g., W3-4Jan26)"),
+    template_file: Optional[UploadFile] = File(default=None, description=(
+        "Optional user-uploaded .xlsx template for this period. "
+        "When provided, the system uses this file as the base instead of the "
+        "system blank template, and immediately runs: "
+        "(1) update Summary dates/FX/period, "
+        "(2) copy Cash Balance → Prior Period, "
+        "(3) clear Movement sheet. "
+        "If omitted, the system blank template is used and Movement prep is "
+        "deferred to the first bank statement upload."
+    )),
     db: AsyncSession = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ):
@@ -84,9 +96,22 @@ async def init_session(
     Only ONE session is allowed per user. If an active session exists,
     returns that session instead of creating a new one.
 
+    Optionally accepts a user-uploaded .xlsx template file for the new period.
+    When uploaded, all init steps (Summary update, Cash Balance copy, Movement
+    clear) run immediately so the session is fully ready before any uploads.
+
     Returns a session_id to use for subsequent operations.
     """
     try:
+        # Read uploaded template bytes if provided
+        template_bytes = None
+        if template_file is not None:
+            if not template_file.filename.endswith(".xlsx"):
+                raise HTTPException(status_code=400, detail="Template file must be an .xlsx file")
+            template_bytes = await template_file.read()
+            if not template_bytes:
+                raise HTTPException(status_code=400, detail="Uploaded template file is empty")
+
         service = CashReportService(db_session=db)
         result = await service.get_or_create_session(
             opening_date=opening_date,
@@ -94,18 +119,27 @@ async def init_session(
             fx_rate=Decimal(str(fx_rate)),
             period_name=period_name,
             user_id=current_user.id,
+            template_bytes=template_bytes,
         )
 
         is_existing = result.get("is_existing", False)
+        movement_prepared = result.get("movement_prepared", False)
         return {
             "success": True,
             "session_id": result["session_id"],
             "config": result["config"],
             "is_existing": is_existing,
             "movement_rows": result.get("movement_rows", 0),
-            "message": "Using existing session" if is_existing else "Session initialized successfully",
+            "movement_prepared": movement_prepared,
+            "message": (
+                "Using existing session" if is_existing
+                else "Session initialized with user template — Movement prep completed" if movement_prepared
+                else "Session initialized successfully"
+            ),
         }
 
+    except HTTPException:
+        raise
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=f"Master template not found: {e}")
     except Exception as e:
@@ -188,6 +222,8 @@ async def upload_bank_statements(
         progress_store.cleanup(session_id)
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
+        import traceback
+        logger.error(f"ValueError during upload:\n{traceback.format_exc()}")
         await asyncio.sleep(0.5)
         progress_store.cleanup(session_id)
         raise HTTPException(status_code=404, detail=str(e))
@@ -200,6 +236,85 @@ async def upload_bank_statements(
         await asyncio.sleep(0.5)
         progress_store.cleanup(session_id)
         logger.error(f"Error uploading statements: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/upload-movement/{session_id}")
+async def upload_movement_file(
+    session_id: str,
+    file: UploadFile = File(..., description="Movement Netsuite & Manual Excel file"),
+    filter_by_date: bool = Form(default=True, description="Filter transactions by session date range"),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    """
+    Upload Movement Netsuite & Manual file to a session.
+
+    This endpoint processes pre-classified transactions from NetSuite exports
+    and manual data entries. Unlike bank statement uploads, these transactions
+    already have their Nature category populated and do NOT require AI classification.
+
+    **File Format**:
+    - Sheet: "Sheet1" (or first sheet)
+    - Columns: A=Source, B=Bank, C=Account, D=Date, E=Description,
+               F=Debit(Nợ), G=Credit(Có), I=Nature
+    - Formula columns (H, J-P) are ignored
+
+    **Filtering**:
+    - Rows with Source="Automation" are excluded (already in system via bank uploads)
+    - Only "NS" and "Manual" rows are imported
+    - Date filtering applies if filter_by_date=True
+
+    Can be called multiple times to add more data (accumulative).
+    Progress: Connect to GET /upload-progress/{session_id} for real-time SSE events.
+    """
+    try:
+        # Read file content
+        content = await file.read()
+
+        # Create progress queue for SSE streaming
+        progress_store.create(session_id)
+
+        def on_progress(event: ProgressEvent):
+            progress_store.emit(session_id, event)
+
+        service = CashReportService(db_session=db)
+        result = await service.upload_movement_file(
+            session_id=session_id,
+            file=(file.filename, content),
+            filter_by_date=filter_by_date,
+            progress_callback=on_progress,
+            user_id=current_user.id,
+        )
+
+        # Delay cleanup so SSE generator has time to read final events
+        await asyncio.sleep(1)
+        progress_store.cleanup(session_id)
+
+        return {
+            "success": True,
+            **result,
+        }
+
+    except PermissionError as e:
+        await asyncio.sleep(0.5)
+        progress_store.cleanup(session_id)
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        import traceback
+        logger.error(f"ValueError during Movement upload:\n{traceback.format_exc()}")
+        await asyncio.sleep(0.5)
+        progress_store.cleanup(session_id)
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        # Emit error event before cleanup
+        progress_store.emit(session_id, ProgressEvent(
+            event_type="error", step="error",
+            message=str(e), percentage=0,
+        ))
+        await asyncio.sleep(0.5)
+        progress_store.cleanup(session_id)
+        logger.error(f"Error uploading Movement file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -445,17 +560,20 @@ async def run_settlement(
         progress_store.cleanup(f"settlement-{session_id}")
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
+        import traceback
+        logger.error(f"ValueError during settlement:\n{traceback.format_exc()}")
         await asyncio.sleep(0.5)
         progress_store.cleanup(f"settlement-{session_id}")
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        import traceback
+        logger.error(f"Error running settlement automation:\n{traceback.format_exc()}")
         progress_store.emit(f"settlement-{session_id}", ProgressEvent(
             event_type="error", step="error",
             message=str(e), percentage=0,
         ))
         await asyncio.sleep(0.5)
         progress_store.cleanup(f"settlement-{session_id}")
-        logger.error(f"Error running settlement automation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -585,17 +703,20 @@ async def run_open_new(
         progress_store.cleanup(f"open-new-{session_id}")
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
+        import traceback
+        logger.error(f"ValueError during open-new:\n{traceback.format_exc()}")
         await asyncio.sleep(0.5)
         progress_store.cleanup(f"open-new-{session_id}")
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        import traceback
+        logger.error(f"Error running open-new automation:\n{traceback.format_exc()}")
         progress_store.emit(f"open-new-{session_id}", ProgressEvent(
             event_type="error", step="error",
             message=str(e), percentage=0,
         ))
         await asyncio.sleep(0.5)
         progress_store.cleanup(f"open-new-{session_id}")
-        logger.error(f"Error running open-new automation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -666,6 +787,77 @@ async def stream_open_new_progress(session_id: str):
     )
 
 
+@router.get("/preview-settlement/{session_id}")
+async def preview_settlement(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    """
+    Dry-run settlement (tất toán): detect + lookup without writing to Excel.
+
+    Returns the list of candidate transactions that WOULD be processed,
+    their matched saving accounts, interest splits, and skipped items.
+    Use this to preview what `POST /run-settlement/{session_id}` will do.
+    """
+    try:
+        service = CashReportService(db_session=db)
+        result = await service.run_settlement_automation(
+            session_id,
+            user_id=current_user.id,
+            dry_run=True,
+        )
+        return {"success": True, **result}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error in preview-settlement: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/preview-open-new/{session_id}")
+async def preview_open_new(
+    session_id: str,
+    lookup_files: List[UploadFile] = File(default=[], description="Optional lookup files for account matching"),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    """
+    Dry-run open-new (mở mới): detect + lookup without writing to Excel.
+
+    Returns the list of candidate transactions that WOULD be processed,
+    their matched saving accounts, term/rate info, and skipped items.
+    Use this to preview what `POST /run-open-new/{session_id}` will do.
+
+    Accepts the same optional lookup files as the real run-open-new endpoint.
+    """
+    try:
+        lookup_contents = []
+        for lf in lookup_files:
+            if lf.filename:
+                content = await lf.read()
+                if content:
+                    lookup_contents.append(content)
+
+        service = CashReportService(db_session=db)
+        result = await service.run_open_new_automation(
+            session_id,
+            lookup_file_contents=lookup_contents or None,
+            user_id=current_user.id,
+            dry_run=True,
+        )
+        return {"success": True, **result}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error in preview-open-new: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/session/{session_id}")
 async def get_session_status(
     session_id: str,
@@ -732,6 +924,17 @@ async def download_session_result(
         with open(file_path, 'rb') as f:
             raw = f.read()
 
+        # Identify table sheets that need calculated-column formula repair
+        handler = OpenpyxlHandler()
+        table_sheet_paths: set = set()
+        try:
+            sheet_paths_map = handler._get_sheet_xml_paths(raw)
+            for name in ("Saving Account", "Cash Balance"):
+                if name in sheet_paths_map:
+                    table_sheet_paths.add(sheet_paths_map[name])
+        except Exception:
+            pass  # non-critical — standard repair still runs
+
         buf = _io.BytesIO()
         with zipfile.ZipFile(_io.BytesIO(raw), "r") as src:
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
@@ -741,6 +944,9 @@ async def download_session_result(
                     data = src.read(entry)
                     if entry.startswith("xl/worksheets/") and entry.endswith(".xml"):
                         data = OpenpyxlHandler._repair_worksheet_xml_for_safe_open(data)
+                        # Supplement missing table calculated-column formulas
+                        if entry in table_sheet_paths:
+                            data = OpenpyxlHandler._repair_calculated_columns(data)
                     elif entry == "xl/workbook.xml":
                         data = OpenpyxlHandler._set_full_calc_on_load(data)
                     elif entry == "xl/_rels/workbook.xml.rels":
@@ -764,7 +970,8 @@ async def download_session_result(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error downloading session file: {e}")
+        import traceback
+        logger.error(f"Error downloading session file (step={step}):\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1051,6 +1258,81 @@ async def preview_movement_data(
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.error(f"Error previewing data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/generate-movement-data")
+async def generate_movement_data(
+    file: UploadFile = File(..., description="Movement Data Upload file (7-col, no header: Source, Bank, Account, Date, Description, Debit, Credit)"),
+    period_name: str = Form(default="", description="Period name to fill in the Period column (e.g. W3-4Jan26)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
+):
+    """
+    Generate a Movement Data Export file from a Movement Data Upload file.
+
+    **Input format** (no header row, 7 columns):
+    - A: Source
+    - B: Bank
+    - C: Account
+    - D: Date
+    - E: Description
+    - F: Debit (Nợ)
+    - G: Credit (Có)
+
+    **Output format** (with header row, 16 columns):
+    Adds Net, Nature (AI-classified), Entity, Grouping, Key payment,
+    Currency, Account type, Period, Text.
+
+    The output file matches the format expected by **Upload Movement Data**.
+    """
+    try:
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        if not file.filename.lower().endswith((".xlsx", ".xls")):
+            raise HTTPException(status_code=400, detail="File must be .xlsx or .xls")
+
+        service = CashReportService(db_session=db)
+        result_bytes = await service.generate_movement_data(
+            file=(file.filename, content),
+            period_name=period_name,
+        )
+
+        # Log AI usage if any
+        if hasattr(service, 'ai_classifier') and hasattr(service.ai_classifier, '_last_usage'):
+            ai_usage = service.ai_classifier._last_usage
+            if ai_usage and ai_usage.get("total_tokens", 0) > 0:
+                await log_ai_usage(
+                    ai_usage_repo,
+                    provider=ai_usage.get("provider", "gemini"),
+                    model_name=ai_usage.get("model", "gemini-2.0-flash"),
+                    task_type="classification",
+                    input_tokens=ai_usage.get("input_tokens", 0),
+                    output_tokens=ai_usage.get("output_tokens", 0),
+                    processing_time_ms=ai_usage.get("processing_time_ms", 0),
+                    task_description="Generate Movement Data export (classify upload file)",
+                    file_name=file.filename,
+                    file_count=1,
+                    user_id=current_user.id,
+                )
+
+        stem = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
+        out_filename = f"{stem}_Export.xlsx"
+
+        return StreamingResponse(
+            BytesIO(result_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename={out_filename}",
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating movement data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
