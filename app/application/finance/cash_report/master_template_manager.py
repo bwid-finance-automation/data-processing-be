@@ -160,16 +160,17 @@ class MasterTemplateManager:
             period_name=period_name,
         )
 
-        # Step 2: If user uploaded their own template, run Movement prep immediately:
-        #   - Copy Cash Balance → Prior Period
-        #   - Clear Movement sheet
-        # For the system blank template this is deferred to first bank upload
-        # (Movement is already empty, Prior Period has no data to copy yet).
+        # Step 2: Prepare Movement sheet
+        #   - If user template: Copy Cash Balance → Prior Period + clear Movement
+        #   - If master template: Just clear Movement (template may have sample data)
         movement_prepared = False
         if template_bytes:
             handler.prepare_movement_for_writing(working_file)
             movement_prepared = True
-            logger.info(f"Session {session_id}: Movement prep completed immediately (user template)")
+            logger.info(f"Session {session_id}: Movement prep completed (CB → Prior Period, Movement cleared)")
+        else:
+            handler.clear_movement_data(working_file)
+            logger.info(f"Session {session_id}: Movement sheet cleared")
 
         return {
             "session_id": session_id,
@@ -279,8 +280,7 @@ class MasterTemplateManager:
         with open(working_file, 'wb') as f:
             f.write(template_bytes)
 
-        # Initialize session in single optimized operation
-        # (combines: step 0 prior period copy, update_config, clear_movement_data)
+        # Initialize session: update Summary config + clear Movement
         handler = get_openpyxl_handler()
         handler.initialize_session_optimized(
             file_path=working_file,
@@ -289,8 +289,9 @@ class MasterTemplateManager:
             fx_rate=Decimal(str(fx_rate)),
             period_name=period_name,
         )
+        handler.clear_movement_data(working_file)
 
-        logger.info(f"Reset session {session_id}")
+        logger.info(f"Reset session {session_id} (Movement cleared)")
 
         return {
             "session_id": session_id,

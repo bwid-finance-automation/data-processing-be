@@ -734,17 +734,21 @@ class CashReportService:
         user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Upload pre-classified Movement data (Netsuite & Manual).
+        Upload Movement data file to a session.
 
-        Unlike bank statement uploads, these transactions already have their
-        Nature category populated and do NOT require AI classification.
+        Supports two file formats (auto-detected):
+        - **7-column** (Movement Data): Source, Bank, Account, Date, Description,
+          Debit, Credit. Nature is classified via AI automatically.
+        - **16-column** (NS/Manual): Pre-classified with Nature already populated.
+          No AI classification needed.
 
         Workflow:
-        1. Read Movement file (filter out Automation rows)
-        2. Filter by session date range (if enabled)
-        3. Prepare Movement sheet on first upload (copy Cash Balance → Prior Period)
-        4. Append transactions to Movement sheet
-        5. Update session stats
+        1. Read Movement file
+        2. Auto-detect format: if no Nature values → run AI classification
+        3. Filter by session date range (if enabled)
+        4. Prepare Movement sheet on first upload (copy Cash Balance → Prior Period)
+        5. Append transactions to Movement sheet
+        6. Update session stats
 
         Args:
             session_id: The session ID
@@ -754,7 +758,7 @@ class CashReportService:
             user_id: Owner user ID for access control
 
         Returns:
-            Upload result summary (no AI usage since pre-classified)
+            Upload result summary (includes AI usage if classification was needed)
         """
         filename, content = file
 
@@ -806,11 +810,43 @@ class CashReportService:
                 event_type="step_complete",
                 step="reading",
                 message=f"Found {found_count} Movement transactions",
-                percentage=30,
+                percentage=20,
                 data={"count": found_count},
             ))
 
-        # --- Step 2: Filter by date range ---
+        # --- Step 2: Auto-detect format and classify if needed ---
+        # If none of the transactions have a Nature value, this is a 7-col
+        # Movement Data file → classify via AI (rule-based + Gemini).
+        needs_classification = (
+            len(transactions) > 0
+            and all(not tx.nature for tx in transactions)
+        )
+
+        if needs_classification:
+            if progress_callback:
+                progress_callback(ProgressEvent(
+                    event_type="step_start",
+                    step="classifying",
+                    message=f"7-col format detected — classifying {len(transactions)} transactions via AI...",
+                    percentage=25,
+                ))
+                await asyncio.sleep(0)
+
+            transactions = await self._classify_transactions(
+                transactions, progress_callback=None,
+            )
+
+            if progress_callback:
+                classified_count = sum(1 for tx in transactions if tx.nature)
+                progress_callback(ProgressEvent(
+                    event_type="step_complete",
+                    step="classifying",
+                    message=f"Classified {classified_count}/{len(transactions)} transactions",
+                    percentage=40,
+                    data={"classified": classified_count},
+                ))
+
+        # --- Step 3: Filter by date range ---
         total_skipped = 0
         if filter_by_date and opening_date and ending_date:
             if progress_callback:
@@ -818,7 +854,7 @@ class CashReportService:
                     event_type="step_start",
                     step="filtering",
                     message=f"Filtering by date range {opening_date} - {ending_date}...",
-                    percentage=40,
+                    percentage=45,
                 ))
             transactions, skipped = self.statement_reader.filter_by_date_range(
                 transactions, opening_date, ending_date
@@ -829,7 +865,7 @@ class CashReportService:
                     event_type="step_complete",
                     step="filtering",
                     message=f"{len(transactions)} within range, {skipped} skipped",
-                    percentage=50,
+                    percentage=55,
                 ))
 
         if not transactions:
@@ -848,7 +884,7 @@ class CashReportService:
                 "message": "No valid Movement transactions found after filtering",
             }
 
-        # --- Step 3: Prepare Movement sheet on first upload ---
+        # --- Step 4: Prepare Movement sheet on first upload ---
         is_first_upload = await self._is_first_upload(session_id)
         if is_first_upload:
             if progress_callback:
@@ -856,7 +892,7 @@ class CashReportService:
                     event_type="step_start",
                     step="preparing",
                     message="First upload: Copying Cash Balance to Prior Period...",
-                    percentage=55,
+                    percentage=60,
                 ))
                 await asyncio.sleep(0)
 
@@ -871,16 +907,16 @@ class CashReportService:
                     event_type="step_complete",
                     step="preparing",
                     message=f"Cleared {rows_cleared} old rows, Cash Balance copied",
-                    percentage=65,
+                    percentage=70,
                 ))
 
-        # --- Step 4: Write to Movement sheet ---
+        # --- Step 5: Write to Movement sheet ---
         if progress_callback:
             progress_callback(ProgressEvent(
                 event_type="step_start",
                 step="writing",
                 message=f"Writing {len(transactions)} transactions to Movement sheet...",
-                percentage=70,
+                percentage=75,
             ))
             await asyncio.sleep(0)
 
@@ -897,7 +933,7 @@ class CashReportService:
                 percentage=90,
             ))
 
-        # --- Step 5: Update session stats ---
+        # --- Step 6: Update session stats ---
         if self.db_session:
             await self._update_session_stats(session_id, rows_added, 1)
 
@@ -906,24 +942,29 @@ class CashReportService:
             progress_callback(ProgressEvent(
                 event_type="complete",
                 step="done",
-                message=f"Upload complete! {rows_added} Movement transactions processed (from {found_count} found).",
+                message=f"Upload complete! {rows_added} Movement transactions processed (from {found_count} found)."
+                        + (f" AI classified {sum(1 for tx in transactions if tx.nature)}/{len(transactions)}." if needs_classification else ""),
                 percentage=100,
                 data={
                     "total_transactions_found": found_count,
                     "total_transactions_added": rows_added,
                     "total_transactions_skipped": total_skipped,
                     "total_rows_in_movement": total_rows,
+                    "ai_classified": needs_classification,
                 },
             ))
 
-        return {
+        result = {
             "session_id": session_id,
             "total_transactions_found": found_count,
             "total_transactions_added": rows_added,
             "total_transactions_skipped": total_skipped,
             "total_rows_in_movement": total_rows,
-            "message": f"Successfully uploaded {rows_added} Movement transactions",
+            "ai_classified": needs_classification,
+            "message": f"Successfully uploaded {rows_added} Movement transactions"
+                       + (" (AI classified)" if needs_classification else " (pre-classified)"),
         }
+        return result
 
     # ------------------------------------------------------------------ #
 
@@ -2107,6 +2148,7 @@ class CashReportService:
         logger.info(f"Reset session {session_id}")
         return result
 
+
     async def delete_session(self, session_id: str, user_id: Optional[int] = None) -> bool:
         """
         Delete a session.
@@ -2224,162 +2266,6 @@ class CashReportService:
         writer = MovementDataWriter(working_file)
         return writer.get_data_preview(limit)
 
-    async def generate_movement_data(
-        self,
-        file: Tuple[str, bytes],
-        period_name: str = "",
-        progress_callback: Optional[callable] = None,
-    ) -> bytes:
-        """
-        Generate a Movement Data Export file from a Movement Data Upload file.
-
-        Upload format (no header, 7 columns):
-            A=Source, B=Bank, C=Account, D=Date, E=Description, F=Debit(Nợ), G=Credit(Có)
-
-        Export format (with header row, 16 columns):
-            A=Source, B=Bank, C=Account, D=Date, E=Description,
-            F=Nợ, G=Có, H=Net(F-G), I=Nature, J=Entity,
-            K=Grouping, L=Key payment, M=Currency, N=Account type,
-            O=Period, P=Text
-
-        Args:
-            file: (filename, bytes) tuple of the uploaded Upload-format file
-            period_name: Period label to fill in column O (e.g. "W3-4Jan26")
-            progress_callback: Optional progress callback
-
-        Returns:
-            bytes of the generated Export-format .xlsx file
-        """
-        import openpyxl
-        from openpyxl import Workbook
-        from io import BytesIO
-        from datetime import datetime
-
-        def emit(event_type, step, message, percentage=0):
-            if progress_callback:
-                progress_callback(ProgressEvent(
-                    event_type=event_type, step=step,
-                    message=message, percentage=percentage,
-                ))
-
-        filename, content = file
-        emit("progress", "reading", f"Reading upload file: {filename}", percentage=10)
-
-        # ── Read upload file ──────────────────────────────────────────────────
-        wb_in = openpyxl.load_workbook(BytesIO(content), data_only=True, read_only=True)
-        ws_in = wb_in.active
-
-        transactions: List[MovementTransaction] = []
-        for row in ws_in.iter_rows(min_row=1, values_only=True):
-            # Skip completely empty rows
-            if not any(c for c in row):
-                continue
-
-            # Parse each column (0-based)
-            def _s(v):
-                return str(v).strip() if v is not None else ""
-
-            def _d(v):
-                """Parse a decimal value (debit/credit). 0 or None → None."""
-                if v is None:
-                    return None
-                try:
-                    dec = Decimal(str(v))
-                    return dec if dec > 0 else None
-                except Exception:
-                    return None
-
-            source = _s(row[0]) if len(row) > 0 else ""
-            bank = _s(row[1]) if len(row) > 1 else ""
-            account = _s(row[2]) if len(row) > 2 else ""
-            date_raw = row[3] if len(row) > 3 else None
-            description = _s(row[4]) if len(row) > 4 else ""
-            debit = _d(row[5]) if len(row) > 5 else None
-            credit = _d(row[6]) if len(row) > 6 else None
-
-            # Parse date
-            tx_date: Optional[date] = None
-            if isinstance(date_raw, datetime):
-                tx_date = date_raw.date()
-            elif isinstance(date_raw, date):
-                tx_date = date_raw
-            elif date_raw:
-                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"):
-                    try:
-                        tx_date = datetime.strptime(str(date_raw).strip()[:10], fmt).date()
-                        break
-                    except Exception:
-                        pass
-
-            if not bank and not account and not description:
-                continue
-
-            transactions.append(MovementTransaction(
-                source=source or "Manual",
-                bank=bank,
-                account=account,
-                date=tx_date or date.today(),
-                description=description,
-                debit=debit,
-                credit=credit,
-                nature="",
-            ))
-
-        wb_in.close()
-        emit("progress", "classifying", f"Classifying {len(transactions)} transactions...", percentage=30)
-
-        # ── Classify transactions ─────────────────────────────────────────────
-        if transactions:
-            transactions = await self._classify_transactions(transactions, progress_callback=None)
-
-        emit("progress", "building", "Building export file...", percentage=80)
-
-        # ── Build export workbook ─────────────────────────────────────────────
-        wb_out = Workbook()
-        ws_out = wb_out.active
-        ws_out.title = "Sheet1"
-
-        # Header row
-        headers = [
-            "Source", "Bank", "Account", "Date", "Bank description",
-            "Nợ", "Có", "Net", "Nature", "Entity",
-            "Grouping", "Key payment", "Currcency", "Account type",
-            "Period", "Text",
-        ]
-        ws_out.append(headers)
-
-        for tx in transactions:
-            debit_val = float(tx.debit) if tx.debit else 0
-            credit_val = float(tx.credit) if tx.credit else 0
-            net_val = debit_val - credit_val
-
-            # "Text" column = last N digits of account number (strip leading zeros)
-            text_val = tx.account.lstrip("0") if tx.account else ""
-
-            ws_out.append([
-                tx.source,
-                tx.bank,
-                tx.account,
-                tx.date,
-                tx.description,
-                debit_val if debit_val else None,
-                credit_val if credit_val else None,
-                net_val if net_val != 0 else None,
-                tx.nature or "",
-                tx.entity or "",
-                tx.grouping or "",
-                tx.key_payment or tx.nature or "",
-                tx.currency or "VND",
-                tx.account_type or "Current Account",
-                period_name,
-                text_val,
-            ])
-
-        emit("complete", "done", f"Generated export file with {len(transactions)} rows", percentage=100)
-
-        out = BytesIO()
-        wb_out.save(out)
-        return out.getvalue()
 
     def _read_saving_accounts(self, working_file: str) -> List[Dict[str, Any]]:
         """
@@ -4619,7 +4505,7 @@ class CashReportService:
                         return datetime.fromordinal(base_ord + serial).date()
                 except Exception:
                     pass
-            for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
+            for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
                 try:
                     return datetime.strptime(s, fmt).date()
                 except ValueError:
@@ -4635,11 +4521,11 @@ class CashReportService:
                 if not text:
                     return
                 up = text.upper()
-                m_month = re.search(r'(\d{1,2})\s*(THANG|THÁNG|M)\b', up)
+                m_month = re.search(r'(\d{1,2})\s*(THANG|THÁNG|MONTHS?|M)\b', up)
                 if m_month:
                     term_months = int(m_month.group(1))
                     return
-                m_day = re.search(r'(\d{1,3})\s*(NGAY|NGÀY|D)\b', up)
+                m_day = re.search(r'(\d{1,3})\s*(NGAY|NGÀY|DAYS?|D)\b', up)
                 if m_day:
                     term_days = int(m_day.group(1))
 
@@ -4841,6 +4727,17 @@ class CashReportService:
             wb = xlrd.open_workbook(file_contents=file_content)
             ws = wb.sheet_by_index(0)
 
+            # SNP: extract entity name from header blob in row 1
+            # Format: "\xa0Tên khách hàng / tên tài khoản\xa0:0315694672 CONG TY TNHH BW SAI GON\n..."
+            snp_entity = ""
+            for r in range(min(3, ws.nrows)):
+                cell_val = str(ws.cell_value(r, 0) if ws.ncols > 0 else "")
+                # Match "ten khach hang" or "Tên khách hàng" with any whitespace/\xa0
+                m = re.search(r'[Tt][eê]n[\s\xa0]+kh[aá]ch[\s\xa0]+h[aà]ng.*?:\s*\d+\s+(.+?)(?:\n|$)', cell_val)
+                if m:
+                    snp_entity = m.group(1).strip()
+                    break
+
             for row_idx in range(ws.nrows):
                 row = [ws.cell_value(row_idx, c) for c in range(ws.ncols)]
 
@@ -4877,12 +4774,125 @@ class CashReportService:
                     product_raw=_v(8),
                     provider_raw="VCB",
                 )
+                # SNP (SinoPac) style: cols A=account, B=currency, D=amount,
+                # E=opening_date, F=maturity_date, H=rate
+                _add_lookup_account(
+                    snp_entity,  # entity from header blob (parsed below)
+                    _v(3), _v(0),
+                    currency_raw=_v(1),
+                    rate_raw=_v(7),
+                    opening_date_raw=_v(4),
+                    maturity_date_raw=_v(5),
+                    provider_raw="SNP",
+                )
 
             return lookup, account_meta
 
         except Exception as xls_err:
-            logger.warning(f"Failed to parse lookup file (tried xlsx and xls): {xls_err}")
-            return {}, {}
+            logger.debug(f"xls parse failed: {xls_err}")
+
+        # ── Try PDF (Woori-style: one deposit per file) ──
+        try:
+            parsed_pdf = self._parse_woori_pdf_lookup(file_content)
+            if parsed_pdf:
+                for entry in parsed_pdf:
+                    _add_lookup_account(
+                        entry.get("entity"), entry.get("amount"), entry.get("account"),
+                        currency_raw=entry.get("currency"),
+                        rate_raw=entry.get("rate"),
+                        term_raw=entry.get("term"),
+                        opening_date_raw=entry.get("opening_date"),
+                        maturity_date_raw=entry.get("maturity_date"),
+                        provider_raw="WOORI",
+                    )
+                if lookup or account_meta:
+                    return lookup, account_meta
+        except Exception as pdf_err:
+            logger.debug(f"PDF parse failed: {pdf_err}")
+
+        logger.warning("Failed to parse lookup file (tried xlsx, xls, and PDF)")
+        return {}, {}
+
+    @staticmethod
+    def _parse_woori_pdf_lookup(file_content: bytes) -> List[Dict[str, Any]]:
+        """
+        Parse Woori Bank PDF lookup files (one deposit per file).
+
+        Extracts key-value pairs from the PDF text:
+        - Account number, Account holder (entity), Opening amount, Balance
+        - Account Opening Date, Due date (maturity), Deposit Period (term)
+        - Applied interest rate (= Basic + Incremental)
+
+        Returns a list with one entry dict per file (Woori = 1 deposit per PDF).
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.warning("PyMuPDF (fitz) not installed - cannot parse Woori PDF lookup files")
+            return []
+
+        results: List[Dict[str, Any]] = []
+
+        try:
+            doc = fitz.open(stream=file_content, filetype="pdf")
+        except Exception:
+            return []
+
+        full_text = ""
+        for page in doc:
+            full_text += page.get_text() + "\n"
+        doc.close()
+
+        if not full_text.strip():
+            return []
+
+        # Helper: extract value after a label (label\nvalue pattern)
+        def _extract(label: str) -> str:
+            pattern = re.compile(
+                rf'{re.escape(label)}\s*\n\s*(.+?)(?:\n|$)',
+                re.IGNORECASE,
+            )
+            m = pattern.search(full_text)
+            return m.group(1).strip() if m else ""
+
+        # Account number: "200700045749 [VND]"
+        account_raw = _extract("Account number")
+        account = re.sub(r'\s*\[.*?\]\s*$', '', account_raw).strip()
+        # Currency from account suffix
+        currency_m = re.search(r'\[(\w+)\]', account_raw)
+        currency = currency_m.group(1) if currency_m else "VND"
+
+        entity = _extract("Account holder")
+
+        # Opening amount: "VND 17,000,000,000" or "VND 17,000,000,000"
+        opening_raw = _extract("Opening amount")
+        amount_str = re.sub(r'^[A-Z]{3}\s*', '', opening_raw).replace(' ', '').replace(',', '').strip()
+
+        opening_date = _extract("Account Opening Date")
+        maturity_date = _extract("Due date")
+        term_raw = _extract("Deposit Period")
+        rate_raw = _extract("Applied interest rate")
+
+        # Use opening amount (principal) as the lookup amount
+        try:
+            amount = float(amount_str) if amount_str else None
+        except (ValueError, TypeError):
+            amount = None
+
+        if account:
+            results.append({
+                "account": account,
+                "entity": entity,
+                "amount": amount,
+                "currency": currency,
+                "opening_date": opening_date,
+                "maturity_date": maturity_date,
+                "term": term_raw,
+                "rate": rate_raw,
+            })
+
+        return results
+
 
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # Test Automation (settlement + open-new using test template)

@@ -52,7 +52,7 @@ async def get_info():
         "endpoints": {
             "POST /init-session": "Initialize a new session",
             "POST /upload-statements/{session_id}": "Upload + classify + write (auto-confirm)",
-            "POST /upload-movement/{session_id}": "Upload Movement NS/Manual file (pre-classified)",
+            "POST /upload-movement/{session_id}": "Upload Movement Data file (7-col auto-classified or 16-col pre-classified)",
             "POST /upload-preview/{session_id}": "Upload + classify + preview (review before writing)",
             "POST /confirm-upload/{session_id}": "Confirm and write pending classifications to Excel",
             "POST /run-settlement/{session_id}": "Run settlement automation (tất toán)",
@@ -242,27 +242,28 @@ async def upload_bank_statements(
 @router.post("/upload-movement/{session_id}")
 async def upload_movement_file(
     session_id: str,
-    file: UploadFile = File(..., description="Movement Netsuite & Manual Excel file"),
+    file: UploadFile = File(..., description="Movement Data file (7-col or 16-col Excel)"),
     filter_by_date: bool = Form(default=True, description="Filter transactions by session date range"),
     db: AsyncSession = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
+    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
 ):
     """
-    Upload Movement Netsuite & Manual file to a session.
+    Upload Movement Data file to a session.
 
-    This endpoint processes pre-classified transactions from NetSuite exports
-    and manual data entries. Unlike bank statement uploads, these transactions
-    already have their Nature category populated and do NOT require AI classification.
+    Supports two file formats (auto-detected):
 
-    **File Format**:
-    - Sheet: "Sheet1" (or first sheet)
+    **7-column format** (Movement Data):
     - Columns: A=Source, B=Bank, C=Account, D=Date, E=Description,
-               F=Debit(Nợ), G=Credit(Có), I=Nature
-    - Formula columns (H, J-P) are ignored
+               F=Debit(Nợ), G=Credit(Có)
+    - Nature is auto-classified via AI (rule-based + Gemini)
+
+    **16-column format** (NS/Manual, pre-classified):
+    - Columns: A=Source, B=Bank, C=Account, D=Date, E=Description,
+               F=Debit(Nợ), G=Credit(Có), I=Nature, J-P=derived
+    - Nature already populated, no AI classification needed
 
     **Filtering**:
-    - Rows with Source="Automation" are excluded (already in system via bank uploads)
-    - Only "NS" and "Manual" rows are imported
     - Date filtering applies if filter_by_date=True
 
     Can be called multiple times to add more data (accumulative).
@@ -286,6 +287,25 @@ async def upload_movement_file(
             progress_callback=on_progress,
             user_id=current_user.id,
         )
+
+        # Log AI usage if classification was performed (7-col format)
+        if result.get("ai_classified"):
+            if hasattr(service, 'ai_classifier') and hasattr(service.ai_classifier, '_last_usage'):
+                ai_usage = service.ai_classifier._last_usage
+                if ai_usage and ai_usage.get("total_tokens", 0) > 0:
+                    await log_ai_usage(
+                        ai_usage_repo,
+                        provider=ai_usage.get("provider", "gemini"),
+                        model_name=ai_usage.get("model", "gemini-2.0-flash"),
+                        task_type="classification",
+                        input_tokens=ai_usage.get("input_tokens", 0),
+                        output_tokens=ai_usage.get("output_tokens", 0),
+                        processing_time_ms=ai_usage.get("processing_time_ms", 0),
+                        task_description="Upload Movement Data (7-col auto-classify)",
+                        file_name=file.filename,
+                        file_count=1,
+                        user_id=current_user.id,
+                    )
 
         # Delay cleanup so SSE generator has time to read final events
         await asyncio.sleep(1)
@@ -647,7 +667,7 @@ async def stream_settlement_progress(session_id: str):
 @router.post("/run-open-new/{session_id}")
 async def run_open_new(
     session_id: str,
-    lookup_files: List[UploadFile] = File(default=[], description="Optional lookup files (VTB Saving style .xls/.xlsx) for account matching"),
+    lookup_files: List[UploadFile] = File(default=[], description="Optional lookup files (.xls/.xlsx/.pdf) for account matching. Supports VCB, VTB, BIDV, SNP (Excel) and Woori (PDF)."),
     db: AsyncSession = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ):
@@ -660,8 +680,12 @@ async def run_open_new(
     - Creates counter entries with Nature = "Internal transfer in"
     - Appends counter entries to Movement sheet
 
-    Optionally upload one or more lookup files (VTB Saving style) to match accounts when
+    Optionally upload one or more lookup files to match accounts when
     description doesn't contain the saving account number.
+
+    Supported lookup formats:
+    - VCB (.xlsx), VTB (.xls), BIDV (.xls), SNP/SinoPac (.xls) — Excel spreadsheets
+    - Woori (.pdf) — one PDF per deposit account
 
     Returns summary of counter entries created.
     Connect to GET /open-new-progress/{session_id} BEFORE calling this for real-time progress.
@@ -820,7 +844,7 @@ async def preview_settlement(
 @router.post("/preview-open-new/{session_id}")
 async def preview_open_new(
     session_id: str,
-    lookup_files: List[UploadFile] = File(default=[], description="Optional lookup files for account matching"),
+    lookup_files: List[UploadFile] = File(default=[], description="Optional lookup files (.xls/.xlsx/.pdf) for account matching"),
     db: AsyncSession = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ):
@@ -1003,6 +1027,7 @@ async def reset_session(
     except Exception as e:
         logger.error(f"Error resetting session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @router.delete("/session/{session_id}")
@@ -1258,81 +1283,6 @@ async def preview_movement_data(
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.error(f"Error previewing data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/generate-movement-data")
-async def generate_movement_data(
-    file: UploadFile = File(..., description="Movement Data Upload file (7-col, no header: Source, Bank, Account, Date, Description, Debit, Credit)"),
-    period_name: str = Form(default="", description="Period name to fill in the Period column (e.g. W3-4Jan26)"),
-    db: AsyncSession = Depends(get_db),
-    current_user: UserModel = Depends(get_current_user),
-    ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
-):
-    """
-    Generate a Movement Data Export file from a Movement Data Upload file.
-
-    **Input format** (no header row, 7 columns):
-    - A: Source
-    - B: Bank
-    - C: Account
-    - D: Date
-    - E: Description
-    - F: Debit (Nợ)
-    - G: Credit (Có)
-
-    **Output format** (with header row, 16 columns):
-    Adds Net, Nature (AI-classified), Entity, Grouping, Key payment,
-    Currency, Account type, Period, Text.
-
-    The output file matches the format expected by **Upload Movement Data**.
-    """
-    try:
-        content = await file.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty")
-        if not file.filename.lower().endswith((".xlsx", ".xls")):
-            raise HTTPException(status_code=400, detail="File must be .xlsx or .xls")
-
-        service = CashReportService(db_session=db)
-        result_bytes = await service.generate_movement_data(
-            file=(file.filename, content),
-            period_name=period_name,
-        )
-
-        # Log AI usage if any
-        if hasattr(service, 'ai_classifier') and hasattr(service.ai_classifier, '_last_usage'):
-            ai_usage = service.ai_classifier._last_usage
-            if ai_usage and ai_usage.get("total_tokens", 0) > 0:
-                await log_ai_usage(
-                    ai_usage_repo,
-                    provider=ai_usage.get("provider", "gemini"),
-                    model_name=ai_usage.get("model", "gemini-2.0-flash"),
-                    task_type="classification",
-                    input_tokens=ai_usage.get("input_tokens", 0),
-                    output_tokens=ai_usage.get("output_tokens", 0),
-                    processing_time_ms=ai_usage.get("processing_time_ms", 0),
-                    task_description="Generate Movement Data export (classify upload file)",
-                    file_name=file.filename,
-                    file_count=1,
-                    user_id=current_user.id,
-                )
-
-        stem = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
-        out_filename = f"{stem}_Export.xlsx"
-
-        return StreamingResponse(
-            BytesIO(result_bytes),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={
-                "Content-Disposition": f"attachment; filename={out_filename}",
-            }
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating movement data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
