@@ -1,0 +1,91 @@
+{% extends "sqladmin/layout.html" %}
+
+{% block content_header %}
+<div class="admin-topbar">
+  <div>
+    <h2 class="page-title admin-page-title">Admin Dashboard</h2>
+    <div class="admin-subtitle">Centralized operations, governance, and platform monitoring</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="col-12">
+  <div class="dashboard-hero">
+    <h3 class="mb-1">Business Operations Console</h3>
+    <p>Manage access, control platform features, monitor usage, and maintain data quality from a single interface.</p>
+  </div>
+</div>
+
+<div class="col-12">
+  <div class="dashboard-grid">
+    <section class="dashboard-card">
+      <span class="dashboard-badge">Identity</span>
+      <h4>User Administration</h4>
+      <p>Control user roles, account status, and active sessions for operational security.</p>
+      <div class="dashboard-links">
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='user-model') }}">Users</a>
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='user-session-model') }}">Sessions</a>
+      </div>
+    </section>
+
+    <section class="dashboard-card">
+      <span class="dashboard-badge">Controls</span>
+      <h4>Feature Governance</h4>
+      <p>Enable or disable business features and maintain user-facing maintenance messages.</p>
+      <div class="dashboard-links">
+        <a class="dashboard-link" href="{{ request.url_for('admin:feature_toggles_ui') }}">Feature Toggles UI</a>
+      </div>
+    </section>
+
+    <section class="dashboard-card">
+      <span class="dashboard-badge">Portfolio</span>
+      <h4>Project Management</h4>
+      <p>Review project records, case allocations, and remove obsolete projects.</p>
+      <div class="dashboard-links">
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='project-model') }}">Projects</a>
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='project-case-model') }}">Project Cases</a>
+      </div>
+    </section>
+
+    <section class="dashboard-card">
+      <span class="dashboard-badge">Cost & AI</span>
+      <h4>AI Usage Monitoring</h4>
+      <p>Track provider usage, token consumption, processing success, and estimated costs.</p>
+      <div class="dashboard-links">
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='ai-usage-model') }}">AI Usage Logs</a>
+      </div>
+    </section>
+
+    <section class="dashboard-card">
+      <span class="dashboard-badge">Banking</span>
+      <h4>Bank Statement Monitoring</h4>
+      <p>Inspect uploaded statements, parsed transactions, and balances for reconciliation oversight.</p>
+      <div class="dashboard-links">
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='bank-statement-model') }}">Statements</a>
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='bank-transaction-model') }}">Transactions</a>
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='bank-balance-model') }}">Balances</a>
+      </div>
+    </section>
+
+    <section class="dashboard-card">
+      <span class="dashboard-badge">Cash Flow</span>
+      <h4>Cash Report Management</h4>
+      <p>Manage report sessions, inspect uploaded source files, and clean up expired runs.</p>
+      <div class="dashboard-links">
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='cash-report-session-model') }}">Sessions</a>
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='cash-report-uploaded-file-model') }}">Uploaded Files</a>
+      </div>
+    </section>
+
+    <section class="dashboard-card">
+      <span class="dashboard-badge">Contracts</span>
+      <h4>Contract Monitoring</h4>
+      <p>Review OCR-processed contracts and track contract portfolio records in read-only mode.</p>
+      <div class="dashboard-links">
+        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='contract-model') }}">Contracts</a>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}

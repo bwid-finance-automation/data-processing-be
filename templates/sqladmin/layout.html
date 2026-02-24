@@ -1,0 +1,105 @@
+{% extends "sqladmin/base.html" %}
+{% block body %}
+{% set resolved_title = title if title is defined and title else (model_view.name_plural if model_view is defined else "Admin Dashboard") %}
+{% set resolved_subtitle = subtitle if subtitle is defined and subtitle else ("Operational workspace for " ~ model_view.name_plural if model_view is defined else "Operational control center for BWID platform administrators") %}
+{% set is_dashboard = request.url.path.endswith('/admin/') or request.url.path.endswith('/admin') %}
+<div class="wrapper admin-shell">
+  <aside class="navbar navbar-expand-lg navbar-vertical navbar-expand-md navbar-dark admin-sidebar">
+    <div class="container-fluid">
+      <h1 class="navbar-brand navbar-brand-autodark">
+        <a href="{{ url_for('admin:index') }}">
+          {% if admin.logo_url %}
+          <img src="{{ admin.logo_url }}" width="64" height="64" alt="Admin" class="navbar-brand-image" />
+          {% else %}
+          <h3>{{ admin.title }}</h3>
+          <span class="admin-brand-label">Business Console</span>
+          {% endif %}
+        </a>
+      </h1>
+      <nav class="navbar navbar-expand-sm" id="navbar-menu">
+        <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarSupportedContent"
+          aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarSupportedContent">
+          <div class="admin-menu">
+            <a href="{{ request.url_for('admin:index') }}" class="admin-menu-link admin-menu-home {% if is_dashboard %}active{% endif %}">
+              <span class="admin-menu-link-icon"><i class="fa-solid fa-gauge-high"></i></span>
+              <span class="admin-menu-link-label">Dashboard</span>
+            </a>
+
+            {% for item in admin._menu.items %}
+              {% if item.is_visible(request) and item.is_accessible(request) %}
+                {% if item.type_ == "Category" %}
+                  {% set has_visible = namespace(value=false) %}
+                  {% for sub_menu in item.children %}
+                    {% if sub_menu.is_visible(request) and sub_menu.is_accessible(request) %}
+                      {% set has_visible.value = true %}
+                    {% endif %}
+                  {% endfor %}
+                  {% if has_visible.value %}
+                  <section class="admin-menu-section {% if item.is_active(request) %}is-active{% endif %}">
+                    <div class="admin-menu-section-header">
+                      <div class="admin-menu-section-title">
+                        {% if item.icon %}<i class="{{ item.icon }}"></i>{% endif %}
+                        <span>{{ item.display_name }}</span>
+                      </div>
+                      <span class="admin-menu-section-count">{{ item.children|length }}</span>
+                    </div>
+                    <div class="admin-menu-links">
+                      {% for sub_menu in item.children %}
+                        {% if sub_menu.is_visible(request) and sub_menu.is_accessible(request) %}
+                        <a class="admin-menu-link {% if sub_menu.is_active(request) %}active{% endif %}" href="{{ sub_menu.url(request) }}">
+                          <span class="admin-menu-link-icon">
+                            {% if sub_menu.icon %}<i class="{{ sub_menu.icon }}"></i>{% else %}<i class="fa-solid fa-circle-dot"></i>{% endif %}
+                          </span>
+                          <span class="admin-menu-link-label">{{ sub_menu.display_name }}</span>
+                        </a>
+                        {% endif %}
+                      {% endfor %}
+                    </div>
+                  </section>
+                  {% endif %}
+                {% elif item.type_ == "View" %}
+                  <a class="admin-menu-link {% if item.is_active(request) %}active{% endif %}" href="{{ item.url(request) }}">
+                    <span class="admin-menu-link-icon">{% if item.icon %}<i class="{{ item.icon }}"></i>{% else %}<i class="fa-solid fa-circle-dot"></i>{% endif %}</span>
+                    <span class="admin-menu-link-label">{{ item.display_name }}</span>
+                  </a>
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          </div>
+        </div>
+      </nav>
+      {% if admin.authentication_backend %}
+      <a href="{{ request.url_for('admin:logout') }}" class="btn btn-secondary btn-icon">
+        <i class="fa fa-sign-out"></i>
+        <span>Logout</span>
+      </a>
+      {% endif %}
+    </div>
+  </aside>
+
+  <div class="page-wrapper admin-page-wrapper">
+    <div class="container-fluid admin-content-container">
+      <div class="page-header d-print-none">
+        {% block content_header %}
+        <div class="admin-topbar">
+          <div>
+            <h2 class="page-title admin-page-title">{{ resolved_title }}</h2>
+            <div class="admin-subtitle">{{ resolved_subtitle }}</div>
+          </div>
+        </div>
+        {% endblock %}
+      </div>
+    </div>
+    <div class="page-body flex-grow-1">
+      <div class="container-fluid">
+        <div class="row row-deck row-cards">
+          {% block content %}{% endblock %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
