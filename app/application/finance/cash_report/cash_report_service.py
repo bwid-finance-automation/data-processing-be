@@ -29,6 +29,7 @@ from app.domain.finance.cash_report.services.ai_classifier import (
     ALL_PAYMENT_CATEGORIES,
     ALL_RECEIPT_CATEGORIES,
 )
+from app.domain.finance.cash_report.services.tfidf_classifier import TfidfNatureClassifier
 from app.domain.finance.cash_report.models.key_payment import KeyPaymentClassifier
 
 from .master_template_manager import MasterTemplateManager
@@ -91,6 +92,23 @@ SETTLEMENT_KEYWORDS = [
 # Compile regex patterns for efficiency
 import re as _re
 SETTLEMENT_PATTERNS_COMPILED = [_re.compile(p, _re.IGNORECASE) for p in SETTLEMENT_PATTERNS]
+
+# Broad HDTG/deposit-related keywords for large-receipt guardrail.
+# When a RECEIPT has description matching these keywords AND debit > 1B VND,
+# it is almost certainly an Internal transfer in (deposit maturity / withdrawal).
+# This catches cases not covered by specific SETTLEMENT_PATTERNS regex.
+HDTG_DEPOSIT_KEYWORDS = [
+    "hdtg",             # Hop dong tien gui
+    "tien gui",         # Tien gui (deposit)
+    "tiet kiem",        # Tiet kiem (savings)
+    "timemo",           # VCB time deposit (memo)
+    "timect",           # VCB time deposit (CT)
+    "ky han",           # Ky han (term)
+    "saving",           # Saving (EN)
+    "term deposit",     # Term deposit (EN)
+    "fixed deposit",    # Fixed deposit (EN)
+]
+_UNIT_1B = Decimal("1000000000")  # 1 billion VND
 
 # Natures eligible for settlement detection.
 SETTLEMENT_ELIGIBLE_NATURES = frozenset({
@@ -272,8 +290,13 @@ class CashReportService:
         self._transactions_reference_majority: Dict[Tuple[str, bool], str] = {}
         self._transactions_reference_fuzzy_exact: Dict[Tuple[str, bool], str] = {}
         self._transactions_reference_fuzzy_majority: Dict[Tuple[str, bool], str] = {}
+        self._transactions_reference_template_exact: Dict[Tuple[str, bool], str] = {}
+        self._transactions_reference_template_majority: Dict[Tuple[str, bool], str] = {}
+        self._tfidf_classifier = TfidfNatureClassifier(min_similarity=0.55)
+        self._tfidf_mtime: Optional[float] = None
         self._reload_detection_pattern_indexes()
         self._rebuild_transactions_reference_index()
+        self._rebuild_tfidf_index()
 
     async def _verify_session_owner(self, session_id: str, user_id: int) -> None:
         """
@@ -468,6 +491,10 @@ class CashReportService:
                         message=f"Reading {filename}...",
                         detail=f"Parsing transactions from file {file_idx + 1}/{len(files)}",
                         percentage=int((file_idx) / len(files) * 20),
+                        message_key="progress.reading_file",
+                        message_params={"filename": filename},
+                        detail_key="progress.parsing_file_n_of_total",
+                        detail_params={"n": file_idx + 1, "total": len(files)},
                     ))
 
                 # Read transactions from parsed Excel
@@ -483,6 +510,8 @@ class CashReportService:
                         message=f"Found {found_count} transactions in {filename}",
                         percentage=int((file_idx + 1) / len(files) * 20),
                         data={"filename": filename, "count": found_count},
+                        message_key="progress.found_transactions_in_file",
+                        message_params={"count": found_count, "filename": filename},
                     ))
 
                 # Collect file date range before filtering
@@ -543,6 +572,10 @@ class CashReportService:
                 message=f"Filtering {total_found} transactions by date range",
                 detail=f"{opening_date.strftime('%d/%m/%Y')} - {ending_date.strftime('%d/%m/%Y')}",
                 percentage=25,
+                message_key="progress.filtering_by_date",
+                message_params={"count": total_found},
+                detail_key="progress.date_range",
+                detail_params={"start": opening_date.strftime('%d/%m/%Y'), "end": ending_date.strftime('%d/%m/%Y')},
             ))
             progress_callback(ProgressEvent(
                 event_type="step_complete",
@@ -550,6 +583,8 @@ class CashReportService:
                 message=f"{len(all_transactions)} transactions within range, {total_skipped} skipped",
                 percentage=30,
                 data={"kept": len(all_transactions), "skipped": total_skipped},
+                message_key="progress.filter_result",
+                message_params={"kept": len(all_transactions), "skipped": total_skipped},
             ))
 
         if not all_transactions:
@@ -560,6 +595,7 @@ class CashReportService:
                     step="done",
                     message="No transactions to process",
                     percentage=100,
+                    message_key="progress.no_transactions",
                 ))
             # Build a helpful warning message
             if total_skipped > 0 and total_found > 0:
@@ -599,6 +635,9 @@ class CashReportService:
                 message=f"Classifying {len(all_transactions)} transactions (rule-based + AI)...",
                 detail="Rule-based keywords first, then AI for unmatched",
                 percentage=35,
+                message_key="progress.classifying",
+                message_params={"count": len(all_transactions)},
+                detail_key="progress.classifying_detail",
             ))
             await asyncio.sleep(0)  # Flush SSE
 
@@ -627,6 +666,8 @@ class CashReportService:
                 message=f"Classified {len(classified_transactions)} transactions (rule: {rule_count}, AI: {ai_count}, cached: {ai_cached_count})",
                 percentage=80,
                 data={"rule_classified": rule_count, "ai_classified": ai_count, "unclassified": unclassified_count},
+                message_key="progress.classified_result",
+                message_params={"count": len(classified_transactions), "rule": rule_count, "ai": ai_count, "cached": ai_cached_count},
             ))
             await asyncio.sleep(0)  # Flush SSE
 
@@ -640,6 +681,7 @@ class CashReportService:
                     step="preparing",
                     message="Copying Cash Balance to Prior Period and clearing Movement...",
                     percentage=82,
+                    message_key="progress.preparing_first_upload",
                 ))
                 await asyncio.sleep(0)
 
@@ -655,6 +697,8 @@ class CashReportService:
                     step="preparing",
                     message=f"Cleared {rows_cleared} old rows, Cash Balance copied",
                     percentage=84,
+                    message_key="progress.prepared_result",
+                    message_params={"rows_cleared": rows_cleared},
                 ))
 
         # Write to Movement sheet
@@ -665,6 +709,9 @@ class CashReportService:
                 message=f"Writing {len(classified_transactions)} transactions to Movement sheet...",
                 detail="Appending data to Excel workbook",
                 percentage=85,
+                message_key="progress.writing",
+                message_params={"count": len(classified_transactions)},
+                detail_key="progress.writing_detail",
             ))
             await asyncio.sleep(0)  # Flush SSE
 
@@ -680,6 +727,8 @@ class CashReportService:
                 step="writing",
                 message=f"Written {rows_added} rows (total: {total_rows})",
                 percentage=95,
+                message_key="progress.written_result",
+                message_params={"rows_added": rows_added, "total": total_rows},
             ))
 
         # Update session stats in database
@@ -699,6 +748,8 @@ class CashReportService:
                     "total_transactions_skipped": total_skipped,
                     "total_rows_in_movement": total_rows,
                 },
+                message_key="progress.upload_complete",
+                message_params={"count": rows_added},
             ))
 
         # Collect AI usage from classifier
@@ -799,6 +850,8 @@ class CashReportService:
                 step="reading",
                 message=f"Reading Movement file: {filename}...",
                 percentage=10,
+                message_key="progress.reading_movement_file",
+                message_params={"filename": filename},
             ))
             await asyncio.sleep(0)
 
@@ -812,6 +865,8 @@ class CashReportService:
                 message=f"Found {found_count} Movement transactions",
                 percentage=20,
                 data={"count": found_count},
+                message_key="progress.found_movement_transactions",
+                message_params={"count": found_count},
             ))
 
         # --- Step 2: Auto-detect format and classify if needed ---
@@ -829,6 +884,8 @@ class CashReportService:
                     step="classifying",
                     message=f"7-col format detected — classifying {len(transactions)} transactions via AI...",
                     percentage=25,
+                    message_key="progress.classifying_movement_ai",
+                    message_params={"count": len(transactions)},
                 ))
                 await asyncio.sleep(0)
 
@@ -844,6 +901,8 @@ class CashReportService:
                     message=f"Classified {classified_count}/{len(transactions)} transactions",
                     percentage=40,
                     data={"classified": classified_count},
+                    message_key="progress.classified_count",
+                    message_params={"classified": classified_count, "total": len(transactions)},
                 ))
 
         # --- Step 3: Filter by date range ---
@@ -855,6 +914,8 @@ class CashReportService:
                     step="filtering",
                     message=f"Filtering by date range {opening_date} - {ending_date}...",
                     percentage=45,
+                    message_key="progress.filtering_movement_by_date",
+                    message_params={"start": str(opening_date), "end": str(ending_date)},
                 ))
             transactions, skipped = self.statement_reader.filter_by_date_range(
                 transactions, opening_date, ending_date
@@ -866,6 +927,8 @@ class CashReportService:
                     step="filtering",
                     message=f"{len(transactions)} within range, {skipped} skipped",
                     percentage=55,
+                    message_key="progress.filter_result",
+                    message_params={"kept": len(transactions), "skipped": skipped},
                 ))
 
         if not transactions:
@@ -875,6 +938,7 @@ class CashReportService:
                     step="done",
                     message="No valid Movement transactions to process",
                     percentage=100,
+                    message_key="progress.no_movement_transactions",
                 ))
             return {
                 "session_id": session_id,
@@ -893,6 +957,7 @@ class CashReportService:
                     step="preparing",
                     message="First upload: Copying Cash Balance to Prior Period...",
                     percentage=60,
+                    message_key="progress.preparing_first_upload",
                 ))
                 await asyncio.sleep(0)
 
@@ -908,6 +973,8 @@ class CashReportService:
                     step="preparing",
                     message=f"Cleared {rows_cleared} old rows, Cash Balance copied",
                     percentage=70,
+                    message_key="progress.prepared_result",
+                    message_params={"rows_cleared": rows_cleared},
                 ))
 
         # --- Step 5: Write to Movement sheet ---
@@ -917,6 +984,8 @@ class CashReportService:
                 step="writing",
                 message=f"Writing {len(transactions)} transactions to Movement sheet...",
                 percentage=75,
+                message_key="progress.writing",
+                message_params={"count": len(transactions)},
             ))
             await asyncio.sleep(0)
 
@@ -931,11 +1000,22 @@ class CashReportService:
                 step="writing",
                 message=f"Written {rows_added} rows (total: {total_rows})",
                 percentage=90,
+                message_key="progress.written_result",
+                message_params={"rows_added": rows_added, "total": total_rows},
             ))
 
-        # --- Step 6: Update session stats ---
+        # --- Step 6: Update session stats & track file ---
         if self.db_session:
             await self._update_session_stats(session_id, rows_added, 1)
+            if rows_added > 0:
+                await self._track_uploaded_file(
+                    session_id=session_id,
+                    filename=filename,
+                    file_size=len(content),
+                    transactions_count=found_count,
+                    transactions_added=rows_added,
+                    transactions_skipped=total_skipped,
+                )
 
         # Emit completion
         if progress_callback:
@@ -952,6 +1032,8 @@ class CashReportService:
                     "total_rows_in_movement": total_rows,
                     "ai_classified": needs_classification,
                 },
+                message_key="progress.movement_upload_complete",
+                message_params={"count": rows_added, "found": found_count},
             ))
 
         result = {
@@ -987,6 +1069,22 @@ class CashReportService:
         normalized = (text or "").lower().replace("_", " ").strip()
         normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
         return re.sub(r"\s+", " ", normalized).strip()
+
+    @staticmethod
+    def _normalize_text_template(text: str) -> str:
+        """
+        Normalize text into a number-stripped template for pattern matching.
+
+        Strips ALL digits so that descriptions differing only by dates,
+        account numbers, invoice numbers, or amounts collapse into one key.
+        E.g. "TAT TOAN HDTG RGLH SO 1209/2025/VCBBD-BWTU KY NGAY 12.09.2025 (TK 1060462381)"
+           → "tat toan hdtg rglh so vcbbd bwtu ky ngay tk"
+        """
+        normalized = (text or "").lower().replace("_", " ").strip()
+        normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
+        normalized = re.sub(r"\d+", "", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
 
     @staticmethod
     def _canonical_nature_for_direction(raw_category: str, is_receipt: bool) -> Optional[str]:
@@ -1051,14 +1149,22 @@ class CashReportService:
 
     def _rebuild_transactions_reference_index(self) -> None:
         """
-        Build exact and fuzzy description->nature lookup tables from Transactions.csv.
+        Build exact, fuzzy, and template description->nature lookup tables from Transactions.csv.
         Direction is derived from nature (receipt/payment) to avoid cross-direction leakage.
+
+        Three normalization levels (each broader than the previous):
+        - exact: whitespace-normalized, keeps punctuation and digits
+        - fuzzy: strips punctuation/underscores, keeps digits
+        - template: strips ALL digits so recurring descriptions with different
+          dates/account-numbers/amounts collapse into one key
         """
         path = TRANSACTIONS_REFERENCE_FILE
         self._transactions_reference_exact = {}
         self._transactions_reference_majority = {}
         self._transactions_reference_fuzzy_exact = {}
         self._transactions_reference_fuzzy_majority = {}
+        self._transactions_reference_template_exact = {}
+        self._transactions_reference_template_majority = {}
         self._transactions_reference_mtime = None
 
         if not path.exists():
@@ -1067,6 +1173,7 @@ class CashReportService:
 
         exact_counters: Dict[Tuple[str, bool], Counter] = defaultdict(Counter)
         fuzzy_counters: Dict[Tuple[str, bool], Counter] = defaultdict(Counter)
+        template_counters: Dict[Tuple[str, bool], Counter] = defaultdict(Counter)
         total_rows = 0
         skipped_rows = 0
 
@@ -1089,6 +1196,7 @@ class CashReportService:
                     is_receipt = self._is_receipt_nature(nature)
                     desc_exact = self._normalize_reference_description(desc_raw)
                     desc_fuzzy = self._normalize_text_for_match(desc_raw)
+                    desc_template = self._normalize_text_template(desc_raw)
                     if not desc_exact and not desc_fuzzy:
                         skipped_rows += 1
                         continue
@@ -1097,6 +1205,8 @@ class CashReportService:
                         exact_counters[(desc_exact, is_receipt)][nature] += 1
                     if desc_fuzzy:
                         fuzzy_counters[(desc_fuzzy, is_receipt)][nature] += 1
+                    if desc_template:
+                        template_counters[(desc_template, is_receipt)][nature] += 1
                     total_rows += 1
         except Exception as e:
             logger.warning(f"Failed to load Transactions.csv reference data: {e}")
@@ -1122,6 +1232,16 @@ class CashReportService:
             if majority_nature:
                 self._transactions_reference_fuzzy_majority[key] = majority_nature
 
+        template_ambiguous = 0
+        for key, counts in template_counters.items():
+            if len(counts) == 1:
+                self._transactions_reference_template_exact[key] = counts.most_common(1)[0][0]
+                continue
+            template_ambiguous += 1
+            majority_nature = self._choose_majority_nature(counts)
+            if majority_nature:
+                self._transactions_reference_template_majority[key] = majority_nature
+
         try:
             self._transactions_reference_mtime = path.stat().st_mtime
         except OSError:
@@ -1129,14 +1249,18 @@ class CashReportService:
 
         logger.info(
             "Transactions reference loaded: rows=%s, exact=%s, exact_majority=%s, "
-            "fuzzy=%s, fuzzy_majority=%s, ambiguous_exact=%s, ambiguous_fuzzy=%s, skipped=%s",
+            "fuzzy=%s, fuzzy_majority=%s, template=%s, template_majority=%s, "
+            "ambiguous_exact=%s, ambiguous_fuzzy=%s, ambiguous_template=%s, skipped=%s",
             total_rows,
             len(self._transactions_reference_exact),
             len(self._transactions_reference_majority),
             len(self._transactions_reference_fuzzy_exact),
             len(self._transactions_reference_fuzzy_majority),
+            len(self._transactions_reference_template_exact),
+            len(self._transactions_reference_template_majority),
             exact_ambiguous,
             fuzzy_ambiguous,
+            template_ambiguous,
             skipped_rows,
         )
 
@@ -1154,10 +1278,84 @@ class CashReportService:
             return
         self._rebuild_transactions_reference_index()
 
+    def _rebuild_tfidf_index(self) -> None:
+        """Fit the TF-IDF classifier from Transactions.csv."""
+        path = TRANSACTIONS_REFERENCE_FILE
+        count = self._tfidf_classifier.load_from_csv(path)
+        try:
+            self._tfidf_mtime = path.stat().st_mtime if path.exists() else None
+        except OSError:
+            self._tfidf_mtime = None
+        logger.info("TF-IDF index rebuilt: %d corpus entries", count)
+
+    def _refresh_tfidf_index_if_needed(self) -> None:
+        """Reload TF-IDF index when Transactions.csv changes."""
+        current_mtime = self._get_transactions_reference_mtime()
+        if current_mtime is None or current_mtime == self._tfidf_mtime:
+            return
+        self._rebuild_tfidf_index()
+
+    def _classify_from_tfidf(self, tx: MovementTransaction) -> Optional[str]:
+        """
+        Classify using TF-IDF similarity against Transactions.csv corpus.
+
+        Business rules enforced BEFORE TF-IDF similarity:
+        - Receipt + settlement/deposit keywords + debit >= 1B → "Internal transfer in"
+        - Receipt + settlement regex patterns → "Internal transfer in"
+        - Payment + open-new regex patterns → "Internal transfer out"
+
+        Returns Nature string if confident match, else None.
+        """
+        is_receipt = bool(tx.debit)
+        description = (tx.description or "").strip()
+
+        # ── Settlement patterns: roundness + amount-based nature ──
+        # >= 1B (any shape)  → Internal transfer in (settlement flow separates principal/interest)
+        # < 1B + round (÷100M) → Internal transfer in (small round deposit)
+        # < 1B + non-round:
+        #   >= 100M          → Receipt from tenants (interest portion)
+        #   < 100M           → Other receipts (interest portion)
+        # NOTE: pre-split interest (non-round >= 1B with companion round tx on same
+        #       account+date) is reclassified in _reclassify_presplit_interest().
+        if is_receipt and any(p.search(description) for p in self._settlement_patterns_compiled):
+            amount = tx.debit or Decimal("0")
+            _UNIT_100M = Decimal("100000000")
+            if amount >= _UNIT_1B:
+                return "Internal transfer in"
+            is_round = amount >= _UNIT_100M and amount % _UNIT_100M == 0
+            if is_round:
+                return "Internal transfer in"
+            elif amount >= _UNIT_100M:
+                return "Receipt from tenants"
+            else:
+                return "Other receipts"
+
+        # ── HDTG/deposit keywords + debit >= 1B → Internal transfer in ──
+        if is_receipt and (tx.debit or Decimal("0")) >= _UNIT_1B:
+            desc_lower = description.lower()
+            if any(kw in desc_lower for kw in HDTG_DEPOSIT_KEYWORDS):
+                return "Internal transfer in"
+
+        # ── Open-new patterns for payments → Internal transfer out ──
+        if not is_receipt:
+            if any(p.search(description) for p in self._open_new_patterns_compiled):
+                return "Internal transfer out"
+
+        # ── TF-IDF similarity fallback ──
+        if not self._tfidf_classifier.is_fitted:
+            return None
+        return self._tfidf_classifier.predict(description, is_receipt)
+
     def _classify_from_transactions_reference(self, tx: MovementTransaction) -> Tuple[Optional[str], Optional[str]]:
         """
         Classify by ground-truth Transactions.csv.
         Returns tuple (nature, source_tag).
+
+        Lookup order (first match wins):
+        1. Exact normalized match (whitespace-insensitive)
+        2. Fuzzy match (strips punctuation, keeps digits)
+        3. Template match (strips ALL digits — catches recurring descriptions
+           with different dates/account-numbers/amounts)
         """
         is_receipt = bool(tx.debit)
         description = tx.description or ""
@@ -1177,6 +1375,14 @@ class CashReportService:
                 return self._transactions_reference_fuzzy_exact[key], "reference_fuzzy_exact"
             if key in self._transactions_reference_fuzzy_majority:
                 return self._transactions_reference_fuzzy_majority[key], "reference_fuzzy_majority"
+
+        desc_template = self._normalize_text_template(description)
+        if desc_template:
+            key = (desc_template, is_receipt)
+            if key in self._transactions_reference_template_exact:
+                return self._transactions_reference_template_exact[key], "reference_template"
+            if key in self._transactions_reference_template_majority:
+                return self._transactions_reference_template_majority[key], "reference_template_majority"
 
         return None, None
 
@@ -1409,13 +1615,43 @@ class CashReportService:
         is_reference = classified_by.startswith("reference")
 
         if is_receipt:
-            if not is_reference and any(pattern.search(description) for pattern in self._settlement_patterns_compiled):
-                principal, _ = self._split_settlement_amount(tx.debit or Decimal("0"))
-                tx.nature = "Internal transfer in" if principal > 0 else "Other receipts"
+            # Settlement patterns (from Settlement.csv) — explicit curated rules, always override.
+            # Roundness + amount-based nature:
+            #   >= 1B (any shape)  → Internal transfer in (settlement flow separates)
+            #   < 1B + round (÷100M) → Internal transfer in (small round deposit)
+            #   < 1B + non-round:
+            #     >= 100M          → Receipt from tenants (interest, NOT settlement)
+            #     < 100M           → Other receipts (interest, NOT settlement)
+            # NOTE: pre-split interest reclassified in _reclassify_presplit_interest().
+            if any(pattern.search(description) for pattern in self._settlement_patterns_compiled):
+                amount = tx.debit or Decimal("0")
+                _UNIT_100M = Decimal("100000000")
+                if amount >= _UNIT_1B:
+                    tx.nature = "Internal transfer in"
+                else:
+                    is_round = amount >= _UNIT_100M and amount % _UNIT_100M == 0
+                    if is_round:
+                        tx.nature = "Internal transfer in"
+                    elif amount >= _UNIT_100M:
+                        tx.nature = "Receipt from tenants"
+                    else:
+                        tx.nature = "Other receipts"
                 tx._classified_by = "rule_guardrail"
-                nature_now = tx.nature
+                return
+
+            # Broad HDTG/deposit guardrail: receipt with deposit-related keywords
+            # AND debit > 1B VND → Internal transfer in (settlement candidate).
+            # Catches cases not covered by specific settlement regex patterns,
+            # e.g. "GUI HDTG SO ...", "HOP DONG TIEN GUI ...", "SAVING ACCOUNT ..."
+            if (tx.debit or Decimal("0")) >= _UNIT_1B:
+                desc_lower = description.lower()
+                if any(kw in desc_lower for kw in HDTG_DEPOSIT_KEYWORDS):
+                    tx.nature = "Internal transfer in"
+                    tx._classified_by = "rule_guardrail"
+                    return
         else:
-            if not is_reference and any(pattern.search(description) for pattern in self._open_new_patterns_compiled):
+            # Open-new patterns (from OpenNew.csv) — explicit curated rules, always override
+            if any(pattern.search(description) for pattern in self._open_new_patterns_compiled):
                 tx.nature = "Internal transfer out"
                 tx._classified_by = "rule_guardrail"
                 return
@@ -1424,6 +1660,17 @@ class CashReportService:
             tx.nature = "Receipt from tenants" if is_receipt else "Operating expense"
             tx._classified_by = "fallback"
             nature_now = tx.nature
+
+        # Don't override ground-truth reference classifications with generic amount rules
+        # EXCEPT for very large round receipts (>= 1B) — at that scale the round amount
+        # is an overwhelming signal for Internal transfer in, stronger than any reference.
+        if is_reference:
+            if is_receipt and (tx.debit or Decimal("0")) >= _UNIT_1B:
+                unit = Decimal("100000000")
+                if tx.debit >= unit and tx.debit % unit == 0:
+                    tx.nature = "Internal transfer in"
+                    tx._classified_by = "rule_guardrail"
+            return
 
         adjusted_nature = self._apply_receipt_amount_nature_constraints(tx, nature_now)
         if adjusted_nature and adjusted_nature != nature_now:
@@ -1530,6 +1777,7 @@ class CashReportService:
         self._refresh_detection_pattern_indexes_if_needed()
         self._refresh_external_keyword_index_if_needed()
         self._refresh_transactions_reference_index_if_needed()
+        self._refresh_tfidf_index_if_needed()
 
         # â”€â”€ Phase 1: Rule-based classification â”€â”€
         needs_ai_indices = []
@@ -1558,6 +1806,14 @@ class CashReportService:
                 rule_classified += 1
                 continue
 
+            # TF-IDF similarity against Transactions.csv reference corpus
+            tfidf_nature = self._classify_from_tfidf(tx)
+            if tfidf_nature:
+                tx.nature = tfidf_nature
+                tx._classified_by = "tfidf"
+                rule_classified += 1
+                continue
+
             nature = self._rule_based_classify(tx.description or "", is_receipt)
             if nature:
                 tx.nature = nature
@@ -1575,6 +1831,8 @@ class CashReportService:
                 step="classifying",
                 message=f"Rule-based: {rule_classified} classified, {len(needs_ai_indices)} need AI...",
                 percentage=40,
+                message_key="progress.rule_based_result",
+                message_params={"classified": rule_classified, "need_ai": len(needs_ai_indices)},
             ))
             await asyncio.sleep(0)
 
@@ -1614,6 +1872,8 @@ class CashReportService:
                         step="classifying",
                         message=f"AI batch {batch_num}/{total_batches} ({len(chunk)} transactions)...",
                         percentage=min(pct, 79),
+                        message_key="progress.ai_batch",
+                        message_params={"batch": batch_num, "total": total_batches, "count": len(chunk)},
                     ))
                     await asyncio.sleep(0)
 
@@ -1646,7 +1906,78 @@ class CashReportService:
         for tx in transactions:
             self._apply_classification_guardrails(tx)
 
+        # ── Phase 3: Detect pre-split interest rows ──
+        # When the bank already split principal/interest into separate rows,
+        # the non-round row is interest and should NOT be "Internal transfer in".
+        # Detected by grouping settlement transactions by (account, date):
+        # if a group has BOTH round and non-round amounts, the non-round ones
+        # are reclassified as interest.
+        self._reclassify_presplit_interest(transactions)
+
         return transactions
+
+    def _reclassify_presplit_interest(self, transactions: List[MovementTransaction]) -> None:
+        """
+        Detect pre-split interest rows among settlement-classified transactions.
+
+        When the bank already separated principal + interest into two rows
+        (same account, same date, same settlement keyword), the non-round row
+        is interest — reclassify it:
+          - >= 100M → Receipt from tenants
+          - < 100M  → Other receipts
+
+        Only reclassifies when a companion ROUND transaction exists in the
+        same (account, date) group, proving the bank already split them.
+        """
+        _UNIT_100M = Decimal("100000000")
+
+        # Collect settlement "Internal transfer in" receipts with their indices
+        settlement_indices: Dict[Tuple[str, Optional[date]], List[int]] = defaultdict(list)
+        for i, tx in enumerate(transactions):
+            if not tx.debit or tx.debit <= 0:
+                continue
+            nature = (tx.nature or "").strip()
+            if nature != "Internal transfer in":
+                continue
+            description = (tx.description or "").strip()
+            if not any(p.search(description) for p in self._settlement_patterns_compiled):
+                continue
+            key = (tx.account or "", tx.date)
+            settlement_indices[key].append(i)
+
+        reclassified = 0
+        for key, indices in settlement_indices.items():
+            if len(indices) < 2:
+                continue  # Single transaction — no companion, keep as-is
+
+            # Check if group has at least one round amount (the principal)
+            has_round = False
+            for idx in indices:
+                amount = transactions[idx].debit or Decimal("0")
+                if amount >= _UNIT_100M and amount % _UNIT_100M == 0:
+                    has_round = True
+                    break
+
+            if not has_round:
+                continue  # No round principal — all are unsplit, keep as-is
+
+            # Reclassify non-round amounts as interest
+            for idx in indices:
+                tx = transactions[idx]
+                amount = tx.debit or Decimal("0")
+                is_round = amount >= _UNIT_100M and amount % _UNIT_100M == 0
+                if is_round:
+                    continue  # Keep round amounts as "Internal transfer in"
+
+                if amount >= _UNIT_100M:
+                    tx.nature = "Receipt from tenants"
+                else:
+                    tx.nature = "Other receipts"
+                tx._classified_by = "presplit_interest"
+                reclassified += 1
+
+        if reclassified > 0:
+            logger.info(f"Reclassified {reclassified} pre-split interest rows")
 
     def _get_pending_file(self, session_id: str) -> Path:
         """Get path for pending classifications JSON file."""
@@ -2096,6 +2427,7 @@ class CashReportService:
                     "uploaded_files": [
                         {
                             "filename": f.original_filename,
+                            "file_size": f.file_size,
                             "transactions_added": f.transactions_added,
                             "transactions_skipped": f.transactions_skipped,
                             "processed_at": f.processed_at.isoformat() if f.processed_at else None,
@@ -2874,6 +3206,12 @@ class CashReportService:
         if nature in SETTLEMENT_BLOCKED_NATURES:
             return False
 
+        # Only "Internal transfer in" is eligible for settlement.
+        # Respect AI classification — if AI says "Receipt from tenants" etc.,
+        # it's not a settlement even if description matches patterns.
+        if nature not in SETTLEMENT_ELIGIBLE_NATURES:
+            return False
+
         description = (tx.description or "").strip()
         desc_lower = description.lower()
         desc_norm = self._normalize_bank_description(description)
@@ -2892,6 +3230,11 @@ class CashReportService:
         # Check simple settlement keywords
         for keyword in SETTLEMENT_KEYWORDS:
             if keyword in desc_lower:
+                return True
+
+        # HDTG/deposit keywords with large amount (>= 1B) → settlement candidate
+        if (tx.debit or Decimal("0")) >= _UNIT_1B:
+            if any(kw in desc_lower for kw in HDTG_DEPOSIT_KEYWORDS):
                 return True
 
         # NOTE: Dual-entity check removed â€” it caused false positives on

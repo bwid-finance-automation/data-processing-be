@@ -23,3 +23,5 @@ GROUP A — Tất toán / Rút tiền (Current Account ← Savings): 23 patterns
 21;DONG HDTG;DONG\s*HDTG;Đóng HDTG
 22;TRA GOC + TIEN GUI;TRA\s*GOC.*TK\s*TIEN\s*GUI;Trả gốc TK tiền gửi
 23;TRA GOC + HDTG;TRA\s*GOC.*HDTG;Trả gốc HDTG
+24;CA - TARGET;CA\s*-\s*TARGET;CA - TARGET
+

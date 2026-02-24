@@ -1402,6 +1402,7 @@ class OpenpyxlHandler:
         sst = self._load_shared_strings(zip_data)
 
         rows_to_remove = set()
+        settled_rows_removed = set()  # Only rows matching settled accounts (for return count)
         shared_formulas = {}  # si -> (formula_text, master_row)
 
         for row_num in sorted(row_positions.keys()):
@@ -1452,10 +1453,11 @@ class OpenpyxlHandler:
                     pass
                 if acc_str in normalized_settled:
                     rows_to_remove.add(row_num)
+                    settled_rows_removed.add(row_num)
                     logger.info(f"Marking Saving Account row {row_num} for removal (account={acc_str})")
             else:
                 # Empty row (no account number) — leftover from previous settlement
-                # that cleared content but didn't delete the row. Remove it.
+                # that cleared content but didn't delete the row. Silently remove it.
                 rows_to_remove.add(row_num)
                 logger.debug(f"Marking empty Saving Account row {row_num} for removal")
 
@@ -1552,8 +1554,13 @@ class OpenpyxlHandler:
             extra_entries=extra_entries,
         )
 
-        logger.info(f"Removed {len(rows_to_remove)} rows from Saving Account sheet")
-        return len(rows_to_remove)
+        empty_removed = len(rows_to_remove) - len(settled_rows_removed)
+        logger.info(
+            f"Removed {len(rows_to_remove)} rows from Saving Account sheet "
+            f"({len(settled_rows_removed)} settled + {empty_removed} empty)"
+        )
+        # Return only the count of settled account rows (not empty/garbage rows)
+        return len(settled_rows_removed)
 
     def remove_rows_by_source(self, file_path: Path, source_name: str) -> int:
         """
@@ -3441,6 +3448,91 @@ class OpenpyxlHandler:
         return big_x_row
 
     @staticmethod
+    def _clear_x_marker_cell(sheet_xml: bytes, col_letter: str, row_num: int) -> bytes:
+        """Clear the Big X marker cell from a specific row without deleting the row.
+
+        Replaces the cell content with an empty self-closing cell, preserving the
+        style attribute if one exists.
+        """
+        rn = str(row_num).encode()
+        col = col_letter.encode()
+
+        # Extract existing style from the cell (if any)
+        style_m = re.search(
+            rb'<c\s[^>]*r="' + col + rn + rb'"[^>]*s="(\d+)"', sheet_xml
+        )
+        if style_m:
+            empty_cell = b'<c r="' + col + rn + b'" s="' + style_m.group(1) + b'"/>'
+        else:
+            empty_cell = b'<c r="' + col + rn + b'"/>'
+
+        # Pattern 1: cell with content <c ... r="COL{row}" ...>...</c>
+        pat_content = rb'<c\s[^>]*r="' + col + rn + rb'"[^>]*>.*?</c>'
+        # Pattern 2: self-closing <c ... r="COL{row}" ... />
+        pat_self = rb'<c\s[^>]*r="' + col + rn + rb'"[^>]*/\s*>'
+
+        new_xml, n = re.subn(pat_content, empty_cell, sheet_xml, count=1, flags=re.DOTALL)
+        if n == 0:
+            new_xml, _ = re.subn(pat_self, empty_cell, sheet_xml, count=1)
+
+        return new_xml
+
+    @staticmethod
+    def _set_x_marker_on_row(
+        sheet_xml: bytes, col_letter: str, row_num: int, style: str = None,
+    ) -> bytes:
+        """Place the Big X marker on a specific row's column.
+
+        If the cell already exists, replaces its content with 'X',
+        preserving the existing cell's style.
+        If the cell doesn't exist in the row, appends it before </row>
+        with no style (inherits column/row default).
+        """
+        rn = str(row_num).encode()
+        col = col_letter.encode()
+
+        # Preserve existing cell's style if no explicit style given
+        if style is None:
+            style_m = re.search(
+                rb'<c\s[^>]*r="' + col + rn + rb'"[^>]*s="(\d+)"', sheet_xml
+            )
+            style = style_m.group(1).decode() if style_m else None
+
+        if style:
+            style_attr = b' s="' + style.encode() + b'"'
+        else:
+            style_attr = b''
+
+        x_cell = (
+            b'<c r="' + col + rn + b'"' + style_attr
+            + b' t="inlineStr"><is><t>X</t></is></c>'
+        )
+
+        # Locate the row
+        row_pat = rb'<row[^>]*\sr="' + rn + rb'"[^>]*>.*?</row>'
+        row_m = re.search(row_pat, sheet_xml, re.DOTALL)
+        if not row_m:
+            return sheet_xml
+
+        row_bytes = row_m.group(0)
+
+        # Pattern for existing cell (self-closing)
+        pat_self = rb'<c\s[^>]*r="' + col + rn + rb'"[^>]*/\s*>'
+        # Pattern for existing cell (with content)
+        pat_content = rb'<c\s[^>]*r="' + col + rn + rb'"[^>]*>.*?</c>'
+
+        if re.search(pat_self, row_bytes):
+            row_bytes = re.sub(pat_self, x_cell, row_bytes, count=1)
+        elif re.search(pat_content, row_bytes, re.DOTALL):
+            row_bytes = re.sub(pat_content, x_cell, row_bytes, count=1, flags=re.DOTALL)
+        else:
+            # Cell doesn't exist — append before </row> and sort to fix column order
+            row_bytes = row_bytes.replace(b'</row>', x_cell + b'</row>', 1)
+            row_bytes = OpenpyxlHandler._sort_row_cells(row_bytes)
+
+        return sheet_xml[:row_m.start()] + row_bytes + sheet_xml[row_m.end():]
+
+    @staticmethod
     def _find_boundary_row(sheet_xml: bytes, after_row: int, zip_data: bytes = None) -> int:
         """Find the boundary row (all 'x' columns) after a given row.
 
@@ -4359,14 +4451,14 @@ class OpenpyxlHandler:
         )
         cells.append(
             f'<c r="B{rn}" s="921" t="str">'
-            f'<f>_xlfn.XLOOKUP(Table1218[[#This Row],[ACCOUNT NUMBER]],Table2[Account No.],Table2[BRANCH],"recheck",0)</f></c>'
+            f'<f>_xlfn.XLOOKUP([@[ACCOUNT NUMBER]],Table2[Account No.],Table2[BRANCH],"recheck",0)</f></c>'
         )
         cells.append(
             f'<c r="C{rn}" s="1142" t="inlineStr"><is><t>{_esc(account_no)}</t></is></c>'
         )
         cells.append(
             f'<c r="D{rn}" s="922" t="str">'
-            f'<f>_xlfn.XLOOKUP(Table1218[[#This Row],[ACCOUNT NUMBER]],Table2[Account No.],Table2[ACCOUNT TYPE],"recheck",0)</f></c>'
+            f'<f>_xlfn.XLOOKUP([@[ACCOUNT NUMBER]],Table2[Account No.],Table2[ACCOUNT TYPE],"recheck",0)</f></c>'
         )
         cells.append(
             f'<c r="E{rn}" s="1130" t="inlineStr"><is><t>{_esc(currency)}</t></is></c>'
@@ -4374,8 +4466,8 @@ class OpenpyxlHandler:
         cells.append(
             f'<c r="F{rn}" s="926">'
             f'<f>SUMIFS(Table11[CLOSING BALANCE (VND)2],Table11[ACCOUNT NUMBER],'
-            f'Table1218[[#This Row],[ACCOUNT NUMBER]],Table11[CURRENCY],'
-            f'Table1218[[#This Row],[CURRENCY]])</f></c>'
+            f'[@[ACCOUNT NUMBER]],Table11[CURRENCY],'
+            f'[@[CURRENCY]])</f></c>'
         )
         cells.append(f'<c r="G{rn}" s="926"/>')
         if term_months:
@@ -5228,9 +5320,22 @@ class OpenpyxlHandler:
             x_row = self._find_x_marker_row(ac_xml, "J", zip_data=zip_data)
             if not x_row:
                 x_row = self._find_last_xml_row_num(ac_xml)
+
+            # ── Relocate Big X to actual last data row ──
+            old_x_row_ac = x_row
+            ac_xml = self._clear_x_marker_cell(ac_xml, "J", x_row)
+            # Search the entire sheet for the real last data row (not just before x_row)
+            last_xml_row_ac = self._find_last_xml_row_num(ac_xml)
+            last_data_ac = self._find_last_data_row_before(ac_xml, last_xml_row_ac + 1, "B")
+            if last_data_ac:
+                ac_xml = self._set_x_marker_on_row(ac_xml, "J", last_data_ac)
+                x_row = last_data_ac
+                logger.info(f"Acc_Char: relocated Big X from row {old_x_row_ac} to last data row {last_data_ac}")
+
             source_row = self._find_last_data_row_before(ac_xml, x_row + 1, "B")
             if not source_row:
                 source_row = 4
+            last_inserted_ac_row = 0
 
             src_pat = rb'<row[^>]*\sr="' + str(source_row).encode() + rb'"[^>]*>.*?</row>'
             src_m = re.search(src_pat, ac_xml, re.DOTALL)
@@ -5315,7 +5420,13 @@ class OpenpyxlHandler:
                 max_row = max(max_row, row_num)
                 current_last_row = max(current_last_row, row_num)
                 ac_added += 1
+                last_inserted_ac_row = row_num
                 logger.info(f"Batch Acc_Char: added {acc} at row {row_num}")
+
+            # Big X stays at the relocated position (on top of newly inserted rows).
+            # It is NOT moved to the last inserted row.
+            if ac_added > 0:
+                logger.info(f"Batch Acc_Char: inserted {ac_added} rows after Big X at row {x_row}")
 
             # Expand Table2 if needed
             if max_row:
@@ -5332,6 +5443,18 @@ class OpenpyxlHandler:
             x_row = self._find_x_marker_row(sa_xml, "AD", zip_data=zip_data)
             if not x_row:
                 x_row = self._find_last_xml_row_num(sa_xml)
+
+            # ── Relocate Big X to actual last data row ──
+            old_x_row_sa = x_row
+            sa_xml = self._clear_x_marker_cell(sa_xml, "AD", x_row)
+            # Search the entire sheet for the real last data row
+            last_xml_row_sa = self._find_last_xml_row_num(sa_xml)
+            last_data_sa = self._find_last_data_row_before(sa_xml, last_xml_row_sa + 1, "C")
+            if last_data_sa:
+                sa_xml = self._set_x_marker_on_row(sa_xml, "AD", last_data_sa)
+                x_row = last_data_sa
+                logger.info(f"Saving Account: relocated Big X from row {old_x_row_sa} to last data row {last_data_sa}")
+
             source_row = self._find_last_data_row_before(sa_xml, x_row + 1, "C")
             if not source_row:
                 source_row = 4
@@ -5482,23 +5605,9 @@ class OpenpyxlHandler:
                 last_inserted_sa_row = row_num
                 logger.info(f"Batch Saving: added {acc} at row {row_num}")
 
-            # Put the Big X marker on the last inserted row (bold + center, style 35)
-            if sa_added > 0 and last_inserted_sa_row:
-                x_cell = f'<c r="AD{last_inserted_sa_row}" s="35" t="inlineStr"><is><t>X</t></is></c>'.encode()
-                x_cell_pat = rb'<c\s[^>]*r="AD' + str(last_inserted_sa_row).encode() + rb'"[^>]*/\s*>'
-                x_cell_pat2 = rb'<c\s[^>]*r="AD' + str(last_inserted_sa_row).encode() + rb'"[^>]*>.*?</c>'
-                row_pat = rb'<row[^>]*\sr="' + str(last_inserted_sa_row).encode() + rb'"[^>]*>.*?</row>'
-                row_m = re.search(row_pat, sa_xml, re.DOTALL)
-                if row_m:
-                    row_bytes = row_m.group(0)
-                    if re.search(x_cell_pat, row_bytes):
-                        row_bytes = re.sub(x_cell_pat, x_cell, row_bytes, count=1)
-                    elif re.search(x_cell_pat2, row_bytes, re.DOTALL):
-                        row_bytes = re.sub(x_cell_pat2, x_cell, row_bytes, count=1, flags=re.DOTALL)
-                    else:
-                        row_bytes = row_bytes.replace(b'</row>', x_cell + b'</row>', 1)
-                    sa_xml = sa_xml[:row_m.start()] + row_bytes + sa_xml[row_m.end():]
-                logger.info(f"Batch Saving: Big X marker set on last inserted row {last_inserted_sa_row}")
+            # Big X stays at the relocated position (on top of newly inserted rows).
+            if sa_added > 0:
+                logger.info(f"Batch Saving: inserted {sa_added} rows after Big X at row {x_row}")
 
             # Expand Table1218 if needed
             if max_row:
@@ -5515,9 +5624,22 @@ class OpenpyxlHandler:
             x_row = self._find_x_marker_row(cb_xml, "Z", zip_data=zip_data)
             if not x_row:
                 x_row = self._find_last_xml_row_num(cb_xml)
+
+            # ── Relocate Big X to actual last data row ──
+            old_x_row_cb = x_row
+            cb_xml = self._clear_x_marker_cell(cb_xml, "Z", x_row)
+            # Search the entire sheet for the real last data row
+            last_xml_row_cb = self._find_last_xml_row_num(cb_xml)
+            last_data_cb = self._find_last_data_row_before(cb_xml, last_xml_row_cb + 1, "C")
+            if last_data_cb:
+                cb_xml = self._set_x_marker_on_row(cb_xml, "Z", last_data_cb)
+                x_row = last_data_cb
+                logger.info(f"Cash Balance: relocated Big X from row {old_x_row_cb} to last data row {last_data_cb}")
+
             source_row = self._find_last_data_row_before(cb_xml, x_row + 1, "C")
             if not source_row:
                 source_row = 4
+            last_inserted_cb_row = 0
 
             src_pat = rb'<row[^>]*\sr="' + str(source_row).encode() + rb'"[^>]*>.*?</row>'
             src_m = re.search(src_pat, cb_xml, re.DOTALL)
@@ -5601,7 +5723,12 @@ class OpenpyxlHandler:
                 max_row = max(max_row, row_num)
                 current_last_row = max(current_last_row, row_num)
                 cb_added += 1
+                last_inserted_cb_row = row_num
                 logger.info(f"Batch Cash Balance: added {acc} at row {row_num}")
+
+            # Big X stays at the relocated position (on top of newly inserted rows).
+            if cb_added > 0:
+                logger.info(f"Batch Cash Balance: inserted {cb_added} rows after Big X at row {x_row}")
 
             # Expand Table11 if needed
             if max_row:

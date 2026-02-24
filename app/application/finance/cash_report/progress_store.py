@@ -22,6 +22,10 @@ class ProgressEvent:
         detail: str = "",
         percentage: int = 0,
         data: Optional[Dict[str, Any]] = None,
+        message_key: str = "",
+        message_params: Optional[Dict[str, Any]] = None,
+        detail_key: str = "",
+        detail_params: Optional[Dict[str, Any]] = None,
     ):
         self.event_type = event_type  # step_start | step_update | step_complete | complete | error
         self.step = step              # reading | filtering | classifying | writing | done | error
@@ -29,16 +33,27 @@ class ProgressEvent:
         self.detail = detail
         self.percentage = percentage
         self.data = data or {}
+        self.message_key = message_key
+        self.message_params = message_params or {}
+        self.detail_key = detail_key
+        self.detail_params = detail_params or {}
 
     def to_json(self) -> str:
-        return json.dumps({
+        payload = {
             "type": self.event_type,
             "step": self.step,
             "message": self.message,
             "detail": self.detail,
             "percentage": self.percentage,
             "data": self.data,
-        })
+        }
+        if self.message_key:
+            payload["message_key"] = self.message_key
+            payload["message_params"] = self.message_params
+        if self.detail_key:
+            payload["detail_key"] = self.detail_key
+            payload["detail_params"] = self.detail_params
+        return json.dumps(payload)
 
 
 class ProgressStore:
