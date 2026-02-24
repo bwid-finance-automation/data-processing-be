@@ -298,6 +298,62 @@ class CashReportService:
         self._rebuild_transactions_reference_index()
         self._rebuild_tfidf_index()
 
+    def _log_progress_event(
+        self,
+        *,
+        process: str,
+        event: ProgressEvent,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Mirror progress events to terminal logs for easier debugging."""
+        detail = (event.detail or "").strip()
+        data_keys = ",".join(sorted(str(k) for k in event.data.keys())) if event.data else "-"
+        logger.info(
+            "[%s] event=%s step=%s pct=%s session=%s message=%s%s data_keys=%s",
+            process,
+            event.event_type,
+            event.step,
+            event.percentage,
+            session_id or "-",
+            event.message,
+            f" detail={detail}" if detail else "",
+            data_keys,
+        )
+
+    def _emit_progress(
+        self,
+        *,
+        process: str,
+        progress_callback: Optional[callable],
+        event_type: str,
+        step: str,
+        message: str,
+        detail: str = "",
+        percentage: int = 0,
+        data: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+        message_key: str = "",
+        message_params: Optional[Dict[str, Any]] = None,
+        detail_key: str = "",
+        detail_params: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Build, log, and optionally emit a progress event."""
+        event = ProgressEvent(
+            event_type=event_type,
+            step=step,
+            message=message,
+            detail=detail,
+            percentage=percentage,
+            data=data or {},
+            message_key=message_key,
+            message_params=message_params,
+            detail_key=detail_key,
+            detail_params=detail_params,
+        )
+        self._log_progress_event(process=process, event=event, session_id=session_id)
+        if progress_callback:
+            progress_callback(event)
+
     async def _verify_session_owner(self, session_id: str, user_id: int) -> None:
         """
         Verify that the session belongs to the given user.
@@ -444,6 +500,59 @@ class CashReportService:
         Returns:
             Processing result summary
         """
+        import time as _time
+
+        _started_at = _time.monotonic()
+        logger.info(
+            "Upload bank statements started: session_id=%s files=%s filter_by_date=%s has_progress_callback=%s user_id=%s",
+            session_id,
+            len(files),
+            filter_by_date,
+            bool(progress_callback),
+            user_id,
+        )
+
+        def _finish(result: Dict[str, Any]) -> Dict[str, Any]:
+            elapsed_ms = int((_time.monotonic() - _started_at) * 1000)
+            logger.info(
+                "Upload bank statements finished: session_id=%s added=%s skipped=%s files_processed=%s elapsed_ms=%s",
+                session_id,
+                result.get("total_transactions_added", 0),
+                result.get("total_transactions_skipped", 0),
+                result.get("files_processed", len(files)),
+                elapsed_ms,
+            )
+            return result
+
+        def emit(
+            event_type: str,
+            step: str,
+            message: str,
+            *,
+            detail: str = "",
+            percentage: int = 0,
+            data: Optional[Dict[str, Any]] = None,
+            message_key: str = "",
+            message_params: Optional[Dict[str, Any]] = None,
+            detail_key: str = "",
+            detail_params: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            self._emit_progress(
+                process="upload_bank_statements",
+                progress_callback=progress_callback,
+                session_id=session_id,
+                event_type=event_type,
+                step=step,
+                message=message,
+                detail=detail,
+                percentage=percentage,
+                data=data,
+                message_key=message_key,
+                message_params=message_params,
+                detail_key=detail_key,
+                detail_params=detail_params,
+            )
+
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
@@ -484,18 +593,17 @@ class CashReportService:
         for file_idx, (filename, content) in enumerate(files):
             try:
                 # Emit progress: reading file
-                if progress_callback:
-                    progress_callback(ProgressEvent(
-                        event_type="step_start",
-                        step="reading",
-                        message=f"Reading {filename}...",
-                        detail=f"Parsing transactions from file {file_idx + 1}/{len(files)}",
-                        percentage=int((file_idx) / len(files) * 20),
-                        message_key="progress.reading_file",
-                        message_params={"filename": filename},
-                        detail_key="progress.parsing_file_n_of_total",
-                        detail_params={"n": file_idx + 1, "total": len(files)},
-                    ))
+                emit(
+                    "step_start",
+                    "reading",
+                    f"Reading {filename}...",
+                    detail=f"Parsing transactions from file {file_idx + 1}/{len(files)}",
+                    percentage=int((file_idx) / len(files) * 20),
+                    message_key="progress.reading_file",
+                    message_params={"filename": filename},
+                    detail_key="progress.parsing_file_n_of_total",
+                    detail_params={"n": file_idx + 1, "total": len(files)},
+                )
 
                 # Read transactions from parsed Excel
                 transactions = self.statement_reader.read_from_bytes(content, "Automation")
@@ -503,16 +611,15 @@ class CashReportService:
                 total_found += found_count
 
                 # Emit progress: file read complete
-                if progress_callback:
-                    progress_callback(ProgressEvent(
-                        event_type="step_complete",
-                        step="reading",
-                        message=f"Found {found_count} transactions in {filename}",
-                        percentage=int((file_idx + 1) / len(files) * 20),
-                        data={"filename": filename, "count": found_count},
-                        message_key="progress.found_transactions_in_file",
-                        message_params={"count": found_count, "filename": filename},
-                    ))
+                emit(
+                    "step_complete",
+                    "reading",
+                    f"Found {found_count} transactions in {filename}",
+                    percentage=int((file_idx + 1) / len(files) * 20),
+                    data={"filename": filename, "count": found_count},
+                    message_key="progress.found_transactions_in_file",
+                    message_params={"count": found_count, "filename": filename},
+                )
 
                 # Collect file date range before filtering
                 file_dates = [tx.date for tx in transactions if tx.date]
@@ -565,38 +672,37 @@ class CashReportService:
                 })
 
         # Emit filtering summary
-        if progress_callback and filter_by_date and opening_date and ending_date:
-            progress_callback(ProgressEvent(
-                event_type="step_start",
-                step="filtering",
-                message=f"Filtering {total_found} transactions by date range",
+        if filter_by_date and opening_date and ending_date:
+            emit(
+                "step_start",
+                "filtering",
+                f"Filtering {total_found} transactions by date range",
                 detail=f"{opening_date.strftime('%d/%m/%Y')} - {ending_date.strftime('%d/%m/%Y')}",
                 percentage=25,
                 message_key="progress.filtering_by_date",
                 message_params={"count": total_found},
                 detail_key="progress.date_range",
                 detail_params={"start": opening_date.strftime('%d/%m/%Y'), "end": ending_date.strftime('%d/%m/%Y')},
-            ))
-            progress_callback(ProgressEvent(
-                event_type="step_complete",
-                step="filtering",
-                message=f"{len(all_transactions)} transactions within range, {total_skipped} skipped",
+            )
+            emit(
+                "step_complete",
+                "filtering",
+                f"{len(all_transactions)} transactions within range, {total_skipped} skipped",
                 percentage=30,
                 data={"kept": len(all_transactions), "skipped": total_skipped},
                 message_key="progress.filter_result",
                 message_params={"kept": len(all_transactions), "skipped": total_skipped},
-            ))
+            )
 
         if not all_transactions:
             # Emit completion even when no transactions
-            if progress_callback:
-                progress_callback(ProgressEvent(
-                    event_type="complete",
-                    step="done",
-                    message="No transactions to process",
-                    percentage=100,
-                    message_key="progress.no_transactions",
-                ))
+            emit(
+                "complete",
+                "done",
+                "No transactions to process",
+                percentage=100,
+                message_key="progress.no_transactions",
+            )
             # Build a helpful warning message
             if total_skipped > 0 and total_found > 0:
                 message = (
@@ -625,24 +731,23 @@ class CashReportService:
                         "start": opening_date.isoformat(),
                         "end": ending_date.isoformat(),
                     }
-            return result
+            return _finish(result)
 
         # Classify transactions (rule-based first, AI for leftovers)
+        emit(
+            "step_start",
+            "classifying",
+            f"Classifying {len(all_transactions)} transactions (rule-based + AI)...",
+            detail="Rule-based keywords first, then AI for unmatched",
+            percentage=35,
+            message_key="progress.classifying",
+            message_params={"count": len(all_transactions)},
+            detail_key="progress.classifying_detail",
+        )
         if progress_callback:
-            progress_callback(ProgressEvent(
-                event_type="step_start",
-                step="classifying",
-                message=f"Classifying {len(all_transactions)} transactions (rule-based + AI)...",
-                detail="Rule-based keywords first, then AI for unmatched",
-                percentage=35,
-                message_key="progress.classifying",
-                message_params={"count": len(all_transactions)},
-                detail_key="progress.classifying_detail",
-            ))
             await asyncio.sleep(0)  # Flush SSE
 
         logger.info(f"Classifying {len(all_transactions)} transactions...")
-        import time as _time
         _classify_start = _time.monotonic()
         classified_transactions = await self._classify_transactions(
             all_transactions,
@@ -659,30 +764,30 @@ class CashReportService:
         logger.info(f"Classification stats: rule={rule_count}, ai={ai_count}, "
                      f"ai_cached={ai_cached_count}, unclassified={unclassified_count}")
 
+        emit(
+            "step_complete",
+            "classifying",
+            f"Classified {len(classified_transactions)} transactions (rule: {rule_count}, AI: {ai_count}, cached: {ai_cached_count})",
+            percentage=80,
+            data={"rule_classified": rule_count, "ai_classified": ai_count, "unclassified": unclassified_count},
+            message_key="progress.classified_result",
+            message_params={"count": len(classified_transactions), "rule": rule_count, "ai": ai_count, "cached": ai_cached_count},
+        )
         if progress_callback:
-            progress_callback(ProgressEvent(
-                event_type="step_complete",
-                step="classifying",
-                message=f"Classified {len(classified_transactions)} transactions (rule: {rule_count}, AI: {ai_count}, cached: {ai_cached_count})",
-                percentage=80,
-                data={"rule_classified": rule_count, "ai_classified": ai_count, "unclassified": unclassified_count},
-                message_key="progress.classified_result",
-                message_params={"count": len(classified_transactions), "rule": rule_count, "ai": ai_count, "cached": ai_cached_count},
-            ))
             await asyncio.sleep(0)  # Flush SSE
 
         # Prepare Movement sheet (copy Cash Balance â†’ Prior Period + clear old data)
         # Only on first upload (check DB total_transactions, not Excel rows which include template data)
         is_first_upload = await self._is_first_upload(session_id)
         if is_first_upload:
+            emit(
+                "step_start",
+                "preparing",
+                "Copying Cash Balance to Prior Period and clearing Movement...",
+                percentage=82,
+                message_key="progress.preparing_first_upload",
+            )
             if progress_callback:
-                progress_callback(ProgressEvent(
-                    event_type="step_start",
-                    step="preparing",
-                    message="Copying Cash Balance to Prior Period and clearing Movement...",
-                    percentage=82,
-                    message_key="progress.preparing_first_upload",
-                ))
                 await asyncio.sleep(0)
 
             from .openpyxl_handler import get_openpyxl_handler
@@ -691,28 +796,27 @@ class CashReportService:
                 handler.prepare_movement_for_writing, working_file
             )
 
-            if progress_callback:
-                progress_callback(ProgressEvent(
-                    event_type="step_complete",
-                    step="preparing",
-                    message=f"Cleared {rows_cleared} old rows, Cash Balance copied",
-                    percentage=84,
-                    message_key="progress.prepared_result",
-                    message_params={"rows_cleared": rows_cleared},
-                ))
+            emit(
+                "step_complete",
+                "preparing",
+                f"Cleared {rows_cleared} old rows, Cash Balance copied",
+                percentage=84,
+                message_key="progress.prepared_result",
+                message_params={"rows_cleared": rows_cleared},
+            )
 
         # Write to Movement sheet
+        emit(
+            "step_start",
+            "writing",
+            f"Writing {len(classified_transactions)} transactions to Movement sheet...",
+            detail="Appending data to Excel workbook",
+            percentage=85,
+            message_key="progress.writing",
+            message_params={"count": len(classified_transactions)},
+            detail_key="progress.writing_detail",
+        )
         if progress_callback:
-            progress_callback(ProgressEvent(
-                event_type="step_start",
-                step="writing",
-                message=f"Writing {len(classified_transactions)} transactions to Movement sheet...",
-                detail="Appending data to Excel workbook",
-                percentage=85,
-                message_key="progress.writing",
-                message_params={"count": len(classified_transactions)},
-                detail_key="progress.writing_detail",
-            ))
             await asyncio.sleep(0)  # Flush SSE
 
         writer = MovementDataWriter(working_file)
@@ -721,42 +825,40 @@ class CashReportService:
             writer.append_transactions, classified_transactions
         )
 
-        if progress_callback:
-            progress_callback(ProgressEvent(
-                event_type="step_complete",
-                step="writing",
-                message=f"Written {rows_added} rows (total: {total_rows})",
-                percentage=95,
-                message_key="progress.written_result",
-                message_params={"rows_added": rows_added, "total": total_rows},
-            ))
+        emit(
+            "step_complete",
+            "writing",
+            f"Written {rows_added} rows (total: {total_rows})",
+            percentage=95,
+            message_key="progress.written_result",
+            message_params={"rows_added": rows_added, "total": total_rows},
+        )
 
         # Update session stats in database
         if self.db_session:
             await self._update_session_stats(session_id, rows_added, len(files))
 
         # Emit completion
-        if progress_callback:
-            progress_callback(ProgressEvent(
-                event_type="complete",
-                step="done",
-                message=f"Upload complete! {rows_added} transactions processed.",
-                percentage=100,
-                data={
-                    "files_processed": len(files),
-                    "total_transactions_added": rows_added,
-                    "total_transactions_skipped": total_skipped,
-                    "total_rows_in_movement": total_rows,
-                },
-                message_key="progress.upload_complete",
-                message_params={"count": rows_added},
-            ))
+        emit(
+            "complete",
+            "done",
+            f"Upload complete! {rows_added} transactions processed.",
+            percentage=100,
+            data={
+                "files_processed": len(files),
+                "total_transactions_added": rows_added,
+                "total_transactions_skipped": total_skipped,
+                "total_rows_in_movement": total_rows,
+            },
+            message_key="progress.upload_complete",
+            message_params={"count": rows_added},
+        )
 
         # Collect AI usage from classifier
         ai_usage = self.ai_classifier.get_and_reset_usage()
         ai_usage["processing_time_ms"] = _classify_elapsed_ms
 
-        return {
+        return _finish({
             "session_id": session_id,
             "files_processed": len(files),
             "total_transactions_added": rows_added,
@@ -770,7 +872,7 @@ class CashReportService:
                 "ai_cached": ai_cached_count,
                 "unclassified": unclassified_count,
             },
-        }
+        })
 
     # ------------------------------------------------------------------ #
     #  Upload Movement NS/Manual file                                      #
@@ -2045,6 +2147,51 @@ class CashReportService:
         Returns:
             Preview with classified transactions and stats
         """
+        import time as _time
+
+        _started_at = _time.monotonic()
+        logger.info(
+            "Upload preview started: session_id=%s files=%s filter_by_date=%s has_progress_callback=%s user_id=%s",
+            session_id,
+            len(files),
+            filter_by_date,
+            bool(progress_callback),
+            user_id,
+        )
+
+        def _finish(result: Dict[str, Any]) -> Dict[str, Any]:
+            elapsed_ms = int((_time.monotonic() - _started_at) * 1000)
+            logger.info(
+                "Upload preview finished: session_id=%s status=%s total_transactions=%s skipped=%s elapsed_ms=%s",
+                session_id,
+                result.get("status"),
+                result.get("total_transactions", 0),
+                result.get("total_transactions_skipped", 0),
+                elapsed_ms,
+            )
+            return result
+
+        def emit(
+            event_type: str,
+            step: str,
+            message: str,
+            *,
+            detail: str = "",
+            percentage: int = 0,
+            data: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            self._emit_progress(
+                process="upload_preview",
+                progress_callback=progress_callback,
+                session_id=session_id,
+                event_type=event_type,
+                step=step,
+                message=message,
+                detail=detail,
+                percentage=percentage,
+                data=data,
+            )
+
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
@@ -2078,25 +2225,23 @@ class CashReportService:
 
         for file_idx, (filename, content) in enumerate(files):
             try:
-                if progress_callback:
-                    progress_callback(ProgressEvent(
-                        event_type="step_start",
-                        step="reading",
-                        message=f"Reading {filename}...",
-                        percentage=int((file_idx) / len(files) * 20),
-                    ))
+                emit(
+                    "step_start",
+                    "reading",
+                    f"Reading {filename}...",
+                    percentage=int((file_idx) / len(files) * 20),
+                )
 
                 transactions = self.statement_reader.read_from_bytes(content, "Automation")
                 found_count = len(transactions)
                 total_found += found_count
 
-                if progress_callback:
-                    progress_callback(ProgressEvent(
-                        event_type="step_complete",
-                        step="reading",
-                        message=f"Found {found_count} transactions in {filename}",
-                        percentage=int((file_idx + 1) / len(files) * 20),
-                    ))
+                emit(
+                    "step_complete",
+                    "reading",
+                    f"Found {found_count} transactions in {filename}",
+                    percentage=int((file_idx + 1) / len(files) * 20),
+                )
 
                 # Filter by date if enabled
                 skipped = 0
@@ -2128,12 +2273,8 @@ class CashReportService:
                 file_results.append({"filename": filename, "status": "error", "error": str(e)})
 
         if not all_transactions:
-            if progress_callback:
-                progress_callback(ProgressEvent(
-                    event_type="complete", step="done",
-                    message="No transactions to process", percentage=100,
-                ))
-            return {
+            emit("complete", "done", "No transactions to process", percentage=100)
+            return _finish({
                 "session_id": session_id,
                 "status": "no_transactions",
                 "files_processed": len(files),
@@ -2141,18 +2282,18 @@ class CashReportService:
                 "total_transactions_skipped": total_skipped,
                 "file_results": file_results,
                 "transactions": [],
-            }
+            })
 
         # Classify (rule-based + AI)
+        emit(
+            "step_start",
+            "classifying",
+            f"Classifying {len(all_transactions)} transactions...",
+            percentage=35,
+        )
         if progress_callback:
-            progress_callback(ProgressEvent(
-                event_type="step_start", step="classifying",
-                message=f"Classifying {len(all_transactions)} transactions...",
-                percentage=35,
-            ))
             await asyncio.sleep(0)
 
-        import time as _time
         _classify_start = _time.monotonic()
         classified = await self._classify_transactions(all_transactions, progress_callback)
         _classify_elapsed_ms = (_time.monotonic() - _classify_start) * 1000
@@ -2177,6 +2318,16 @@ class CashReportService:
 
         # Save pending (don't write to Excel yet)
         self._save_pending(session_id, classified, file_results, stats)
+        self._emit_progress(
+            process="upload_preview",
+            progress_callback=None,
+            session_id=session_id,
+            event_type="complete",
+            step="preview_ready",
+            message=f"Classification complete - review {len(classified)} transactions before confirming",
+            percentage=100,
+            data={"classification_stats": stats},
+        )
 
         if progress_callback:
             progress_callback(ProgressEvent(
@@ -2203,7 +2354,7 @@ class CashReportService:
             for i, tx in enumerate(classified)
         ]
 
-        return {
+        return _finish({
             "session_id": session_id,
             "status": "pending_review",
             "files_processed": len(files),
@@ -2213,7 +2364,7 @@ class CashReportService:
             "classification_stats": stats,
             "ai_usage": ai_usage,
             "transactions": preview_transactions,
-        }
+        })
 
     async def confirm_classifications(
         self,
@@ -2232,6 +2383,28 @@ class CashReportService:
         Returns:
             Write result summary
         """
+        import time as _time
+
+        _started_at = _time.monotonic()
+        logger.info(
+            "Confirm classifications started: session_id=%s modifications=%s user_id=%s",
+            session_id,
+            len(modifications or []),
+            user_id,
+        )
+
+        def _finish(result: Dict[str, Any]) -> Dict[str, Any]:
+            elapsed_ms = int((_time.monotonic() - _started_at) * 1000)
+            logger.info(
+                "Confirm classifications finished: session_id=%s status=%s written=%s modifications_applied=%s elapsed_ms=%s",
+                session_id,
+                result.get("status"),
+                result.get("total_transactions_written", 0),
+                result.get("modifications_applied", 0),
+                elapsed_ms,
+            )
+            return result
+
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
@@ -2294,14 +2467,14 @@ class CashReportService:
         # Clear pending file
         self._clear_pending(session_id)
 
-        return {
+        return _finish({
             "session_id": session_id,
             "status": "confirmed",
             "total_transactions_written": rows_added,
             "total_rows_in_movement": total_rows,
             "modifications_applied": modifications_applied,
             "classification_stats": pending.get("stats", {}),
-        }
+        })
 
     async def _is_first_upload(self, session_id: str) -> bool:
         """Check if this is the first upload for a session.
@@ -3446,15 +3619,41 @@ class CashReportService:
         Returns:
             Dict with results summary (or preview data when dry_run=True)
         """
-        from .progress_store import ProgressEvent
+        import time as _time
+
+        _started_at = _time.monotonic()
+        logger.info(
+            "Settlement automation started: session_id=%s dry_run=%s has_progress_callback=%s user_id=%s",
+            session_id,
+            dry_run,
+            bool(progress_callback),
+            user_id,
+        )
+
+        def _finish(result: Dict[str, Any]) -> Dict[str, Any]:
+            elapsed_ms = int((_time.monotonic() - _started_at) * 1000)
+            logger.info(
+                "Settlement automation finished: session_id=%s status=%s counter_entries=%s interest_splits=%s elapsed_ms=%s",
+                session_id,
+                result.get("status"),
+                result.get("counter_entries_created", 0),
+                result.get("interest_splits_created", 0),
+                elapsed_ms,
+            )
+            return result
 
         def emit(event_type, step, message, detail="", percentage=0, data=None):
-            if progress_callback:
-                progress_callback(ProgressEvent(
-                    event_type=event_type, step=step,
-                    message=message, detail=detail,
-                    percentage=percentage, data=data or {},
-                ))
+            self._emit_progress(
+                process="settlement",
+                progress_callback=progress_callback,
+                session_id=session_id,
+                event_type=event_type,
+                step=step,
+                message=message,
+                detail=detail,
+                percentage=percentage,
+                data=data,
+            )
 
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
@@ -3474,12 +3673,12 @@ class CashReportService:
         if not transactions:
             emit("complete", "done", "No transactions found", percentage=100,
                  data={"status": "no_transactions"})
-            return {
+            return _finish({
                 "session_id": session_id,
                 "status": "no_transactions",
                 "message": "No transactions found in Movement sheet",
                 "counter_entries_created": 0,
-            }
+            })
 
         # Build current_account â†’ entity mapping from Cash Balance sheet.
         # The Movement sheet's Entity column (J) is formula-based and has no
@@ -3579,13 +3778,13 @@ class CashReportService:
         if not settlement_transactions:
             emit("complete", "done", "No settlement transactions found", percentage=100,
                  data={"status": "no_settlements", "total_transactions_scanned": len(transactions)})
-            return {
+            return _finish({
                 "session_id": session_id,
                 "status": "no_settlements",
                 "message": "No settlement transactions found",
                 "counter_entries_created": 0,
                 "total_transactions_scanned": len(transactions),
-            }
+            })
 
         emit("step_complete", "detecting",
              f"Found {len(settlement_transactions)} settlement transactions",
@@ -3778,7 +3977,7 @@ class CashReportService:
                     "has_interest_split": row_idx in interest_inserts,
                     "interest_amount": float(interest_inserts[row_idx]["debit"]) if row_idx in interest_inserts else None,
                 })
-            return {
+            return _finish({
                 "session_id": session_id,
                 "dry_run": True,
                 "status": "preview",
@@ -3791,7 +3990,7 @@ class CashReportService:
                 "skipped_duplicate": skipped_duplicate,
                 "acc_char_inserts_would_add": [i["saving_acc"] for i in acc_char_inserts],
                 "candidates": candidates_preview,
-            }
+            })
 
         if not counter_entries:
             # Even without counter entries, apply modifications and insertions
@@ -3815,7 +4014,7 @@ class CashReportService:
                 msg += f". {len(skipped_duplicate)} skipped (already exists)"
             emit("complete", "done", msg, percentage=100,
                  data={"status": "no_counter_entries"})
-            return {
+            return _finish({
                 "session_id": session_id,
                 "status": "no_counter_entries",
                 "message": msg,
@@ -3825,7 +4024,7 @@ class CashReportService:
                 "skipped_no_account": len(skipped_no_account),
                 "skipped_duplicate": len(skipped_duplicate),
                 "total_transactions_scanned": len(transactions),
-            }
+            })
 
         # â"€â"€ Step 4: Write changes â"€â"€
         emit("step_start", "writing",
@@ -3975,7 +4174,7 @@ class CashReportService:
              + (f", {len(interest_inserts)} interest splits" if interest_inserts else ""),
              percentage=100, data=result)
 
-        return result
+        return _finish(result)
 
     async def run_open_new_automation(
         self,
@@ -4006,15 +4205,42 @@ class CashReportService:
         Returns:
             Dict with results summary (or preview data when dry_run=True)
         """
-        from .progress_store import ProgressEvent
+        import time as _time
+
+        _started_at = _time.monotonic()
+        logger.info(
+            "Open-new automation started: session_id=%s dry_run=%s lookup_files=%s has_progress_callback=%s user_id=%s",
+            session_id,
+            dry_run,
+            len(lookup_file_contents or []),
+            bool(progress_callback),
+            user_id,
+        )
+
+        def _finish(result: Dict[str, Any]) -> Dict[str, Any]:
+            elapsed_ms = int((_time.monotonic() - _started_at) * 1000)
+            logger.info(
+                "Open-new automation finished: session_id=%s status=%s counter_entries=%s acc_char_added=%s elapsed_ms=%s",
+                session_id,
+                result.get("status"),
+                result.get("counter_entries_created", 0),
+                result.get("acc_char_added", 0),
+                elapsed_ms,
+            )
+            return result
 
         def emit(event_type, step, message, detail="", percentage=0, data=None):
-            if progress_callback:
-                progress_callback(ProgressEvent(
-                    event_type=event_type, step=step,
-                    message=message, detail=detail,
-                    percentage=percentage, data=data or {},
-                ))
+            self._emit_progress(
+                process="open_new",
+                progress_callback=progress_callback,
+                session_id=session_id,
+                event_type=event_type,
+                step=step,
+                message=message,
+                detail=detail,
+                percentage=percentage,
+                data=data,
+            )
 
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
@@ -4034,12 +4260,12 @@ class CashReportService:
         if not transactions:
             emit("complete", "done", "No transactions found", percentage=100,
                  data={"status": "no_transactions"})
-            return {
+            return _finish({
                 "session_id": session_id,
                 "status": "no_transactions",
                 "message": "No transactions found in Movement sheet",
                 "counter_entries_created": 0,
-            }
+            })
 
         # Build current_account â†’ entity mapping from Cash Balance sheet
         # (same approach as settlement â€” avoids reliance on formula columns)
@@ -4073,13 +4299,13 @@ class CashReportService:
         if not open_new_transactions:
             emit("complete", "done", "No open-new transactions found", percentage=100,
                  data={"status": "no_open_new", "total_transactions_scanned": len(transactions)})
-            return {
+            return _finish({
                 "session_id": session_id,
                 "status": "no_open_new",
                 "message": "No open-new transactions found (GROUP B patterns)",
                 "counter_entries_created": 0,
                 "total_transactions_scanned": len(transactions),
-            }
+            })
 
         emit("step_complete", "detecting",
              f"Found {len(open_new_transactions)} open-new transactions",
@@ -4583,7 +4809,7 @@ class CashReportService:
                     "status": "duplicate",
                     "saving_account": None,
                 })
-            return {
+            return _finish({
                 "session_id": session_id,
                 "dry_run": True,
                 "status": "preview",
@@ -4594,7 +4820,7 @@ class CashReportService:
                 "skipped_duplicate": skipped_duplicate,
                 "skipped_existing": skipped_existing,
                 "candidates": candidates_preview,
-            }
+            })
 
         if not counter_entries:
             msg = "No counter entries created"
@@ -4604,7 +4830,7 @@ class CashReportService:
                 msg += f". {len(skipped_duplicate)} skipped (already exists)"
             emit("complete", "done", msg, percentage=100,
                  data={"status": "no_counter_entries"})
-            return {
+            return _finish({
                 "session_id": session_id,
                 "status": "no_counter_entries",
                 "message": msg,
@@ -4612,7 +4838,7 @@ class CashReportService:
                 "skipped_no_account": len(skipped_no_account),
                 "skipped_duplicate": len(skipped_duplicate),
                 "total_transactions_scanned": len(transactions),
-            }
+            })
 
         # â”€â”€ Step 4: Create counter entries â”€â”€
         emit("step_start", "writing", f"Creating {len(counter_entries)} counter entries...", percentage=60)
@@ -4748,7 +4974,7 @@ class CashReportService:
              f"Open-new complete â€” {rows_added} entries, {acc_char_added} new accounts added",
              percentage=100, data=result)
 
-        return result
+        return _finish(result)
 
     def _parse_saving_lookup_file(self, file_content: bytes) -> Dict[Tuple[str, float], List[str]]:
         """Backward-compatible wrapper returning only entity+amount -> accounts mapping."""
@@ -5260,16 +5486,41 @@ class CashReportService:
         Returns:
             Dict with combined settlement + open-new results and session_id for download.
         """
-        from .progress_store import ProgressEvent
         from .master_template_manager import TEMPLATES_DIR, WORKING_DIR
+        import time as _time
+
+        _started_at = _time.monotonic()
+        logger.info(
+            "Test automation started: lookup_files=%s has_progress_callback=%s",
+            len(lookup_file_contents or []),
+            bool(progress_callback),
+        )
+        test_session_id: Optional[str] = None
+
+        def _finish(result: Dict[str, Any]) -> Dict[str, Any]:
+            elapsed_ms = int((_time.monotonic() - _started_at) * 1000)
+            logger.info(
+                "Test automation finished: status=%s test_session_id=%s settlement_entries=%s open_new_entries=%s elapsed_ms=%s",
+                result.get("status"),
+                result.get("test_session_id"),
+                ((result.get("settlement") or {}).get("counter_entries_created", 0) if isinstance(result.get("settlement"), dict) else 0),
+                ((result.get("open_new") or {}).get("counter_entries_created", 0) if isinstance(result.get("open_new"), dict) else 0),
+                elapsed_ms,
+            )
+            return result
 
         def emit(event_type, step, message, detail="", percentage=0, data=None):
-            if progress_callback:
-                progress_callback(ProgressEvent(
-                    event_type=event_type, step=step,
-                    message=message, detail=detail,
-                    percentage=percentage, data=data or {},
-                ))
+            self._emit_progress(
+                process="test_automation",
+                progress_callback=progress_callback,
+                session_id=test_session_id,
+                event_type=event_type,
+                step=step,
+                message=message,
+                detail=detail,
+                percentage=percentage,
+                data=data,
+            )
 
         test_template = TEMPLATES_DIR / "cash_report_for_test.xlsx"
         if not test_template.exists():
@@ -5334,12 +5585,13 @@ class CashReportService:
             }
 
             emit("complete", "done", "Test automation completed", percentage=100, data=combined)
-            return combined
+            return _finish(combined)
 
         except Exception as e:
             # Clean up on failure
             if working_dir.exists():
                 shutil.rmtree(working_dir, ignore_errors=True)
             emit("error", "error", str(e))
+            logger.exception("Test automation failed")
             raise
 

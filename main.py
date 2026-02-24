@@ -23,6 +23,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.exceptions import RequestValidationError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -98,6 +99,16 @@ app.add_middleware(
 
 # Add GZip compression for responses > 1KB (reduces response size by 70-90%)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Add Session middleware (required by SQLAdmin authentication)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("ADMIN_SECRET_KEY", os.environ.get("SECRET_KEY", "change-me-in-production")),
+)
+
+# Mount SQLAdmin dashboard at /admin
+from app.admin.setup import setup_admin
+setup_admin(app)
 
 # Register exception handlers for user-friendly error messages
 app.add_exception_handler(AnalysisError, analysis_error_handler)

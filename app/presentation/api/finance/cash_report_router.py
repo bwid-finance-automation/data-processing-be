@@ -953,7 +953,7 @@ async def download_session_result(
         table_sheet_paths: set = set()
         try:
             sheet_paths_map = handler._get_sheet_xml_paths(raw)
-            for name in ("Saving Account", "Cash Balance"):
+            for name in ("Saving Account", "Cash Balance", "Acc_Char"):
                 if name in sheet_paths_map:
                     table_sheet_paths.add(sheet_paths_map[name])
         except Exception:
