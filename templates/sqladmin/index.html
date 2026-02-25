@@ -4,86 +4,141 @@
 <div class="admin-topbar">
   <div>
     <h2 class="page-title admin-page-title">Admin Dashboard</h2>
-    <div class="admin-subtitle">Centralized operations, governance, and platform monitoring</div>
+    <div class="admin-subtitle">Centralized control center for workflows, permissions, and core data</div>
   </div>
 </div>
 {% endblock %}
 
 {% block content %}
 <div class="col-12">
-  <div class="dashboard-hero">
-    <h3 class="mb-1">Business Operations Console</h3>
-    <p>Manage access, control platform features, monitor usage, and maintain data quality from a single interface.</p>
-  </div>
+  <section class="dashboard-showcase">
+    <div class="dashboard-showcase-main">
+      <span class="dashboard-overline">Minimalist Workspace</span>
+      <h3>Powerful and Crisp Data Control</h3>
+      <p>
+        Manage identity, feature flags, projects, banking data, and reports from one focused interface.
+        Fast operations, high readability, and low-noise design.
+      </p>
+      <div class="dashboard-quick-actions">
+        <a class="dashboard-quick-action is-primary" href="{{ request.url_for('admin:list', identity='user-model').path }}">
+          <span>User Permissions</span>
+          <i class="fa-solid fa-arrow-right ms-1"></i>
+        </a>
+        <a class="dashboard-quick-action" href="{{ request.url_for('admin:feature_toggles_ui').path }}">
+          <span>Feature Toggles</span>
+        </a>
+        <a class="dashboard-quick-action" href="{{ request.url_for('admin:list', identity='ai-usage-model').path }}">
+          <span>AI Reports</span>
+        </a>
+      </div>
+    </div>
+
+    <div class="dashboard-showcase-side">
+      <div class="dashboard-health-pill">
+        <span class="dot"></span>
+        <span>System Stable</span>
+      </div>
+      <div class="dashboard-mini-grid">
+        <div class="dashboard-mini-card">
+          <div class="mini-label">Identity</div>
+          <div class="mini-value">Users + Sessions</div>
+        </div>
+        <div class="dashboard-mini-card">
+          <div class="mini-label">Portfolio</div>
+          <div class="mini-value">Projects + Cases</div>
+        </div>
+        <div class="dashboard-mini-card">
+          <div class="mini-label">AI Cost</div>
+          <div class="mini-value">Provider Logs</div>
+        </div>
+      </div>
+    </div>
+  </section>
 </div>
 
 <div class="col-12">
-  <div class="dashboard-grid">
-    <section class="dashboard-card">
-      <span class="dashboard-badge">Identity</span>
-      <h4>User Administration</h4>
-      <p>Control user roles, account status, and active sessions for operational security.</p>
-      <div class="dashboard-links">
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='user-model').path }}">Users</a>
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='user-session-model').path }}">Sessions</a>
+  <section class="dashboard-kpi-strip">
+    <article class="dashboard-kpi">
+      <span class="kpi-title">Access Control</span>
+      <strong>Users and Sessions</strong>
+      <span class="kpi-meta">Role/status management and remote logout.</span>
+    </article>
+    <article class="dashboard-kpi">
+      <span class="kpi-title">Feature Governance</span>
+      <strong>Toggle Management</strong>
+      <span class="kpi-meta">Enable/disable services with maintenance messages.</span>
+    </article>
+    <article class="dashboard-kpi">
+      <span class="kpi-title">Usage Intelligence</span>
+      <strong>AI Usage Logs</strong>
+      <span class="kpi-meta">Track provider, model, token usage, and costs.</span>
+    </article>
+    <article class="dashboard-kpi">
+      <span class="kpi-title">Data Lifecycle</span>
+      <strong>Project and Report Cleanup</strong>
+      <span class="kpi-meta">Remove obsolete projects and stale report data.</span>
+    </article>
+  </section>
+</div>
+
+<div class="col-12">
+  <div class="dashboard-module-grid">
+    <section class="dashboard-module">
+      <span class="module-tag">Identity</span>
+      <h4 class="module-title">User Administration</h4>
+      <p class="module-desc">Manage permissions, provision accounts, and monitor active login sessions.</p>
+      <div class="module-links">
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='user-model').path }}">User List</a>
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='user-session-model').path }}">Active Sessions</a>
       </div>
     </section>
 
-    <section class="dashboard-card">
-      <span class="dashboard-badge">Controls</span>
-      <h4>Feature Governance</h4>
-      <p>Enable or disable business features and maintain user-facing maintenance messages.</p>
-      <div class="dashboard-links">
-        <a class="dashboard-link" href="{{ request.url_for('admin:feature_toggles_ui').path }}">Feature Toggles UI</a>
+    <section class="dashboard-module">
+      <span class="module-tag">Controls</span>
+      <h4 class="module-title">Feature Toggles</h4>
+      <p class="module-desc">Hot-toggle business modules and set maintenance messages for users.</p>
+      <div class="module-links">
+        <a class="module-link" href="{{ request.url_for('admin:feature_toggles_ui').path }}">Toggle Configuration</a>
       </div>
     </section>
 
-    <section class="dashboard-card">
-      <span class="dashboard-badge">Portfolio</span>
-      <h4>Project Management</h4>
-      <p>Review project records, case allocations, and remove obsolete projects.</p>
-      <div class="dashboard-links">
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='project-model').path }}">Projects</a>
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='project-case-model').path }}">Project Cases</a>
+    <section class="dashboard-module">
+      <span class="module-tag">Portfolio</span>
+      <h4 class="module-title">Project Management</h4>
+      <p class="module-desc">Track project records, review case allocation, and clean obsolete projects.</p>
+      <div class="module-links">
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='project-model').path }}">Projects</a>
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='project-case-model').path }}">Cases</a>
       </div>
     </section>
 
-    <section class="dashboard-card">
-      <span class="dashboard-badge">Cost & AI</span>
-      <h4>AI Usage Monitoring</h4>
-      <p>Track provider usage, token consumption, processing success, and estimated costs.</p>
-      <div class="dashboard-links">
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='ai-usage-model').path }}">AI Usage Logs</a>
+    <section class="dashboard-module">
+      <span class="module-tag">Banking</span>
+      <h4 class="module-title">Bank Statement Monitoring</h4>
+      <p class="module-desc">Inspect uploaded statements, parsed transactions, and account balances.</p>
+      <div class="module-links">
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='bank-statement-model').path }}">Statements</a>
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='bank-transaction-model').path }}">Transactions</a>
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='bank-balance-model').path }}">Balances</a>
       </div>
     </section>
 
-    <section class="dashboard-card">
-      <span class="dashboard-badge">Banking</span>
-      <h4>Bank Statement Monitoring</h4>
-      <p>Inspect uploaded statements, parsed transactions, and balances for reconciliation oversight.</p>
-      <div class="dashboard-links">
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='bank-statement-model').path }}">Statements</a>
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='bank-transaction-model').path }}">Transactions</a>
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='bank-balance-model').path }}">Balances</a>
+    <section class="dashboard-module">
+      <span class="module-tag">Cash Flow</span>
+      <h4 class="module-title">Cash Flow Reports</h4>
+      <p class="module-desc">Manage report sessions, review source files, and clean temporary data.</p>
+      <div class="module-links">
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='cash-report-session-model').path }}">Report Sessions</a>
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='cash-report-uploaded-file-model').path }}">Uploaded Files</a>
       </div>
     </section>
 
-    <section class="dashboard-card">
-      <span class="dashboard-badge">Cash Flow</span>
-      <h4>Cash Report Management</h4>
-      <p>Manage report sessions, inspect uploaded source files, and clean up expired runs.</p>
-      <div class="dashboard-links">
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='cash-report-session-model').path }}">Sessions</a>
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='cash-report-uploaded-file-model').path }}">Uploaded Files</a>
-      </div>
-    </section>
-
-    <section class="dashboard-card">
-      <span class="dashboard-badge">Contracts</span>
-      <h4>Contract Monitoring</h4>
-      <p>Review OCR-processed contracts and track contract portfolio records in read-only mode.</p>
-      <div class="dashboard-links">
-        <a class="dashboard-link" href="{{ request.url_for('admin:list', identity='contract-model').path }}">Contracts</a>
+    <section class="dashboard-module">
+      <span class="module-tag">Contracts</span>
+      <h4 class="module-title">Contract Digitization</h4>
+      <p class="module-desc">Verify OCR extraction results and track the contract repository.</p>
+      <div class="module-links">
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='contract-model').path }}">Contract List</a>
       </div>
     </section>
   </div>

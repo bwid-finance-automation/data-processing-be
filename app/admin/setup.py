@@ -44,7 +44,7 @@ def setup_admin(app: FastAPI) -> Admin:
         app,
         engine,
         authentication_backend=authentication_backend,
-        title="BWID Admin",
+        title="BWID Automation Admin",
         base_url="/admin",
         templates_dir=templates_dir,
     )

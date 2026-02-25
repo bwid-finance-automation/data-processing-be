@@ -5,14 +5,14 @@
 {% set is_dashboard = request.url.path.endswith('/admin/') or request.url.path.endswith('/admin') %}
 <div class="wrapper admin-shell">
   <aside class="navbar navbar-expand-lg navbar-vertical navbar-expand-md navbar-dark admin-sidebar">
-    <div class="container-fluid">
+    <div class="container-fluid flex-column align-items-stretch h-100">
       <h1 class="navbar-brand navbar-brand-autodark">
         <a href="{{ request.url_for('admin:index').path }}">
           {% if admin.logo_url %}
           <img src="{{ admin.logo_url }}" width="64" height="64" alt="Admin" class="navbar-brand-image" />
           {% else %}
           <h3>{{ admin.title }}</h3>
-          <span class="admin-brand-label">Business Console</span>
+          <span class="admin-brand-label">Enterprise Platform</span>
           {% endif %}
         </a>
       </h1>
