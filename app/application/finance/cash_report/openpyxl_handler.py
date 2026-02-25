@@ -5535,6 +5535,33 @@ class OpenpyxlHandler:
                 results.append(rn)
         return sorted(results)
 
+    @staticmethod
+    def _truncate_rows_after(sheet_xml: bytes, keep_last_row: int) -> Tuple[bytes, int]:
+        """
+        Remove all worksheet <row> blocks whose row number is greater than keep_last_row.
+
+        Used to drop trailing template/marker rows that create visible extra styling
+        below the actual data region.
+        """
+        if keep_last_row <= 0:
+            return sheet_xml, 0
+
+        row_pattern = rb'(<row[^>]*\sr="(\d+)"[^>]*/\s*>|<row[^>]*\sr="(\d+)"[^>]*>.*?</row>)'
+        removed = [0]
+
+        def _repl(m: re.Match) -> bytes:
+            rn_b = m.group(2) or m.group(3)
+            if not rn_b:
+                return m.group(1)
+            rn = int(rn_b)
+            if rn > keep_last_row:
+                removed[0] += 1
+                return b""
+            return m.group(1)
+
+        out = re.sub(row_pattern, _repl, sheet_xml, flags=re.DOTALL)
+        return out, removed[0]
+
     def add_rows_to_sheets_batch(
         self,
         file_path: Path,
@@ -5664,9 +5691,22 @@ class OpenpyxlHandler:
                     "E": f'<c r="E{rn}" s="{_get_style(src_xml, "E")}" t="inlineStr"><is><t>{_esc(entry.get("bank", ""))}</t></is></c>'.encode(),
                     "F": f'<c r="F{rn}" s="{_get_style(src_xml, "F")}" t="inlineStr"><is><t>{_esc(entry.get("currency", "VND"))}</t></is></c>'.encode(),
                     "G": f'<c r="G{rn}" s="{_get_style(src_xml, "G")}" t="inlineStr"><is><t>{_esc(entry.get("account_type", "Saving Account"))}</t></is></c>'.encode(),
-                    "J": f'<c r="J{rn}" s="{_get_style(src_xml, "J", "1142")}"/>'.encode(),
                 }
                 row_xml = self._clone_row_for_insert(ac_xml, source_row, row_num, overrides)
+                # Marker column J should only contain the single Big-X row.
+                # Remove J cells from inserted data rows to avoid gray-frame style blocks.
+                rn_bytes = str(row_num).encode()
+                row_xml = re.sub(
+                    rb'<c\s[^>]*r="J' + rn_bytes + rb'"[^>]*/\s*>',
+                    b'',
+                    row_xml,
+                )
+                row_xml = re.sub(
+                    rb'<c\s[^>]*r="J' + rn_bytes + rb'"[^>]*(?<!/)>.*?</c>',
+                    b'',
+                    row_xml,
+                    flags=re.DOTALL,
+                )
                 # Inject cached values for formula cells (entity, relationship, bank)
                 ac_cached = {
                     "D": _esc(entry.get("entity", "")),
@@ -5717,6 +5757,17 @@ class OpenpyxlHandler:
                             logger.info(
                                 f"Adjusted Table2 ref to row {target_last} (was {current_last})"
                             )
+
+                # Remove trailing template/small-x rows after the true last data row.
+                # These rows cause visible extra formatting in Excel.
+                ac_last_xml = self._find_last_xml_row_num(ac_xml)
+                if ac_last_xml > ac_final_last_data:
+                    ac_xml, removed_tail = self._truncate_rows_after(ac_xml, ac_final_last_data)
+                    if removed_tail > 0:
+                        ac_xml = self._update_dimension(ac_xml, ac_final_last_data)
+                        logger.info(
+                            f"Acc_Char: trimmed {removed_tail} trailing template row(s) after row {ac_final_last_data}"
+                        )
 
         # ── Saving Account ──
         if sa_xml and sa_path:

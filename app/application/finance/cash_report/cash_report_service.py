@@ -4346,6 +4346,16 @@ class CashReportService:
                 f"Total lookup accounts from {len(lookup_file_contents)} file(s): "
                 f"{total_lookup_accounts} across {len(lookup_accounts)} (entity,amount) keys"
             )
+        lookup_providers = {
+            str(meta.get("provider") or "").strip().upper()
+            for meta in lookup_account_details.values()
+            if str(meta.get("provider") or "").strip()
+        }
+        if lookup_providers:
+            logger.info(
+                "Open-new lookup providers loaded: %s",
+                ", ".join(sorted(lookup_providers)),
+            )
 
         # Load existing saving accounts to filter out non-new accounts
         saving_accounts = self._read_saving_accounts(working_file)
@@ -4461,6 +4471,15 @@ class CashReportService:
                 return acc_norm
             return None
 
+        def _has_lookup_for_bank(tx_bank: str) -> bool:
+            """Check whether uploaded lookup files contain data for tx_bank."""
+            if not lookup_providers:
+                return False
+            bank_norm = str(tx_bank or "").strip().upper()
+            if not bank_norm:
+                return True
+            return any(self._bank_matches(bank_norm, provider) for provider in lookup_providers)
+
         def _match_lookup_by_metadata(
             *,
             tx_bank: str,
@@ -4488,7 +4507,10 @@ class CashReportService:
             if bank_norm:
                 bank_candidates = [
                     acc for acc in candidates
-                    if str(lookup_account_details.get(acc, {}).get("provider") or "").strip().upper() == bank_norm
+                    if self._bank_matches(
+                        bank_norm,
+                        str(lookup_account_details.get(acc, {}).get("provider") or "").strip().upper(),
+                    )
                 ]
                 if bank_candidates:
                     candidates = bank_candidates
@@ -4572,9 +4594,18 @@ class CashReportService:
             # Try to find saving account:
             # 1. Extract from description
             saving_acc = _normalize_account_text(self._extract_saving_account_for_open_new(desc))
+            tx_bank_norm = str(tx.bank or "").strip().upper()
+            bank_lookup_available = _has_lookup_for_bank(tx_bank_norm)
+            if tx_bank_norm and lookup_file_contents and not bank_lookup_available:
+                logger.info(
+                    "Open-new: no lookup provider for bank %s; skip lookup matching for tx account=%s amount=%s",
+                    tx_bank_norm,
+                    tx_account,
+                    amount,
+                )
 
             # 2. Lookup from uploaded file by entity + amount
-            if not saving_acc and lookup_accounts:
+            if not saving_acc and lookup_accounts and bank_lookup_available:
                 # Try exact match first
                 key = (entity.upper(), amount)
                 saving_acc = _select_lookup_account(lookup_accounts.get(key, []))
@@ -4656,6 +4687,20 @@ class CashReportService:
             used_lookup_accounts.add(saving_acc)
 
             lookup_meta = lookup_account_details.get(saving_acc, {})
+            lookup_provider = str(lookup_meta.get("provider") or "").strip().upper()
+            if (
+                lookup_meta
+                and tx_bank_norm
+                and lookup_provider
+                and not self._bank_matches(tx_bank_norm, lookup_provider)
+            ):
+                logger.info(
+                    "Open-new: provider mismatch for %s (tx_bank=%s, lookup_provider=%s); treating as no lookup data",
+                    saving_acc,
+                    tx_bank_norm,
+                    lookup_provider,
+                )
+                lookup_meta = {}
             # Flag: no lookup data → insert row but leave term/rate empty, highlight yellow
             # Always True for current_account fallback (suffixed accounts never in lookup)
             no_lookup_data = is_current_account_fallback or not lookup_meta
@@ -4685,8 +4730,15 @@ class CashReportService:
 
             currency_for_insert = str(lookup_meta.get("currency") or "VND").strip().upper() or "VND"
 
-            # Determine BRANCH from Cash balance (Prior period) by entity + bank prefix
-            saving_bank = self._determine_saving_branch(saving_acc, entity, entity_branches, tx.bank or "")
+            # For missing lookup data, keep source bank as-is (do not infer/replace by prior-period branch).
+            # This avoids wrong substitutions such as TCB -> VTB when TCB lookup was not uploaded.
+            if no_lookup_data:
+                saving_bank = str(tx.bank or "").strip()
+                if not saving_bank:
+                    saving_bank = self._determine_saving_branch(saving_acc, entity, entity_branches, tx.bank or "")
+            else:
+                # Determine BRANCH from Cash balance (Prior period) by entity + bank prefix
+                saving_bank = self._determine_saving_branch(saving_acc, entity, entity_branches, tx.bank or "")
 
             # Create counter entry: swap credit to debit, nature = Internal transfer in
             counter = MovementTransaction(
