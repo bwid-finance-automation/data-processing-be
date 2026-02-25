@@ -61,6 +61,8 @@ ALL_CATEGORIES = ALL_PAYMENT_CATEGORIES | ALL_RECEIPT_CATEGORIES
 # parents: [0]=services, [1]=cash_report, [2]=finance, [3]=domain, [4]=app, [5]=project_root
 _PROJECT_ROOT = Path(__file__).resolve().parents[5]
 DEFAULT_RULES_FILE = _PROJECT_ROOT / "movement_nature_filter" / "Key Words.csv"
+# Cash Report AI classification intentionally does NOT use Redis/external cache bridge.
+CASH_REPORT_EXTERNAL_CACHE_ENABLED = False
 
 
 def load_keyword_rules_from_csv(file_path: Path) -> Dict[str, List[str]]:
@@ -538,17 +540,40 @@ Example for 3 transactions:
         return results[:expected_count]
 
     def preload_cache(self, entries: Dict[str, str]) -> None:
-        """Bulk-load cache entries (e.g. from Redis) into in-memory cache."""
+        """
+        External cache preload hook (disabled).
+
+        Kept only for backward compatibility. Cash Report AI classification no longer
+        accepts Redis/external cache preload.
+        """
+        if entries and not CASH_REPORT_EXTERNAL_CACHE_ENABLED:
+            logger.info(
+                "Ignoring preload_cache(%s entries): external cache bridge is disabled for Cash Report AI classify.",
+                len(entries),
+            )
+            return
         self._cache.update(entries)
         if entries:
             logger.info(f"Pre-loaded {len(entries)} entries into in-memory cache")
 
     def get_new_cache_entries(self, before_keys: set) -> Dict[str, str]:
-        """Get cache entries that were added after a known snapshot."""
+        """
+        External cache export hook (disabled).
+
+        Returns empty dict when external cache bridge is disabled.
+        """
+        if not CASH_REPORT_EXTERNAL_CACHE_ENABLED:
+            return {}
         return {k: v for k, v in self._cache.items() if k not in before_keys}
 
     def get_cache_keys_for_batch(self, transactions: List[Tuple[str, bool]]) -> Dict[str, Tuple[str, bool]]:
-        """Generate cache keys for a batch of transactions."""
+        """
+        External cache key hook (disabled).
+
+        Returns empty dict when external cache bridge is disabled.
+        """
+        if not CASH_REPORT_EXTERNAL_CACHE_ENABLED:
+            return {}
         result = {}
         for desc, is_receipt in transactions:
             cache_key = self._get_cache_key(desc, is_receipt)
