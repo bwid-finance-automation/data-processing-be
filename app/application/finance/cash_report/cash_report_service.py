@@ -39,6 +39,35 @@ from .progress_store import ProgressEvent
 
 logger = get_logger(__name__)
 
+# Fallback mapping when Def!Bank/Abb table cannot be read.
+# Keys are normalized by removing spaces/punctuation and uppercasing.
+DEFAULT_BANK_ALIAS_TO_FULL_NAME = {
+    "VCB": "VIETCOMBANK",
+    "VIETCOMBANK": "VIETCOMBANK",
+    "VTB": "VIETINBANK",
+    "VIETINBANK": "VIETINBANK",
+    "BIDV": "BIDV",
+    "OCB": "OCB",
+    "VIB": "VIB",
+    "MB": "MB",
+    "MBB": "MB",
+    "ACB": "ACB",
+    "OTHERS": "Others",
+    "SINOPAC": "SINOPAC",
+    "SNP": "SINOPAC",
+    "TECHCOMBANK": "TECHCOMBANK",
+    "TCB": "TECHCOMBANK",
+    "UOB": "UOB",
+    "STANDARDCHARTERED": "STANDARD CHARTERED",
+    "KEBHANA": "KEB Hana",
+    "VPBANK": "VPBank",
+    "KBANK": "KBANK",
+    "MAYBANK": "MAYBANK",
+    "CTBC": "CTBC",
+    "WOORIBANK": "Woori Bank",
+    "WOORI": "Woori Bank",
+}
+
 # â”€â”€ Settlement detection patterns (Group A - Táº¥t toÃ¡n / RÃºt tiá»n) â”€â”€
 # Used to detect settlement-eligible transactions by description.
 # Requires BOTH: Nature = "Internal transfer in" AND keyword/pattern match.
@@ -3039,6 +3068,107 @@ class CashReportService:
         return entity_to_code
 
     @staticmethod
+    def _normalize_bank_key(value: str) -> str:
+        """Normalize bank text for dictionary matching."""
+        return re.sub(r"[^A-Z0-9]+", "", str(value or "").strip().upper())
+
+    @staticmethod
+    def _read_def_bank_alias_to_name(working_file) -> Dict[str, str]:
+        """
+        Read bank alias mapping from Def sheet Bank/Abb table.
+
+        Def layout:
+        - Row 3: headers
+        - One table has "Bank" + adjacent "Abb."
+
+        Returns:
+            {normalized_alias_or_name: canonical_bank_name}
+            e.g. {"TCB": "TECHCOMBANK", "TECHCOMBANK": "TECHCOMBANK"}
+        """
+        import openpyxl
+
+        alias_to_bank: Dict[str, str] = {}
+        wb = None
+        try:
+            wb = openpyxl.load_workbook(working_file, data_only=True, read_only=True)
+            if "Def" not in wb.sheetnames:
+                return {}
+            ws = wb["Def"]
+
+            bank_col = 7
+            abb_col = 8
+            max_scan_col = min(ws.max_column, 60)
+            for col_idx in range(1, max_scan_col):
+                h_bank = str(ws.cell(3, col_idx).value or "").strip().lower()
+                h_abb = str(ws.cell(3, col_idx + 1).value or "").strip().lower().replace(".", "")
+                if h_bank == "bank" and h_abb in {"abb", "abbr"}:
+                    bank_col = col_idx
+                    abb_col = col_idx + 1
+                    break
+
+            for row_idx in range(4, ws.max_row + 1):
+                bank_name = str(ws.cell(row_idx, bank_col).value or "").strip()
+                abb = str(ws.cell(row_idx, abb_col).value or "").strip()
+                if not bank_name:
+                    continue
+
+                bank_key = CashReportService._normalize_bank_key(bank_name)
+                if bank_key:
+                    alias_to_bank[bank_key] = bank_name
+
+                abb_key = CashReportService._normalize_bank_key(abb)
+                if abb_key:
+                    alias_to_bank[abb_key] = bank_name
+        except Exception as e:
+            logger.warning(f"Failed to read Def bank map: {e}")
+        finally:
+            if wb:
+                wb.close()
+
+        return alias_to_bank
+
+    @classmethod
+    def _normalize_bank_name(
+        cls,
+        bank_value: str,
+        def_bank_alias_to_name: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Normalize bank text to canonical bank name using Def map first,
+        then fallback aliases.
+        """
+        raw = str(bank_value or "").strip()
+        if not raw:
+            return ""
+
+        parts = raw.split("-", 1)
+        root = parts[0].strip()
+        suffix = parts[1].strip() if len(parts) > 1 else ""
+
+        root_key = cls._normalize_bank_key(root)
+        full_key = cls._normalize_bank_key(raw)
+
+        resolved = ""
+        if def_bank_alias_to_name:
+            resolved = (
+                def_bank_alias_to_name.get(root_key)
+                or def_bank_alias_to_name.get(full_key)
+                or ""
+            )
+        if not resolved:
+            resolved = (
+                DEFAULT_BANK_ALIAS_TO_FULL_NAME.get(root_key)
+                or DEFAULT_BANK_ALIAS_TO_FULL_NAME.get(full_key)
+                or ""
+            )
+
+        if not resolved:
+            return raw
+        if suffix:
+            return f"{resolved} - {suffix}"
+        return resolved
+
+    @staticmethod
     def _read_prior_period_branches(working_file) -> Dict[str, List[str]]:
         """
         Read entityâ†’branches mapping from 'Cash balance (Prior period)' sheet.
@@ -3082,6 +3212,7 @@ class CashReportService:
         entity: str,
         entity_branches: Dict[str, List[str]],
         original_bank: str,
+        def_bank_alias_to_name: Optional[Dict[str, str]] = None,
     ) -> str:
         """
         Determine BRANCH for a new saving account by looking up the entity's
@@ -3092,9 +3223,12 @@ class CashReportService:
         1. Get all branches for entity from prior period
         2. Determine bank from saving account prefix (8xxâ†’BIDV, 1xx/10â†’VCB, 2xx/12â†’VTB)
         3. Pick the branch that matches the bank
-        4. Fallback: first branch for entity, or original_bank
+        4. Fallback: first branch for entity, or normalized original_bank
         """
         acc = str(saving_acc).strip()
+        normalized_original_bank = CashReportService._normalize_bank_name(
+            original_bank, def_bank_alias_to_name,
+        )
 
         # Determine bank keyword from account prefix
         bank_keyword = ""
@@ -3109,7 +3243,7 @@ class CashReportService:
                 bank_keyword = "VIETINBANK"
 
         # Look up entity's branches
-        branches = entity_branches.get(entity.upper(), [])
+        branches = entity_branches.get((entity or "").upper(), [])
         if branches and bank_keyword:
             for br in branches:
                 if bank_keyword in br.upper():
@@ -3119,7 +3253,7 @@ class CashReportService:
         if branches:
             return branches[0]
 
-        return original_bank
+        return normalized_original_bank
 
     @staticmethod
     def _extract_saving_account_from_description(description: str) -> Optional[str]:
@@ -3202,22 +3336,18 @@ class CashReportService:
         - "WOORI" vs "Woori Bank" (abbreviation vs full name)
         - "SINOPAC" vs "SNP" (different abbreviations)
         """
-        a = tx_bank.upper().strip()
-        b = sa_bank_1.upper().strip()
+        a = CashReportService._normalize_bank_key(
+            CashReportService._normalize_bank_name(tx_bank),
+        )
+        b = CashReportService._normalize_bank_key(
+            CashReportService._normalize_bank_name(sa_bank_1),
+        )
         if not a or not b:
             return False
         if a == b:
             return True
         # Partial match: one contains the other
         if a in b or b in a:
-            return True
-        # Known aliases
-        _BANK_ALIASES = {
-            "SINOPAC": "SNP",
-            "SNP": "SINOPAC",
-        }
-        alias = _BANK_ALIASES.get(a)
-        if alias and (alias == b or alias in b or b in alias):
             return True
         return False
 
@@ -3692,6 +3822,7 @@ class CashReportService:
 
         # Load entity→code and branch mappings for inserting new Acc_Char rows
         def_entity_to_code = self._read_def_entity_to_code(working_file)
+        def_bank_alias_to_name = self._read_def_bank_alias_to_name(working_file)
         entity_branches = self._read_prior_period_branches(working_file)
 
         emit("step_complete", "scanning",
@@ -3887,7 +4018,11 @@ class CashReportService:
                     if not code and entity:
                         code = def_entity_to_code.get(entity.upper(), "")
                     branch = self._determine_saving_branch(
-                        saving_acc, entity, entity_branches, tx.bank or ""
+                        saving_acc,
+                        entity,
+                        entity_branches,
+                        tx.bank or "",
+                        def_bank_alias_to_name,
                     )
                     counter_currency = current_acc_data.get("currency") or "VND"
 
@@ -4376,9 +4511,16 @@ class CashReportService:
         account_to_code = self._read_acc_char_account_to_code(working_file)
         # 2) entityâ†’code from Def sheet (primary CODE source per user spec)
         def_entity_to_code = self._read_def_entity_to_code(working_file)
-        # 3) entityâ†’branches from Cash balance (Prior period) for BRANCH
+        # 3) bank aliasâ†’bank name from Def sheet (for BRANCH normalization)
+        def_bank_alias_to_name = self._read_def_bank_alias_to_name(working_file)
+        # 4) entityâ†’branches from Cash balance (Prior period) for BRANCH
         entity_branches = self._read_prior_period_branches(working_file)
-        logger.info(f"Lookups: {len(account_to_code)} accâ†’code, {len(def_entity_to_code)} entâ†’code (Def), {len(entity_branches)} entâ†’branches (Prior)")
+        logger.info(
+            f"Lookups: {len(account_to_code)} accâ†’code, "
+            f"{len(def_entity_to_code)} entâ†’code (Def), "
+            f"{len(def_bank_alias_to_name)} bank aliases (Def), "
+            f"{len(entity_branches)} entâ†’branches (Prior)",
+        )
 
         # Check for existing counter entries to avoid duplicates
         # Counter entries have nature "Internal transfer in" (from any source)
@@ -4730,15 +4872,27 @@ class CashReportService:
 
             currency_for_insert = str(lookup_meta.get("currency") or "VND").strip().upper() or "VND"
 
-            # For missing lookup data, keep source bank as-is (do not infer/replace by prior-period branch).
-            # This avoids wrong substitutions such as TCB -> VTB when TCB lookup was not uploaded.
+            # For missing lookup data, keep source bank intent but normalize alias
+            # via Def Bank/Abb table (e.g. TCB -> TECHCOMBANK).
             if no_lookup_data:
-                saving_bank = str(tx.bank or "").strip()
+                saving_bank = self._normalize_bank_name(tx.bank or "", def_bank_alias_to_name)
                 if not saving_bank:
-                    saving_bank = self._determine_saving_branch(saving_acc, entity, entity_branches, tx.bank or "")
+                    saving_bank = self._determine_saving_branch(
+                        saving_acc,
+                        entity,
+                        entity_branches,
+                        tx.bank or "",
+                        def_bank_alias_to_name,
+                    )
             else:
                 # Determine BRANCH from Cash balance (Prior period) by entity + bank prefix
-                saving_bank = self._determine_saving_branch(saving_acc, entity, entity_branches, tx.bank or "")
+                saving_bank = self._determine_saving_branch(
+                    saving_acc,
+                    entity,
+                    entity_branches,
+                    tx.bank or "",
+                    def_bank_alias_to_name,
+                )
 
             # Create counter entry: swap credit to debit, nature = Internal transfer in
             counter = MovementTransaction(
