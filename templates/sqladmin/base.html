@@ -7,12 +7,12 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('admin:statics', path='css/tabler.min.css') }}">
-  <link rel="stylesheet" href="{{ url_for('admin:statics', path='css/tabler-icons.min.css') }}">
-  <link rel="stylesheet" href="{{ url_for('admin:statics', path='css/fontawesome.min.css') }}">
-  <link rel="stylesheet" href="{{ url_for('admin:statics', path='css/select2.min.css') }}">
-  <link rel="stylesheet" href="{{ url_for('admin:statics', path='css/flatpickr.min.css') }}">
-  <link rel="stylesheet" href="{{ url_for('admin:statics', path='css/main.css') }}">
+  <link rel="stylesheet" href="{{ request.url_for('admin:statics', path='css/tabler.min.css').path }}">
+  <link rel="stylesheet" href="{{ request.url_for('admin:statics', path='css/tabler-icons.min.css').path }}">
+  <link rel="stylesheet" href="{{ request.url_for('admin:statics', path='css/fontawesome.min.css').path }}">
+  <link rel="stylesheet" href="{{ request.url_for('admin:statics', path='css/select2.min.css').path }}">
+  <link rel="stylesheet" href="{{ request.url_for('admin:statics', path='css/flatpickr.min.css').path }}">
+  <link rel="stylesheet" href="{{ request.url_for('admin:statics', path='css/main.css').path }}">
   <style>
     {% include "admin/_admin_theme.css" %}
   </style>
@@ -31,13 +31,13 @@
     {% endblock %}
   </main>
   {% endblock %}
-  <script type="text/javascript" src="{{ url_for('admin:statics', path='js/jquery.min.js') }}"></script>
-  <script type="text/javascript" src="{{ url_for('admin:statics', path='js/tabler.min.js') }}"></script>
-  <script type="text/javascript" src="{{ url_for('admin:statics', path='js/popper.min.js') }}"></script>
-  <script type="text/javascript" src="{{ url_for('admin:statics', path='js/bootstrap.min.js') }}"></script>
-  <script type="text/javascript" src="{{ url_for('admin:statics', path='js/select2.full.min.js') }}"></script>
-  <script type="text/javascript" src="{{ url_for('admin:statics', path='js/flatpickr.min.js') }}"></script>
-  <script type="text/javascript" src="{{ url_for('admin:statics', path='js/main.js') }}"></script>
+  <script type="text/javascript" src="{{ request.url_for('admin:statics', path='js/jquery.min.js').path }}"></script>
+  <script type="text/javascript" src="{{ request.url_for('admin:statics', path='js/tabler.min.js').path }}"></script>
+  <script type="text/javascript" src="{{ request.url_for('admin:statics', path='js/popper.min.js').path }}"></script>
+  <script type="text/javascript" src="{{ request.url_for('admin:statics', path='js/bootstrap.min.js').path }}"></script>
+  <script type="text/javascript" src="{{ request.url_for('admin:statics', path='js/select2.full.min.js').path }}"></script>
+  <script type="text/javascript" src="{{ request.url_for('admin:statics', path='js/flatpickr.min.js').path }}"></script>
+  <script type="text/javascript" src="{{ request.url_for('admin:statics', path='js/main.js').path }}"></script>
   {% block tail %}
   {% endblock %}
 </body>

@@ -5,7 +5,6 @@ numpy==2.1.2
 openpyxl==3.1.5
 pyxlsb>=1.0.10
 xlwings
-psutil
 xlrd
 python-multipart==0.0.9
 openai>=1.82.0  

@@ -1,7 +1,7 @@
 {% extends "sqladmin/base.html" %}
 {% block body %}
 <div class="admin-login-shell">
-  <form class="card card-md admin-login-card" action="{{ url_for('admin:login') }}" method="POST" autocomplete="off">
+  <form class="card card-md admin-login-card" action="{{ request.url_for('admin:login').path }}" method="POST" autocomplete="off">
     <div class="card-body p-4">
       <div class="admin-login-brand">BWID Operations</div>
       <h2 class="card-title admin-login-title">Sign in to {{ admin.title }}</h2>
