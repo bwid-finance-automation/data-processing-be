@@ -139,6 +139,12 @@ HDTG_DEPOSIT_KEYWORDS = [
 ]
 _UNIT_1B = Decimal("1000000000")  # 1 billion VND
 
+# Targeted settlement exceptions observed in production data.
+# Keep these narrow to avoid broad side effects.
+CA_TARGET_NORMALIZED = "ca target"
+BIDV_IBANK_WITHDRAWAL_NORMALIZED = "rut tien gui online tren bidv ibank"
+BIDV_IBANK_WITHDRAWAL_RECEIPT_ACCOUNTS = frozenset({"2221133456"})
+
 # Natures eligible for settlement detection.
 SETTLEMENT_ELIGIBLE_NATURES = frozenset({
     "internal transfer in",   # Only Internal transfer in triggers settlement
@@ -1463,16 +1469,11 @@ class CashReportService:
         #       account+date) is reclassified in _reclassify_presplit_interest().
         if is_receipt and any(p.search(description) for p in self._settlement_patterns_compiled):
             amount = tx.debit or Decimal("0")
-            _UNIT_100M = Decimal("100000000")
-            if amount >= _UNIT_1B:
-                return "Internal transfer in"
-            is_round = amount >= _UNIT_100M and amount % _UNIT_100M == 0
-            if is_round:
-                return "Internal transfer in"
-            elif amount >= _UNIT_100M:
-                return "Receipt from tenants"
-            else:
-                return "Other receipts"
+            return self._classify_settlement_receipt_nature(
+                description=description,
+                amount=amount,
+                account=tx.account,
+            )
 
         # ── HDTG/deposit keywords + debit >= 1B → Internal transfer in ──
         if is_receipt and (tx.debit or Decimal("0")) >= _UNIT_1B:
@@ -1489,6 +1490,46 @@ class CashReportService:
         if not self._tfidf_classifier.is_fitted:
             return None
         return self._tfidf_classifier.predict(description, is_receipt)
+
+    def _classify_settlement_receipt_nature(
+        self,
+        description: str,
+        amount: Decimal,
+        account: Optional[str] = None,
+    ) -> str:
+        """
+        Amount-based nature for receipt-side settlement patterns.
+        Supports targeted non-round exceptions to avoid false Internal transfer in.
+        """
+        _UNIT_100M = Decimal("100000000")
+        amount = amount or Decimal("0")
+        is_round = amount >= _UNIT_100M and amount % _UNIT_100M == 0
+        desc_norm = self._normalize_text_for_match(description or "")
+
+        if not is_round:
+            # CA - TARGET:
+            # - round amount => principal movement (Internal transfer in)
+            # - non-round >= 1B => Receipt from tenants
+            # - non-round < 1B  => Other receipts
+            if CA_TARGET_NORMALIZED in desc_norm:
+                return "Receipt from tenants" if amount >= _UNIT_1B else "Other receipts"
+
+            # BIDV iBank withdrawal for known account 2221133456 behaves as
+            # receipt-side interest on non-round amounts.
+            account_norm = re.sub(r"\D+", "", str(account or ""))
+            if (
+                BIDV_IBANK_WITHDRAWAL_NORMALIZED in desc_norm
+                and account_norm in BIDV_IBANK_WITHDRAWAL_RECEIPT_ACCOUNTS
+            ):
+                return "Receipt from tenants"
+
+        if amount >= _UNIT_1B:
+            return "Internal transfer in"
+        if is_round:
+            return "Internal transfer in"
+        if amount >= _UNIT_100M:
+            return "Receipt from tenants"
+        return "Other receipts"
 
     def _classify_from_transactions_reference(self, tx: MovementTransaction) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -1769,17 +1810,11 @@ class CashReportService:
             # NOTE: pre-split interest reclassified in _reclassify_presplit_interest().
             if any(pattern.search(description) for pattern in self._settlement_patterns_compiled):
                 amount = tx.debit or Decimal("0")
-                _UNIT_100M = Decimal("100000000")
-                if amount >= _UNIT_1B:
-                    tx.nature = "Internal transfer in"
-                else:
-                    is_round = amount >= _UNIT_100M and amount % _UNIT_100M == 0
-                    if is_round:
-                        tx.nature = "Internal transfer in"
-                    elif amount >= _UNIT_100M:
-                        tx.nature = "Receipt from tenants"
-                    else:
-                        tx.nature = "Other receipts"
+                tx.nature = self._classify_settlement_receipt_nature(
+                    description=description,
+                    amount=amount,
+                    account=tx.account,
+                )
                 tx._classified_by = "rule_guardrail"
                 return
 
