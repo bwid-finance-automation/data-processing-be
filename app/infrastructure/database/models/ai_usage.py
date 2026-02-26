@@ -12,7 +12,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.infrastructure.database.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
-    from app.infrastructure.database.models.project import ProjectModel, ProjectCaseModel
     from app.infrastructure.database.models.user import UserModel
 
 
@@ -44,18 +43,6 @@ class AIUsageModel(Base, TimestampMixin):
         default=uuid_lib.uuid4,
         unique=True,
         nullable=False,
-    )
-
-    # Link to project (optional)
-    project_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("projects.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-
-    # Link to project case (optional)
-    case_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("project_cases.id", ondelete="SET NULL"),
-        nullable=True,
     )
 
     # Link to user (optional) - for tracking user-specific usage
@@ -101,22 +88,12 @@ class AIUsageModel(Base, TimestampMixin):
     requested_at: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
 
     # Relationships
-    project: Mapped[Optional["ProjectModel"]] = relationship(
-        "ProjectModel",
-        foreign_keys=[project_id],
-    )
-    case: Mapped[Optional["ProjectCaseModel"]] = relationship(
-        "ProjectCaseModel",
-        foreign_keys=[case_id],
-    )
     user: Mapped[Optional["UserModel"]] = relationship(
         "UserModel",
         foreign_keys=[user_id],
     )
 
     __table_args__ = (
-        Index("ix_ai_usage_logs_project_id", "project_id"),
-        Index("ix_ai_usage_logs_case_id", "case_id"),
         Index("ix_ai_usage_logs_user_id", "user_id"),
         Index("ix_ai_usage_logs_session_id", "session_id"),
         Index("ix_ai_usage_logs_provider", "provider"),

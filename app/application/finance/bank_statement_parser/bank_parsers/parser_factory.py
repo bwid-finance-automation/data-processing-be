@@ -56,6 +56,48 @@ class ParserFactory:
     ]
 
     @classmethod
+    def _can_parse_with_logging(
+        cls,
+        parser: BaseBankParser,
+        file_bytes: bytes,
+        *,
+        scope: str
+    ) -> bool:
+        """Run parser.can_parse() with consistent terminal logging."""
+        try:
+            matched = parser.can_parse(file_bytes)
+            logger.info(
+                f"Bank detection [{scope}]: parser={parser.bank_name}, matched={matched}"
+            )
+            return matched
+        except Exception as e:
+            logger.warning(
+                f"Bank detection [{scope}]: parser={parser.bank_name}, error={e}"
+            )
+            return False
+
+    @classmethod
+    def _can_parse_text_with_logging(
+        cls,
+        parser: BaseBankParser,
+        text: str,
+        *,
+        scope: str
+    ) -> bool:
+        """Run parser.can_parse_text() with consistent terminal logging."""
+        try:
+            matched = parser.can_parse_text(text)
+            logger.info(
+                f"Bank detection [{scope}]: parser={parser.bank_name}, matched={matched}"
+            )
+            return matched
+        except Exception as e:
+            logger.warning(
+                f"Bank detection [{scope}]: parser={parser.bank_name}, error={e}"
+            )
+            return False
+
+    @classmethod
     def get_parser(cls, file_bytes: bytes) -> Optional[BaseBankParser]:
         """
         Auto-detect bank from file content and return appropriate parser.
@@ -66,10 +108,17 @@ class ParserFactory:
         Returns:
             Parser instance if bank detected, None otherwise
         """
+        logger.info(
+            f"Bank detection [whole_file]: trying {len(cls._parsers)} parsers"
+        )
         for parser in cls._parsers:
-            if parser.can_parse(file_bytes):
+            if cls._can_parse_with_logging(parser, file_bytes, scope="whole_file"):
+                logger.info(
+                    f"Bank detection [whole_file]: selected parser={parser.bank_name}"
+                )
                 return parser
 
+        logger.info("Bank detection [whole_file]: no parser matched")
         return None
 
     @classmethod
@@ -111,9 +160,16 @@ class ParserFactory:
             List of parser instances that can handle this file
         """
         matching = []
+        logger.info(
+            f"Bank detection [all_parsers]: trying {len(cls._parsers)} parsers"
+        )
         for parser in cls._parsers:
-            if parser.can_parse(file_bytes):
+            if cls._can_parse_with_logging(parser, file_bytes, scope="all_parsers"):
                 matching.append(parser)
+        logger.info(
+            f"Bank detection [all_parsers]: matched={len(matching)} -> "
+            f"{[p.bank_name for p in matching]}"
+        )
         return matching
 
     @classmethod
@@ -205,8 +261,15 @@ class ParserFactory:
         Returns:
             Parser instance if bank detected and supports text parsing, None otherwise
         """
+        logger.info(
+            f"Bank detection [ocr_text]: trying {len(cls._parsers)} parsers"
+        )
         for parser in cls._parsers:
-            if parser.can_parse_text(text):
+            if cls._can_parse_text_with_logging(parser, text, scope="ocr_text"):
+                logger.info(
+                    f"Bank detection [ocr_text]: selected parser={parser.bank_name}"
+                )
                 return parser
 
+        logger.info("Bank detection [ocr_text]: no parser matched")
         return None

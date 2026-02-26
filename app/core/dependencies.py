@@ -77,24 +77,6 @@ def get_bank_statement_db_service(db: AsyncSession = Depends(get_db)):
     return BankStatementDbService(db)
 
 
-def get_project_service(db: AsyncSession = Depends(get_db)):
-    """Get ProjectService instance."""
-    from app.application.project.project_service import ProjectService
-    return ProjectService(db)
-
-
-def get_project_repository(db: AsyncSession = Depends(get_db)):
-    """Get ProjectRepository instance."""
-    from app.infrastructure.persistence.repositories import ProjectRepository
-    return ProjectRepository(db)
-
-
-def get_project_case_repository(db: AsyncSession = Depends(get_db)):
-    """Get ProjectCaseRepository instance."""
-    from app.infrastructure.persistence.repositories import ProjectCaseRepository
-    return ProjectCaseRepository(db)
-
-
 def get_ai_usage_repository(db: AsyncSession = Depends(get_db)):
     """Get AIUsageRepository instance."""
     from app.infrastructure.persistence.repositories import AIUsageRepository

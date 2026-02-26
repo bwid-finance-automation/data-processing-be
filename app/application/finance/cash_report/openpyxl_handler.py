@@ -1848,7 +1848,7 @@ class OpenpyxlHandler:
         Read computed values from Cash Balance sheet using data_only + read_only mode.
 
         Returns:
-            Tuple of (period_name, list_of_row_tuples)
+            Tuple of (current_period_name, list_of_row_tuples)
         """
         wb = load_workbook(file_path, data_only=True, read_only=True)
         try:
@@ -1892,6 +1892,59 @@ class OpenpyxlHandler:
             wb.close()
 
         return period_name, rows_data
+
+    @staticmethod
+    def _derive_prior_period_name(current_period_name: str) -> str:
+        """
+        Derive prior biweekly period label from current period label.
+
+        Supported format examples:
+        - W1-2Feb26 -> W3-4Jan26
+        - W3-4Jan26 -> W1-2Jan26
+
+        If format is not recognized, returns the original input unchanged.
+        """
+        raw = str(current_period_name or "").strip()
+        compact = re.sub(r"\s+", "", raw)
+        m = re.match(r"(?i)^W(1-2|3-4)([A-Za-z]{3})(\d{2,4})$", compact)
+        if not m:
+            return raw
+
+        half = m.group(1)  # "1-2" or "3-4"
+        mon_abbr = m.group(2).title()
+        year_str = m.group(3)
+
+        month_map = {
+            "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+            "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+        }
+        month = month_map.get(mon_abbr)
+        if month is None:
+            return raw
+
+        year = int(year_str) if len(year_str) == 4 else 2000 + int(year_str)
+
+        if half == "3-4":
+            prior_half = "1-2"
+            prior_month = month
+            prior_year = year
+        else:  # half == "1-2"
+            prior_half = "3-4"
+            if month == 1:
+                prior_month = 12
+                prior_year = year - 1
+            else:
+                prior_month = month - 1
+                prior_year = year
+
+        inv_month_map = {v: k for k, v in month_map.items()}
+        prior_mon_abbr = inv_month_map[prior_month]
+        prior_year_str = (
+            str(prior_year)
+            if len(year_str) == 4
+            else f"{prior_year % 100:02d}"
+        )
+        return f"W{prior_half}{prior_mon_abbr}{prior_year_str}"
 
     # XML namespace used in xlsx sheet files
     _NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -2400,11 +2453,12 @@ class OpenpyxlHandler:
         return (sheet_xml, False)
 
     def _modify_prior_period_xml(
-        self, xml_bytes: bytes, old_period_name: str, cb_rows: List[tuple]
+        self, xml_bytes: bytes, current_period_name: str, cb_rows: List[tuple]
     ) -> bytes:
         """
         Directly modify the Prior period sheet XML:
-        - Update A2, B2 with period name
+        - Update A2 with prior period name (derived from current period)
+        - Keep B2 unchanged (formula from template must be preserved)
         - Replace data rows (4+) with Cash Balance closing balances
         """
         ns = self._NS
@@ -2437,18 +2491,20 @@ class OpenpyxlHandler:
                 rows_to_keep.append(row_el)
             sheet_data.remove(row_el)
 
-        # Modify row 2: update A2 and B2 cells
+        prior_period_name = self._derive_prior_period_name(current_period_name)
+
+        # Modify row 2: update A2 only, keep B2 formula unchanged
         for row_el in rows_to_keep:
             if row_el.get("r") == "2":
+                a2_style = None
                 for cell in list(row_el):
                     ref = cell.get("r")
-                    if ref in ("A2", "B2"):
+                    if ref == "A2":
+                        a2_style = cell.get("s")
                         row_el.remove(cell)
-                # Add new A2 and B2
-                a2 = self._build_pp_cell("A", 2, old_period_name)
-                b2 = self._build_pp_cell("B", 2, f"OB{old_period_name}" if old_period_name else "")
-                # Insert at the beginning of row
-                row_el.insert(0, b2)
+                # Add new A2 (B2 stays as-is from template formula)
+                a2 = self._build_pp_cell("A", 2, prior_period_name, style=a2_style)
+                # Insert at the beginning of row so A2 remains the first cell
                 row_el.insert(0, a2)
                 break
 
@@ -2606,7 +2662,8 @@ class OpenpyxlHandler:
             Number of Movement rows cleared
         """
         # Phase 1: Read Cash Balance computed values
-        old_period_name, cb_rows = self._read_cash_balance_data(file_path)
+        current_period_name, cb_rows = self._read_cash_balance_data(file_path)
+        prior_period_name = self._derive_prior_period_name(current_period_name)
 
         # Phase 2: Copy to Prior Period + Clear Movement via ZIP/XML
         with open(file_path, "rb") as f:
@@ -2637,7 +2694,7 @@ class OpenpyxlHandler:
 
                     if entry == pp_path and cb_rows:
                         data = self._modify_prior_period_xml(
-                            data, old_period_name, cb_rows
+                            data, current_period_name, cb_rows
                         )
                     elif entry == movement_path:
                         data = new_mov_xml
@@ -2659,7 +2716,7 @@ class OpenpyxlHandler:
 
         logger.info(
             f"Prepared for writing: "
-            f"{len(cb_rows)} rows copied to Prior period (period: {old_period_name}), "
+            f"{len(cb_rows)} rows copied to Prior period (period: {prior_period_name}), "
             f"{rows_cleared_count} Movement rows cleared"
         )
         return rows_cleared_count

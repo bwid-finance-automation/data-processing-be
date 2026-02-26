@@ -12,8 +12,6 @@ from app.admin.views import (
     UserAdmin,
     UserSessionAdmin,
     SystemSettingsAdmin,
-    ProjectAdmin,
-    ProjectCaseAdmin,
     BankStatementAdmin,
     BankTransactionAdmin,
     BankBalanceAdmin,
@@ -55,9 +53,6 @@ def setup_admin(app: FastAPI) -> Admin:
 
     admin.add_view(FeatureTogglesAdminView)
     admin.add_view(SystemSettingsAdmin)  # Hidden from menu; kept for advanced direct access.
-
-    admin.add_view(ProjectAdmin)
-    admin.add_view(ProjectCaseAdmin)
 
     admin.add_view(AIUsageAdmin)
 

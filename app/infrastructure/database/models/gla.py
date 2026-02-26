@@ -12,9 +12,6 @@ import enum
 
 from app.infrastructure.database.base import Base, TimestampMixin
 
-if TYPE_CHECKING:
-    from app.infrastructure.database.models.project import ProjectCaseModel
-
 
 class ProductType(str, enum.Enum):
     """Product type enumeration."""
@@ -54,9 +51,9 @@ class GLAProjectModel(Base, TimestampMixin):
         nullable=False,
     )
 
-    # Link to project case (nullable for backward compatibility)
-    case_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("project_cases.id", ondelete="SET NULL"),
+    # Link to user (nullable, 0 for anonymous)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -75,10 +72,6 @@ class GLAProjectModel(Base, TimestampMixin):
     period_label: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     # Relationships
-    case: Mapped[Optional["ProjectCaseModel"]] = relationship(
-        "ProjectCaseModel",
-        back_populates="gla_projects",
-    )
     records: Mapped[List["GLARecordModel"]] = relationship(
         "GLARecordModel",
         back_populates="project",
@@ -91,7 +84,7 @@ class GLAProjectModel(Base, TimestampMixin):
     )
 
     __table_args__ = (
-        Index("ix_gla_projects_case_id", "case_id"),
+        Index("ix_gla_projects_user_id", "user_id"),
         Index("ix_gla_projects_project_code", "project_code"),
         Index("ix_gla_projects_product_type", "product_type"),
         Index("ix_gla_projects_region", "region"),

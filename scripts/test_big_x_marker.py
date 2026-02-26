@@ -74,6 +74,7 @@ def get_cell_value(xml, col, row):
 def test_clear_x_marker_cell():
     """Clear the Big X value from a cell, leaving an empty cell."""
     xml = make_sheet_xml({
+        
         10: {"B": ("ACC001", "999"), "J": ("X", "35")},
         11: {"B": ("ACC002", "999"), "J": ("", "35")},
     })

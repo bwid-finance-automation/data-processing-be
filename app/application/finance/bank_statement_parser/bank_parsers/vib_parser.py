@@ -2,6 +2,7 @@
 
 import io
 import re
+import unicodedata
 from datetime import datetime
 from typing import List, Optional
 import pandas as pd
@@ -126,9 +127,11 @@ class VIBParser(BaseBankParser):
             transactions = []
 
             for _, row in data.iterrows():
-                # SWAPPED MAPPING: Credit = "Ghi nợ", Debit = "Ghi có"
-                credit_val = self._fix_number_vib(row.get("Ghi nợ")) if "Ghi nợ" in row else None
-                debit_val = self._fix_number_vib(row.get("Ghi có")) if "Ghi có" in row else None
+                # Standard mapping:
+                # - "Ghi nợ"  = money out  -> Debit
+                # - "Ghi có"  = money in   -> Credit
+                debit_val = self._fix_number_vib(row.get("Ghi nợ")) if "Ghi nợ" in row else None
+                credit_val = self._fix_number_vib(row.get("Ghi có")) if "Ghi có" in row else None
 
                 # Skip rows where both are zero/blank
                 if (debit_val is None or debit_val == 0) and (credit_val is None or credit_val == 0):
@@ -440,6 +443,18 @@ class VIBParser(BaseBankParser):
 
                 # Get opening balance for this section (to detect if simple format picked it up incorrectly)
                 section_opening = self._extract_section_balance(section, ["số dư đầu", "opening balance"])
+                section_closing = self._extract_section_balance(section, ["số dư cuối", "ending balance"])
+                if section_opening is None or section_opening == 0:
+                    section_opening = self._extract_balance_fallback_section(
+                        section, ["số dư đầu", "opening balance"], currency
+                    )
+                if section_opening is None or section_opening == 0:
+                    section_opening = self._extract_opening_before_withdrawal(section, currency)
+
+                if section_closing is None or section_closing == 0:
+                    section_closing = self._extract_balance_fallback_section(
+                        section, ["số dư cuối", "ending balance"], currency
+                    )
                 logger.debug(f"VIB: Section opening balance: {section_opening}")
 
                 # Try BOTH simple and complex format, then intelligently combine results
@@ -464,8 +479,6 @@ class VIBParser(BaseBankParser):
                     if simple_tx and complex_tx:
                         # Both formats found this TX - pick the better one
                         # If simple format's debit or credit matches opening/closing balance, it's likely wrong
-                        section_closing = self._extract_section_balance(section, ["số dư cuối", "ending balance"])
-
                         simple_has_balance = (
                             (section_opening and section_opening > 0 and
                              (simple_tx.debit == section_opening or simple_tx.credit == section_opening)) or
@@ -504,19 +517,246 @@ class VIBParser(BaseBankParser):
                         txs.append(complex_tx)
                         logger.info(f"VIB: TX {tx_id} - using complex format (only found there)")
 
-                # Extract ALL descriptions from balance+description lines in the section
-                # These lines appear as: "1,305,591,350 QV2_VC3_Chuyen tien BCC transfer"
-                all_descriptions = self._extract_all_descriptions(section)
-                logger.info(f"VIB: Found {len(all_descriptions)} descriptions total")
+                # Coverage fallback: don't lose transaction IDs when OCR columns are
+                # interleaved and amount extraction misses some rows.
+                header_matches = re.findall(
+                    r'^[^0-9]?(\d{10})\s+(\d{1,2}/\d{1,2}/\d{4})\s+\d{1,2}/\d{1,2}/\d{4}\s+([A-Z][A-Z0-9]{1,5})',
+                    section,
+                    re.MULTILINE
+                )
+                existing_ids = {tx.transaction_id for tx in txs if tx.transaction_id}
+                missing_headers = [
+                    (tx_id, date_str)
+                    for tx_id, date_str, _ in header_matches
+                    if tx_id not in existing_ids
+                ]
+                if missing_headers:
+                    logger.warning(
+                        f"VIB: Missing {len(missing_headers)} TX IDs after parsing, "
+                        f"adding placeholders: {[tx_id for tx_id, _ in missing_headers]}"
+                    )
+                    for tx_id, date_str in missing_headers:
+                        txs.append(BankTransaction(
+                            bank_name="VIB",
+                            acc_no=acc_no or "",
+                            debit=None,
+                            credit=None,
+                            date=self._parse_date_from_text(date_str),
+                            description="",
+                            currency=currency,
+                            transaction_id=tx_id,
+                            beneficiary_bank="",
+                            beneficiary_acc_no="",
+                            beneficiary_acc_name=""
+                        ))
 
-                # Sort txs by date and TX ID to match with descriptions in order
-                txs_sorted = sorted(txs, key=lambda t: (t.date or datetime.min, t.transaction_id or ""))
+                # High-confidence fallback: reconstruct transaction amounts from
+                # running balances when OCR column order is severely interleaved.
+                tx_headers = self._extract_tx_headers_from_section(section)
+                reconstructed = self._reconstruct_amounts_from_running_balances(
+                    section=section,
+                    tx_headers=tx_headers,
+                    opening_balance=section_opening,
+                    closing_balance=section_closing,
+                    currency=currency,
+                )
+                if reconstructed:
+                    tx_headers_with_idx = self._extract_tx_headers_with_line_index(section)
+                    local_signals = self._extract_local_amount_signals(section, currency, tx_headers_with_idx)
+                    tx_map = {tx.transaction_id: tx for tx in txs if tx.transaction_id}
+                    applied_reconstructed = 0
+                    skipped_low_confidence = 0
+                    kept_existing = 0
 
-                # Assign descriptions to transactions (in order)
-                for i, tx in enumerate(txs_sorted):
-                    if i < len(all_descriptions) and not tx.description:
-                        tx.description = all_descriptions[i]
-                        logger.info(f"VIB: Assigned desc to TX {tx.transaction_id}: {tx.description[:30]}...")
+                    for tx_id, date_str, code in tx_headers:
+                        item = reconstructed.get(tx_id)
+                        if not item:
+                            continue
+
+                        tx = tx_map.get(tx_id)
+                        if not tx:
+                            tx = BankTransaction(
+                                bank_name="VIB",
+                                acc_no=acc_no or "",
+                                debit=None,
+                                credit=None,
+                                date=self._parse_date_from_text(date_str),
+                                description="",
+                                currency=currency,
+                                transaction_id=tx_id,
+                                beneficiary_bank="",
+                                beneficiary_acc_no="",
+                                beneficiary_acc_name=""
+                            )
+                            txs.append(tx)
+                            tx_map[tx_id] = tx
+
+                        existing_debit = tx.debit if tx.debit and tx.debit > 0 else None
+                        existing_credit = tx.credit if tx.credit and tx.credit > 0 else None
+                        new_desc = (item.get("description") or "").strip()
+
+                        reconstructed_debit = item["debit"] if item["debit"] and item["debit"] > 0 else None
+                        reconstructed_credit = item["credit"] if item["credit"] and item["credit"] > 0 else None
+                        tx_code = (item.get("tx_code") or code or "").upper()
+
+                        should_override_existing = self._should_override_existing_with_reconstruction(
+                            tx_code=tx_code,
+                            existing_debit=existing_debit,
+                            existing_credit=existing_credit,
+                            opening_balance=section_opening,
+                            closing_balance=section_closing,
+                        )
+                        local_signal = local_signals.get(tx_id)
+                        low_confidence = self._is_low_confidence_reconstructed_amount(
+                            tx_code=tx_code,
+                            reconstructed_debit=reconstructed_debit,
+                            reconstructed_credit=reconstructed_credit,
+                            local_signal=local_signal,
+                        )
+
+                        if should_override_existing:
+                            if low_confidence:
+                                skipped_low_confidence += 1
+                                logger.warning(
+                                    "VIB v2: skipped low-confidence reconstruction for "
+                                    f"TX {tx_id} (code={tx_code}, rd={reconstructed_debit}, "
+                                    f"rc={reconstructed_credit}, local={local_signal})"
+                                )
+                            else:
+                                tx.debit = reconstructed_debit
+                                tx.credit = reconstructed_credit
+                                applied_reconstructed += 1
+                        else:
+                            kept_existing += 1
+
+                        if new_desc:
+                            current_desc = (tx.description or "").strip()
+                            should_replace_desc = (
+                                not current_desc
+                                or self._description_looks_noisy(current_desc)
+                                or self._description_looks_footer(current_desc)
+                                or len(new_desc) >= len(current_desc) + 20
+                            )
+                            if should_replace_desc:
+                                tx.description = new_desc
+
+                    # Section-level consistency reconciliation:
+                    # if mixed strategy produces totals/closing mismatch, fall back
+                    # to strict reconstruction for this section.
+                    sum_withdrawal, sum_deposit, _ = self._extract_summary_totals_from_section(section, currency)
+                    current_wd, current_dep = self._compute_amount_totals_for_headers(tx_map, tx_headers)
+
+                    wd_err = abs(current_wd - sum_withdrawal) if sum_withdrawal is not None else 0.0
+                    dep_err = abs(current_dep - sum_deposit) if sum_deposit is not None else 0.0
+
+                    close_err = 0.0
+                    if section_opening is not None and section_closing is not None:
+                        predicted_close = section_opening + current_dep - current_wd
+                        close_err = abs(predicted_close - section_closing)
+
+                    sum_tol = 5_000.0 if currency != "USD" else 0.5
+                    close_tol = 5_000.0 if currency != "USD" else 0.5
+
+                    if wd_err > sum_tol or dep_err > sum_tol or close_err > close_tol:
+                        strict_applied = 0
+                        for tx_id, date_str, _ in tx_headers:
+                            item = reconstructed.get(tx_id)
+                            if not item:
+                                continue
+
+                            tx = tx_map.get(tx_id)
+                            if not tx:
+                                tx = BankTransaction(
+                                    bank_name="VIB",
+                                    acc_no=acc_no or "",
+                                    debit=None,
+                                    credit=None,
+                                    date=self._parse_date_from_text(date_str),
+                                    description="",
+                                    currency=currency,
+                                    transaction_id=tx_id,
+                                    beneficiary_bank="",
+                                    beneficiary_acc_no="",
+                                    beneficiary_acc_name=""
+                                )
+                                txs.append(tx)
+                                tx_map[tx_id] = tx
+
+                            tx.debit = item["debit"] if item.get("debit") and item["debit"] > 0 else None
+                            tx.credit = item["credit"] if item.get("credit") and item["credit"] > 0 else None
+
+                            raw_desc = (item.get("description") or "").strip()
+                            if raw_desc:
+                                current_desc = (tx.description or "").strip()
+                                if (
+                                    not current_desc
+                                    or self._description_looks_noisy(current_desc)
+                                    or self._description_looks_footer(current_desc)
+                                ):
+                                    tx.description = raw_desc
+
+                            strict_applied += 1
+
+                        current_wd, current_dep = self._compute_amount_totals_for_headers(tx_map, tx_headers)
+                        wd_err = abs(current_wd - sum_withdrawal) if sum_withdrawal is not None else 0.0
+                        dep_err = abs(current_dep - sum_deposit) if sum_deposit is not None else 0.0
+                        close_err = 0.0
+                        if section_opening is not None and section_closing is not None:
+                            predicted_close = section_opening + current_dep - current_wd
+                            close_err = abs(predicted_close - section_closing)
+
+                        logger.warning(
+                            "VIB v2: switched to strict reconstruction due to section mismatch "
+                            f"(wd_err={wd_err}, dep_err={dep_err}, close_err={close_err}, applied={strict_applied})"
+                        )
+
+                    logger.info(
+                        "VIB v2: reconstruction decision summary - "
+                        f"total={len(reconstructed)}, applied={applied_reconstructed}, "
+                        f"kept_existing={kept_existing}, skipped_low_conf={skipped_low_confidence}"
+                    )
+
+                # Last-resort description fill only when reconstruction is absent.
+                # Sequential mapping is weak and can misalign in heavily interleaved OCR.
+                if not reconstructed:
+                    all_descriptions = self._extract_all_descriptions(section)
+                    logger.info(f"VIB: Found {len(all_descriptions)} descriptions total")
+
+                    txs_sorted = sorted(txs, key=lambda t: (t.date or datetime.min, t.transaction_id or ""))
+                    for i, tx in enumerate(txs_sorted):
+                        if i >= len(all_descriptions):
+                            continue
+                        if (tx.debit is None or tx.debit == 0) and (tx.credit is None or tx.credit == 0):
+                            continue
+
+                        fallback_desc = (all_descriptions[i] or "").strip()
+                        if not fallback_desc:
+                            continue
+
+                        current_desc = (tx.description or "").strip()
+                        if not current_desc or self._description_looks_noisy(current_desc):
+                            tx.description = fallback_desc
+                            logger.info(f"VIB: Assigned desc to TX {tx.transaction_id}: {tx.description[:30]}...")
+
+                # Final description fallback for VIB PDF:
+                # if OCR remark is empty, use transaction type code (Loại GD / Tran).
+                tx_code_by_id = {tx_id: code for tx_id, _, code in tx_headers}
+                fallback_by_code_count = 0
+                for tx in txs:
+                    current_desc = (tx.description or "").strip()
+                    if current_desc:
+                        continue
+                    tx_code = tx_code_by_id.get(tx.transaction_id or "")
+                    if not tx_code:
+                        continue
+                    tx.description = tx_code
+                    fallback_by_code_count += 1
+
+                if fallback_by_code_count > 0:
+                    logger.info(
+                        "VIB: Filled empty descriptions by transaction code "
+                        f"for {fallback_by_code_count} rows"
+                    )
 
                 for tx in txs:
                     if tx.transaction_id not in processed_tx_ids:
@@ -798,14 +1038,14 @@ class VIBParser(BaseBankParser):
             # Get description for this transaction (if available)
             description = descriptions[tx_idx] if tx_idx < len(descriptions) else ""
 
-            # SWAPPED MAPPING:
-            # - Phát sinh nợ (Withdrawal) = CREDIT (tiền ra)
-            # - Phát sinh có (Deposit) = DEBIT (tiền vào)
+            # Standard mapping:
+            # - Phát sinh nợ (Withdrawal) = DEBIT (tiền ra)
+            # - Phát sinh có (Deposit) = CREDIT (tiền vào)
             tx = BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=deposit if deposit > 0 else None,         # Deposit → Debit (tiền vào)
-                credit=withdrawal if withdrawal > 0 else None,  # Withdrawal → Credit (tiền ra)
+                debit=withdrawal if withdrawal > 0 else None,  # Withdrawal -> Debit (money out)
+                credit=deposit if deposit > 0 else None,       # Deposit -> Credit (money in)
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -815,7 +1055,10 @@ class VIBParser(BaseBankParser):
                 beneficiary_acc_name=""
             )
             transactions.append(tx)
-            logger.info(f"VIB complex: TX {tx_id} - debit(deposit)={deposit}, credit(withdrawal)={withdrawal}, desc={description[:30] if description else ''}")
+            logger.info(
+                f"VIB complex: TX {tx_id} - debit(withdrawal)={withdrawal}, "
+                f"credit(deposit)={deposit}, desc={description[:30] if description else ''}"
+            )
 
         return transactions
 
@@ -839,6 +1082,8 @@ class VIBParser(BaseBankParser):
         """
         transactions = []
         lines = section.split('\n')
+        outflow_codes = {"FTDR", "SC60", "VATX"}
+        inflow_codes = {"FTCR", "CRIN", "CLCR"}
 
         i = 0
         while i < len(lines):
@@ -896,22 +1141,63 @@ class VIBParser(BaseBankParser):
                     amounts = amounts_after
                     description = self._extract_description_after_tx(lines, i)
                 else:
-                    logger.debug(f"VIB simple: TX {tx_id} - not enough amounts (after={len(amounts_after)}, before={len(amounts_before)})")
-                    i += 1
-                    continue
+                    # Adaptive fallback:
+                    # if OCR yields only one local amount for this TX while nearby
+                    # blocks still contain previous grouped amounts.
+                    if len(amounts_after) == 1 and len(amounts_before) >= 2:
+                        lone_val = amounts_after[0]
+                        # Guard against accidentally treating running balance as TX amount
+                        if 0 < lone_val < 1_000_000_000:
+                            if code in outflow_codes:
+                                amounts = [lone_val, 0.0]
+                                description = ""
+                                logger.debug(
+                                    f"VIB simple: TX {tx_id} - one-sided fallback as withdrawal={lone_val}"
+                                )
+                            elif code in inflow_codes:
+                                amounts = [0.0, lone_val]
+                                description = ""
+                                logger.debug(
+                                    f"VIB simple: TX {tx_id} - one-sided fallback as deposit={lone_val}"
+                                )
+                            else:
+                                logger.debug(
+                                    f"VIB simple: TX {tx_id} - unknown code for one-sided fallback: {code}"
+                                )
+                                i += 1
+                                continue
+                        else:
+                            logger.debug(
+                                f"VIB simple: TX {tx_id} - one-sided amount looks like balance ({lone_val}), skip"
+                            )
+                            i += 1
+                            continue
+                    else:
+                        logger.debug(
+                            f"VIB simple: TX {tx_id} - not enough amounts "
+                            f"(after={len(amounts_after)}, before={len(amounts_before)})"
+                        )
+                        i += 1
+                        continue
 
             withdrawal = amounts[0]  # Phát sinh nợ (tiền ra)
             deposit = amounts[1]     # Phát sinh có (tiền vào)
             tx_date = self._parse_date_from_text(date_str)
 
-            # SWAPPED MAPPING:
-            # - Phát sinh nợ (Withdrawal) = CREDIT (tiền ra)
-            # - Phát sinh có (Deposit) = DEBIT (tiền vào)
+            # Skip OCR noise rows that yield both sides as zero.
+            if withdrawal == 0 and deposit == 0:
+                logger.debug(f"VIB simple: TX {tx_id} - both amounts are zero, skip")
+                i += 1
+                continue
+
+            # Standard mapping:
+            # - Phát sinh nợ (Withdrawal) = DEBIT (tiền ra)
+            # - Phát sinh có (Deposit) = CREDIT (tiền vào)
             tx = BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=deposit if deposit > 0 else None,         # Deposit → Debit (tiền vào)
-                credit=withdrawal if withdrawal > 0 else None,  # Withdrawal → Credit (tiền ra)
+                debit=withdrawal if withdrawal > 0 else None,  # Withdrawal -> Debit (money out)
+                credit=deposit if deposit > 0 else None,       # Deposit -> Credit (money in)
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -1063,6 +1349,35 @@ class VIBParser(BaseBankParser):
                     elif len(all_amounts) >= amounts_to_skip + 3:
                         break
                 prev_was_date = False
+
+        # Adaptive normalization:
+        # OCR can emit patterns like: "0", "0", "0 45,117,401,299".
+        # Promote the first non-zero value after long leading zeros to be
+        # the deposit candidate so we don't lose large incoming transactions.
+        if total_txs_in_group <= 1 and len(all_amounts) >= 4:
+            leading_zero_count = 0
+            for val in all_amounts:
+                if abs(val) < 1e-9:
+                    leading_zero_count += 1
+                else:
+                    break
+
+            if leading_zero_count >= 2:
+                first_non_zero_idx = next(
+                    (
+                        idx for idx, val in enumerate(all_amounts[leading_zero_count:], start=leading_zero_count)
+                        if val > 0
+                    ),
+                    None
+                )
+                if first_non_zero_idx is not None and first_non_zero_idx > 1:
+                    promoted_val = all_amounts[first_non_zero_idx]
+                    trailing_vals = all_amounts[first_non_zero_idx + 1:]
+                    all_amounts = [0.0, promoted_val] + trailing_vals
+                    logger.debug(
+                        "VIB: promoted non-zero value after leading zeros in amount stream: "
+                        f"{promoted_val}"
+                    )
 
         # Extract our TX's amounts from the collected amounts
         if amounts_to_skip > 0:
@@ -1278,7 +1593,238 @@ class VIBParser(BaseBankParser):
 
                 return ' '.join(desc_parts)
 
+            # OCR variant: "0 45,117,401,299" then description on next lines.
+            zero_balance = re.match(r'^0+\s+[\d,]{5,}(?:\s+([A-Za-z_].*))?$', line)
+            if zero_balance:
+                desc_parts = []
+                inline_desc = (zero_balance.group(1) or "").strip()
+                if inline_desc:
+                    desc_parts.append(inline_desc)
+
+                for k in range(j + 1, min(j + 15, len(lines))):
+                    cont_line = lines[k].strip()
+                    if not cont_line:
+                        continue
+
+                    if re.match(r'^[^0-9]?\d{10}\s+\d{1,2}/\d{1,2}/\d{4}', cont_line):
+                        break
+                    if re.match(r'^[\d,]{5,}\s+[A-Za-z_]', cont_line):
+                        break
+                    if re.match(r'^[\d,]{5,}$', cont_line):
+                        break
+                    if re.match(r'^\d{11,}$', cont_line):
+                        continue
+                    if any(skip in cont_line.lower() for skip in [
+                        'withdrawal', 'deposit', 'balance', 'số dư', 'phát sinh',
+                        'ending balance', 'available balance', 'doanh số'
+                    ]):
+                        break
+
+                    if re.search(r'[A-Za-z_À-ỹà-ỹ]', cont_line):
+                        desc_parts.append(cont_line)
+
+                if desc_parts:
+                    return ' '.join(desc_parts)
+
         return ""
+
+    def _description_looks_noisy(self, description: str) -> bool:
+        """Heuristic detector for OCR-noisy description strings."""
+        text = re.sub(r'\s+', ' ', (description or "").strip())
+        if not text:
+            return False
+
+        letters = len(re.findall(r'[A-Za-zÀ-ỹà-ỹ]', text))
+        digits = len(re.findall(r'\d', text))
+
+        # Multiple monetary patterns in one description usually means
+        # OCR column bleeding (amounts mixed into remark text).
+        amount_tokens = re.findall(r'\b\d{1,3}(?:,\d{3})+\b', text)
+        if len(amount_tokens) >= 2:
+            return True
+
+        if digits >= 6 and digits > letters:
+            return True
+
+        return False
+
+    def _description_looks_footer(self, description: str) -> bool:
+        """Detect footer/header-like text that should not be used as transaction remark."""
+        text = re.sub(r'\s+', ' ', (description or "").strip())
+        if not text:
+            return False
+
+        normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
+        lowered = text.lower()
+
+        markers = [
+            'so du', 'ending balance', 'available balance', 'transaction summary',
+            'number of transactions', 'statement date', 'statement period',
+            'doanh so', 'tong so', 'phat sinh', 'doanh', 'giao dich'
+        ]
+        if any(marker in normalized or marker in lowered for marker in markers):
+            return True
+
+        if ':' in text and len(text) < 80:
+            return True
+
+        return False
+
+    def _is_fee_like_description(self, description: str) -> bool:
+        """Detect fee/charge-like description keywords (accent-insensitive)."""
+        text = re.sub(r'\s+', ' ', (description or "").strip())
+        if not text:
+            return False
+
+        normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
+        keywords = ['fee', 'phi', 'charge', 'commission', 'vat']
+        return any(k in normalized for k in keywords)
+
+    def _should_adjust_large_reconstructed_debit(
+        self,
+        tx_code: str,
+        debit_amount: Optional[float],
+        source_balance: Optional[float],
+        description: str
+    ) -> bool:
+        """
+        Guard against OCR cases where a tiny running balance is misinterpreted
+        and creates an outlier debit via balance-delta reconstruction.
+        """
+        if debit_amount is None or debit_amount <= 0:
+            return False
+        if tx_code not in {"FTDR", "SC60", "VATX"}:
+            return False
+        if debit_amount < 100_000_000:
+            return False
+        if source_balance is None or source_balance <= 0 or source_balance >= 20_000_000:
+            return False
+        if not self._is_fee_like_description(description):
+            return False
+        return True
+
+    def _has_tx_amount(self, debit: Optional[float], credit: Optional[float]) -> bool:
+        """Return True when either side has a positive amount."""
+        return (debit is not None and debit > 0) or (credit is not None and credit > 0)
+
+    def _is_amount_direction_consistent(
+        self, tx_code: str, debit: Optional[float], credit: Optional[float]
+    ) -> bool:
+        """
+        Check whether debit/credit direction is consistent with transaction code.
+        Unknown codes are treated as consistent.
+        """
+        outflow_codes = {"FTDR", "SC60", "VATX"}
+        inflow_codes = {"FTCR", "CRIN", "CLCR"}
+
+        debit_val = debit or 0.0
+        credit_val = credit or 0.0
+
+        if tx_code in outflow_codes:
+            return debit_val > 0 and credit_val == 0
+        if tx_code in inflow_codes:
+            return credit_val > 0 and debit_val == 0
+        return True
+
+    def _is_balance_like_value(
+        self,
+        value: Optional[float],
+        opening_balance: Optional[float],
+        closing_balance: Optional[float],
+    ) -> bool:
+        """Detect when value is suspiciously equal to section opening/closing balance."""
+        if value is None or value <= 0:
+            return False
+        tol = 0.5
+        if opening_balance is not None and abs(value - opening_balance) <= tol:
+            return True
+        if closing_balance is not None and abs(value - closing_balance) <= tol:
+            return True
+        return False
+
+    def _should_override_existing_with_reconstruction(
+        self,
+        tx_code: str,
+        existing_debit: Optional[float],
+        existing_credit: Optional[float],
+        opening_balance: Optional[float],
+        closing_balance: Optional[float],
+    ) -> bool:
+        """
+        Decide whether to replace existing parsed amount by reconstructed amount.
+
+        V2 principle:
+        - Keep explicit parser result by default.
+        - Override only when existing result is missing or clearly suspicious.
+        """
+        if not self._has_tx_amount(existing_debit, existing_credit):
+            return True
+
+        debit_val = existing_debit or 0.0
+        credit_val = existing_credit or 0.0
+
+        # Existing row has both sides valued -> likely OCR mismatch.
+        if debit_val > 0 and credit_val > 0:
+            return True
+
+        # Existing amount equals opening/closing balance -> likely picked balance column.
+        if self._is_balance_like_value(existing_debit, opening_balance, closing_balance):
+            return True
+        if self._is_balance_like_value(existing_credit, opening_balance, closing_balance):
+            return True
+
+        # Direction mismatch with code -> likely shifted columns.
+        if not self._is_amount_direction_consistent(tx_code, existing_debit, existing_credit):
+            return True
+
+        return False
+
+    def _is_low_confidence_reconstructed_amount(
+        self,
+        tx_code: str,
+        reconstructed_debit: Optional[float],
+        reconstructed_credit: Optional[float],
+        local_signal: Optional[dict],
+    ) -> bool:
+        """
+        Flag reconstructed outliers that are weakly supported by nearby OCR evidence.
+        """
+        if not self._has_tx_amount(reconstructed_debit, reconstructed_credit):
+            return True
+
+        outflow_codes = {"FTDR", "SC60", "VATX"}
+        debit_val = reconstructed_debit or 0.0
+        credit_val = reconstructed_credit or 0.0
+
+        if tx_code in outflow_codes and debit_val >= 100_000_000:
+            local_max = (local_signal or {}).get("max", 0.0) or 0.0
+            local_count = (local_signal or {}).get("count", 0)
+            # Large debit reconstructed from balance-delta but nearby block has
+            # no comparable explicit amount -> low confidence.
+            if local_max < 10_000_000 and local_count <= 2:
+                return True
+
+        # Direction mismatch in reconstructed result is low confidence.
+        if not self._is_amount_direction_consistent(tx_code, reconstructed_debit, reconstructed_credit):
+            return True
+
+        # If both sides present on reconstructed output, treat as unstable.
+        if debit_val > 0 and credit_val > 0:
+            return True
+
+        return False
+
+    def _compute_amount_totals_for_headers(self, tx_map: dict, tx_headers: List[tuple]) -> tuple[float, float]:
+        """Compute debit/credit totals for transactions in header order."""
+        debit_total = 0.0
+        credit_total = 0.0
+        for tx_id, _, _ in tx_headers:
+            tx = tx_map.get(tx_id)
+            if not tx:
+                continue
+            debit_total += tx.debit or 0.0
+            credit_total += tx.credit or 0.0
+        return debit_total, credit_total
 
     def _extract_all_descriptions(self, section: str) -> List[str]:
         """
@@ -1343,6 +1889,640 @@ class VIBParser(BaseBankParser):
             descriptions.append(' '.join(current_desc_parts))
 
         return descriptions
+
+    def _extract_tx_headers_from_section(self, section: str) -> List[tuple]:
+        """
+        Extract transaction headers in original appearance order.
+
+        Returns:
+            List of (tx_id, date_str, code)
+        """
+        return [
+            (tx_id, date_str, code)
+            for tx_id, date_str, code, _ in self._extract_tx_headers_with_line_index(section)
+        ]
+
+    def _extract_tx_headers_with_line_index(self, section: str) -> List[tuple]:
+        """
+        Extract transaction headers with line index.
+
+        Returns:
+            List of (tx_id, date_str, code, line_idx)
+        """
+        headers = []
+        for idx, line in enumerate(section.split('\n')):
+            line = line.strip()
+            m = re.match(
+                r'^[^0-9]?(\d{10})\s+(\d{1,2}/\d{1,2}/\d{4})\s+\d{1,2}/\d{1,2}/\d{4}\s+([A-Z][A-Z0-9]{1,5})',
+                line
+            )
+            if m:
+                headers.append((m.group(1), m.group(2), m.group(3).upper(), idx))
+        return headers
+
+    def _extract_local_amount_signals(
+        self,
+        section: str,
+        currency: str,
+        tx_headers_with_idx: List[tuple],
+    ) -> dict:
+        """
+        Collect local numeric evidence around each transaction block.
+
+        Used by VIB v2 to gate low-confidence reconstruction overrides.
+        """
+        lines = section.split('\n')
+        signals = {}
+        tx_line_pattern = r'^[^0-9]?\d{10}\s+\d{1,2}/\d{1,2}/\d{4}'
+
+        for i, (tx_id, _, _, line_idx) in enumerate(tx_headers_with_idx):
+            next_line_idx = tx_headers_with_idx[i + 1][3] if i + 1 < len(tx_headers_with_idx) else len(lines)
+            window_end = min(next_line_idx, line_idx + 25, len(lines))
+
+            positives = []
+            for j in range(line_idx + 1, window_end):
+                line = lines[j].strip()
+                if not line:
+                    continue
+                if re.match(tx_line_pattern, line):
+                    break
+                if re.search(r'\d{1,2}/\d{1,2}/\d{4}', line):
+                    continue
+
+                lower = line.lower()
+                if any(stop in lower for stop in [
+                    'transaction summary', 'number of transactions',
+                    'doanh số', 'doanh so', 'tổng số', 'tong so'
+                ]):
+                    break
+
+                if currency == "USD":
+                    tokens = re.findall(r'(\d+\.\d{2}|\b0\b)', line)
+                else:
+                    tokens = re.findall(r'(\d{1,3}(?:,\d{3})+|\b\d{1,9}\b)', line)
+
+                for token in tokens:
+                    clean = token.replace(',', '').replace('.', '')
+                    if len(clean) >= 11 and ',' not in token:
+                        continue  # likely reference number
+                    if re.match(r'^20[2-3]\d$', clean):
+                        continue  # likely year
+                    val = self._parse_number_from_text(token)
+                    if val is None or val <= 0:
+                        continue
+                    positives.append(val)
+
+            signals[tx_id] = {
+                "count": len(positives),
+                "max": max(positives) if positives else 0.0,
+                "min": min(positives) if positives else 0.0,
+            }
+
+        return signals
+
+    def _extract_balance_description_points(self, section: str, currency: str) -> List[dict]:
+        """
+        Extract running-balance candidates and aligned descriptions.
+
+        Handles OCR variants:
+        - "1,305,591,350 QV2_VC3_Chuyen ..."
+        - "1,310,038,884" (balance only)
+        - "0 45,117,401,299" (leading zero + actual balance)
+        """
+        points = []
+        lines = section.split('\n')
+
+        tx_line_pattern = r'^[^0-9]?\d{10}\s+\d{1,2}/\d{1,2}/\d{4}'
+        stop_markers = [
+            'withdrawal', 'deposit', 'balance', 'remarks',
+            'transaction summary', 'number of transactions',
+            'statement date', 'statement period', 'a/c no', 'type/ccy',
+            'ending balance', 'available balance', 'số dư cuối', 'số dư khả dụng',
+            'phát sinh', 'phat sinh', 'số dư đầu', 'so du dau', 'so du',
+            'doanh số', 'doanh so', 'tổng số', 'tong so', 'cheque no', 'reference',
+            'so ct', 'ngay gd', 'noi dung', 'trang so', 'sinh n', 'sinh c', 'doanh', 'giao d'
+        ]
+
+        def _normalize_text(value: str) -> str:
+            if not value:
+                return ""
+            # Accent-insensitive matching for OCR variants and mojibake-like text.
+            return unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
+
+        def _is_tx_line(line: str) -> bool:
+            return bool(re.match(tx_line_pattern, line))
+
+        def _is_stop_line(line: str) -> bool:
+            lower = line.lower()
+            normalized = _normalize_text(line)
+            return any(stop in lower or stop in normalized for stop in stop_markers)
+
+        def _extract_balance_candidate(line: str) -> tuple[Optional[float], str]:
+            """Return (balance_value, desc_head). desc_head can be empty."""
+            if not line:
+                return None, ""
+            if _is_tx_line(line) or _is_stop_line(line):
+                return None, ""
+            if re.search(r'\d{1,2}/\d{1,2}/\d{4}', line):
+                return None, ""
+
+            if currency == "USD":
+                m = re.match(r'^0+(?:\.00)?\s+(\d+\.\d{2})(?:\s+(.+))?$', line)
+                if m:
+                    val = self._parse_number_from_text(m.group(1))
+                    desc_head = (m.group(2) or "").strip()
+                    if not desc_head or not re.search(r'[A-Za-zÀ-ỹà-ỹ]', desc_head):
+                        desc_head = ""
+                        return None, ""
+                    return val, desc_head
+
+                m = re.match(r'^(\d+\.\d{2})(?:\s+(.+))?$', line)
+                if m:
+                    val = self._parse_number_from_text(m.group(1))
+                    desc_head = (m.group(2) or "").strip()
+                    if not desc_head or not re.search(r'[A-Za-zÀ-ỹà-ỹ]', desc_head):
+                        desc_head = ""
+                        return None, ""
+                    return val, desc_head
+                return None, ""
+
+            if len(re.findall(r'\d{1,3}(?:,\d{3})+', line)) >= 2 and not re.search(r'[A-Za-zÀ-ỹà-ỹ]', line):
+                # Pure multi-number lines are usually amount streams / summaries.
+                return None, ""
+
+            m = re.match(r'^0+\s+(\d{1,3}(?:,\d{3})+)(?:\s+(.+))?$', line)
+            if m:
+                val = self._parse_number_from_text(m.group(1))
+                desc_head = (m.group(2) or "").strip()
+                if not desc_head or not re.search(r'[A-Za-zÀ-ỹà-ỹ]', desc_head):
+                    desc_head = ""
+                    return None, ""
+                return val, desc_head
+
+            m = re.match(r'^(\d{1,3}(?:,\d{3})+)(?:\s+(.+))?$', line)
+            if m:
+                val = self._parse_number_from_text(m.group(1))
+                desc_head = (m.group(2) or "").strip()
+                if not desc_head or not re.search(r'[A-Za-zÀ-ỹà-ỹ]', desc_head):
+                    desc_head = ""
+                    return None, ""
+                return val, desc_head
+
+            return None, ""
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                i += 1
+                continue
+
+            balance_val, desc_head = _extract_balance_candidate(line)
+            if balance_val is None or balance_val <= 0:
+                i += 1
+                continue
+
+            if _is_stop_line(desc_head):
+                i += 1
+                continue
+
+            desc_parts = [desc_head]
+            j = i + 1
+
+            # Collect multiline continuation for description blocks.
+            while j < len(lines):
+                next_line = lines[j].strip()
+                if not next_line:
+                    j += 1
+                    continue
+
+                # Stop at next transaction, next balance+description block, or summary/header lines.
+                if _is_tx_line(next_line):
+                    break
+                next_balance_val, _ = _extract_balance_candidate(next_line)
+                if next_balance_val is not None:
+                    break
+                if _is_stop_line(next_line):
+                    break
+                if ':' in next_line and len(next_line) <= 80:
+                    break
+                if re.search(
+                    r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\b',
+                    next_line.lower()
+                ):
+                    break
+
+                # Skip pure numeric lines (amounts, refs, counters).
+                if re.match(r'^[\d,\.]+$', next_line):
+                    # Numeric-only lines between a balance and textual continuation
+                    # are usually amounts/counters; skip but keep scanning.
+                    j += 1
+                    continue
+                if re.match(r'^\d{11,}$', next_line):
+                    j += 1
+                    continue
+
+                # Keep lines containing textual content.
+                if re.search(r'[A-Za-z_À-ỹà-ỹ]', next_line):
+                    desc_parts.append(next_line)
+
+                j += 1
+
+            desc_full = re.sub(r'\s+', ' ', ' '.join(desc_parts)).strip() if desc_parts else ""
+            # Quality signal for reconstruction:
+            # - Rich textual description => highly likely true running balance row.
+            # - Empty description => may be withdrawal/deposit value in OCR stream.
+            quality = 1.0
+            if not desc_full:
+                quality = 0.35
+            elif len(desc_full) < 6:
+                quality = 0.7
+            if self._description_looks_footer(desc_full):
+                quality = 0.1
+
+            points.append({"balance": balance_val, "description": desc_full, "quality": quality})
+            i = j
+
+        if points:
+            return points
+
+        return self._extract_numeric_balance_points(section, currency)
+
+    def _extract_numeric_balance_points(self, section: str, currency: str) -> List[dict]:
+        """
+        Fallback for sections where OCR emits amount streams without description text.
+
+        Returns numeric balance candidates (description empty) for reconstruction.
+        """
+        lines = section.split('\n')
+        tx_headers = self._extract_tx_headers_with_line_index(section)
+        if not tx_headers:
+            return []
+
+        tx_line_pattern = r'^[^0-9]?\d{10}\s+\d{1,2}/\d{1,2}/\d{4}'
+
+        def _normalize_text(value: str) -> str:
+            return unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode("ascii").lower()
+
+        header_markers = [
+            'withdrawal', 'deposit', 'balance', 'remarks',
+            'cheque no', 'reference', 'statement date', 'statement period',
+            'so ct', 'ngay gd', 'seq.', 'a/c no', 'type/ccy'
+        ]
+        footer_markers = [
+            'so du cuoi', 'ending balance', 'available balance',
+            'transaction summary', 'doanh so giao dich', 'number of transactions', 'tong so giao dich'
+        ]
+
+        first_tx_idx = tx_headers[0][3]
+        points: List[dict] = []
+
+        for i in range(first_tx_idx + 1, len(lines)):
+            line = lines[i].strip()
+            if not line:
+                continue
+
+            lower = line.lower()
+            norm = _normalize_text(line)
+            if re.match(tx_line_pattern, line):
+                continue
+            if re.search(r'\d{1,2}/\d{1,2}/\d{4}', line):
+                continue
+            if any(marker in lower or marker in norm for marker in footer_markers):
+                break
+            if any(marker in lower or marker in norm for marker in header_markers):
+                continue
+
+            val: Optional[float] = None
+            if currency == "USD":
+                m = re.match(r'^0+(?:\.00)?\s+(\d+\.\d{2})$', line)
+                if m:
+                    val = self._parse_number_from_text(m.group(1))
+                elif re.match(r'^(\d+\.\d{2})$', line):
+                    val = self._parse_number_from_text(line)
+            else:
+                m = re.match(r'^0+\s+(\d{1,3}(?:,\d{3})+)$', line)
+                if m:
+                    val = self._parse_number_from_text(m.group(1))
+                elif re.match(r'^(\d{1,3}(?:,\d{3})+)$', line):
+                    val = self._parse_number_from_text(line)
+                elif re.match(r'^\d{4,}$', line):
+                    if len(line) != 10 and not re.match(r'^20[2-3]\d$', line):
+                        val = float(line)
+
+            if val is None or val <= 0:
+                continue
+
+            # Skip obvious 1-3 digit counters.
+            if val < 1000 and currency != "USD":
+                continue
+
+            points.append({"balance": val, "description": "", "quality": 0.25})
+
+        # Deduplicate consecutive duplicates from OCR repetition noise.
+        deduped: List[dict] = []
+        for point in points:
+            if deduped and abs(deduped[-1]["balance"] - point["balance"]) <= 0.5:
+                continue
+            deduped.append(point)
+
+        return deduped
+
+    def _extract_summary_totals_from_section(
+        self, section: str, currency: str
+    ) -> tuple[Optional[float], Optional[float], Optional[int]]:
+        """
+        Extract transaction summary totals from the section footer.
+
+        Returns:
+            (total_withdrawal, total_deposit, tx_count)
+        """
+        lines = [ln.strip() for ln in section.split('\n')]
+        marker_idx = -1
+
+        def _normalize_text(value: str) -> str:
+            return unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode("ascii").lower()
+
+        for i, line in enumerate(lines):
+            lower = line.lower()
+            norm = _normalize_text(line)
+            if 'transaction summary' in lower or 'doanh so giao dich' in norm:
+                marker_idx = i
+                break
+
+        if marker_idx == -1:
+            return None, None, None
+
+        totals: List[float] = []
+        tx_count = None
+
+        scan_end = min(marker_idx + 35, len(lines))
+        count_candidates: List[int] = []
+        count_anchor_idx: Optional[int] = None
+
+        for i in range(marker_idx, scan_end):
+            line = lines[i].strip()
+            lower = line.lower()
+            norm = _normalize_text(line)
+            if not line:
+                continue
+
+            if i > marker_idx and (line == "VIB" or "so tk/loai tk/loai tien" in norm):
+                break
+
+            if "number of transactions" in lower or "tong so giao dich" in norm:
+                count_anchor_idx = i
+
+            if currency == "USD":
+                matches = re.findall(r'(\d+\.\d{2})', line)
+                if not matches and re.match(r'^0(?:\.00)?$', line):
+                    matches = ['0.00']
+            else:
+                matches = re.findall(r'(\d{1,3}(?:,\d{3})+)', line)
+                if not matches and re.match(r'^0+$', line):
+                    matches = ['0']
+
+            for token in matches:
+                val = self._parse_number_from_text(token)
+                if val is not None:
+                    totals.append(val)
+
+            if re.match(r'^\d{1,3}$', line):
+                c_val = int(line)
+                if 0 < c_val < 1000:
+                    count_candidates.append(c_val)
+
+        total_withdrawal = totals[0] if len(totals) >= 2 else None
+        total_deposit = totals[1] if len(totals) >= 2 else None
+
+        if count_anchor_idx is not None:
+            for j in range(max(marker_idx, count_anchor_idx - 4), min(scan_end, count_anchor_idx + 5)):
+                c_line = lines[j].strip()
+                if re.match(r'^\d{1,3}$', c_line):
+                    c_val = int(c_line)
+                    if 0 < c_val < 1000:
+                        tx_count = c_val
+                        break
+
+        if tx_count is None and count_candidates:
+            tx_count = count_candidates[-1]
+
+        return total_withdrawal, total_deposit, tx_count
+
+    def _reconstruct_amounts_from_running_balances(
+        self,
+        section: str,
+        tx_headers: List[tuple],
+        opening_balance: Optional[float],
+        closing_balance: Optional[float],
+        currency: str
+    ) -> Optional[dict]:
+        """
+        Reconstruct debit/credit from running balance deltas.
+
+        This fallback is activated only when confidence is high:
+        - enough running-balance points
+        - closing balance match (if available)
+        - summary totals match (if available)
+        """
+        if not tx_headers:
+            return None
+        if opening_balance is None:
+            return None
+
+        points = self._extract_balance_description_points(section, currency)
+        if not points:
+            return None
+
+        # Remove obvious non-running-balance duplicate of opening balance.
+        filtered_points = []
+        for p in points:
+            bal = p.get("balance")
+            desc = (p.get("description") or "").strip()
+            if (
+                opening_balance is not None
+                and bal is not None
+                and abs(bal - opening_balance) <= 0.5
+                and not desc
+            ):
+                continue
+            filtered_points.append(p)
+
+        if not filtered_points:
+            return None
+
+        balances = [p["balance"] for p in filtered_points]
+        descriptions = [p["description"] for p in filtered_points]
+        qualities = [p.get("quality", 0.5) for p in filtered_points]
+
+        if closing_balance is not None:
+            if not balances or abs(balances[-1] - closing_balance) > 0.5:
+                balances.append(closing_balance)
+                descriptions.append("")
+
+        n = len(tx_headers)
+        if len(balances) < n:
+            return None
+
+        sum_withdrawal, sum_deposit, sum_count = self._extract_summary_totals_from_section(section, currency)
+
+        if sum_count is not None and sum_count != n:
+            return None
+
+        outflow_codes = {"FTDR", "SC60", "VATX"}
+        inflow_codes = {"FTCR", "CRIN", "CLCR"}
+
+        # Beam search over ordered subsequences, so we can skip noisy balance points
+        # inserted by OCR between true running balances.
+        beam_width = 300 if len(balances) <= 120 else 120
+        sum_guard = 50_000_000.0 if currency != "USD" else 10.0
+        zero_penalty = 1_000.0 if currency != "USD" else 0.01
+        quality_penalty_unit = 5_000_000.0 if currency != "USD" else 0.5
+
+        beam = [{
+            "last_idx": -1,
+            "prev_balance": opening_balance,
+            "indices": [],
+            "deltas": [],
+            "wd_total": 0.0,
+            "dep_total": 0.0,
+            "direction_penalty": 0.0,
+            "quality_penalty": 0.0,
+            "score_hint": 0.0,
+        }]
+
+        for tx_pos, (_, _, code) in enumerate(tx_headers):
+            remaining = n - tx_pos - 1
+            new_beam = []
+
+            for state in beam:
+                start_idx = state["last_idx"] + 1
+                end_idx = len(balances) - remaining - 1
+                if start_idx > end_idx:
+                    continue
+
+                for idx in range(start_idx, end_idx + 1):
+                    bal = balances[idx]
+                    delta = bal - state["prev_balance"]
+
+                    wd_total = state["wd_total"] + (-delta if delta < 0 else 0.0)
+                    dep_total = state["dep_total"] + (delta if delta > 0 else 0.0)
+
+                    if sum_withdrawal is not None and wd_total > sum_withdrawal + sum_guard:
+                        continue
+                    if sum_deposit is not None and dep_total > sum_deposit + sum_guard:
+                        continue
+
+                    direction_penalty = state["direction_penalty"]
+                    if code in outflow_codes and delta >= 0:
+                        direction_penalty += abs(delta) + zero_penalty
+                    if code in inflow_codes and delta <= 0:
+                        direction_penalty += abs(delta) + zero_penalty
+
+                    quality = qualities[idx] if idx < len(qualities) else 0.5
+                    quality_penalty = state["quality_penalty"] + (1.0 - quality) * quality_penalty_unit
+
+                    score_hint = direction_penalty + quality_penalty
+                    # Softly guide toward closing balance near the end.
+                    if closing_balance is not None and tx_pos == n - 1:
+                        score_hint += abs(bal - closing_balance)
+
+                    new_beam.append({
+                        "last_idx": idx,
+                        "prev_balance": bal,
+                        "indices": state["indices"] + [idx],
+                        "deltas": state["deltas"] + [delta],
+                        "wd_total": wd_total,
+                        "dep_total": dep_total,
+                        "direction_penalty": direction_penalty,
+                        "quality_penalty": quality_penalty,
+                        "score_hint": score_hint,
+                    })
+
+            if not new_beam:
+                return None
+
+            new_beam.sort(key=lambda s: s["score_hint"])
+            beam = new_beam[:beam_width]
+
+        best = None
+        for state in beam:
+            last_balance = balances[state["last_idx"]] if state["last_idx"] >= 0 else opening_balance
+            close_err = abs(last_balance - closing_balance) if closing_balance is not None else 0.0
+            wd_err = abs(state["wd_total"] - sum_withdrawal) if sum_withdrawal is not None else 0.0
+            dep_err = abs(state["dep_total"] - sum_deposit) if sum_deposit is not None else 0.0
+
+            score = state["direction_penalty"] + state["quality_penalty"] + close_err + wd_err + dep_err
+            if best is None or score < best["score"]:
+                best = {
+                    "score": score,
+                    "indices": state["indices"],
+                    "deltas": state["deltas"],
+                    "wd_total": state["wd_total"],
+                    "dep_total": state["dep_total"],
+                    "close_err": close_err,
+                    "wd_err": wd_err,
+                    "dep_err": dep_err,
+                    "direction_penalty": state["direction_penalty"],
+                    "quality_penalty": state["quality_penalty"],
+                }
+
+        if not best:
+            return None
+
+        # Confidence gate to avoid harming already-good parses.
+        close_tol = 5_000.0 if currency != "USD" else 0.5
+        sum_tol = 5_000.0 if currency != "USD" else 0.5
+
+        if closing_balance is not None and best["close_err"] > close_tol:
+            return None
+        if sum_withdrawal is not None and best["wd_err"] > sum_tol:
+            return None
+        if sum_deposit is not None and best["dep_err"] > sum_tol:
+            return None
+
+        reconstructed = {}
+        for idx, (tx_id, _, tx_code) in enumerate(tx_headers):
+            delta = best["deltas"][idx]
+            withdrawal = -delta if delta < 0 else 0.0
+            deposit = delta if delta > 0 else 0.0
+            point_idx = best["indices"][idx]
+            desc = descriptions[point_idx] if point_idx < len(descriptions) else ""
+            if self._description_looks_footer(desc):
+                desc = ""
+
+            # If description is empty/too short, try nearby skipped points
+            # between this chosen balance and the next chosen balance.
+            if len((desc or "").strip()) < 12:
+                next_idx = best["indices"][idx + 1] if idx + 1 < len(best["indices"]) else len(descriptions)
+                search_end = min(next_idx, point_idx + 5)
+                for look_idx in range(point_idx + 1, search_end):
+                    candidate = (descriptions[look_idx] or "").strip()
+                    if not candidate:
+                        continue
+                    if self._description_looks_footer(candidate) or self._description_looks_noisy(candidate):
+                        continue
+                    if len(candidate) > len(desc):
+                        desc = candidate
+                        break
+
+            reconstructed[tx_id] = {
+                "debit": withdrawal,
+                "credit": deposit,
+                "description": desc,
+                "source_balance": balances[point_idx] if point_idx < len(balances) else None,
+                "tx_code": tx_code,
+            }
+
+        logger.info(
+            "VIB reconstruction: "
+            f"first_idx={best['indices'][0] if best['indices'] else -1} tx={n} "
+            f"totals(wd={best['wd_total']}, dep={best['dep_total']}) "
+            f"errors(close={best['close_err']}, wd={best['wd_err']}, dep={best['dep_err']}) "
+            f"penalties(direction={best['direction_penalty']}, quality={best['quality_penalty']})"
+        )
+
+        return reconstructed
 
     def _parse_vib_transaction_line(self, line: str, lines: List[str], line_idx: int, acc_no: str, currency: str) -> Optional[BankTransaction]:
         """
@@ -1429,8 +2609,8 @@ class VIBParser(BaseBankParser):
             return BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=deposit if deposit > 0 else None,         # Deposit → Debit (tiền vào)
-                credit=withdrawal if withdrawal > 0 else None,  # Withdrawal → Credit (tiền ra)
+                debit=withdrawal if withdrawal > 0 else None,  # Withdrawal -> Debit (money out)
+                credit=deposit if deposit > 0 else None,       # Deposit -> Credit (money in)
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -1560,8 +2740,8 @@ class VIBParser(BaseBankParser):
             return BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=deposit if deposit > 0 else None,         # Deposit → Debit (tiền vào)
-                credit=withdrawal if withdrawal > 0 else None,  # Withdrawal → Credit (tiền ra)
+                debit=withdrawal if withdrawal > 0 else None,  # Withdrawal -> Debit (money out)
+                credit=deposit if deposit > 0 else None,       # Deposit -> Credit (money in)
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -1612,11 +2792,11 @@ class VIBParser(BaseBankParser):
             if withdrawal == 0 and deposit == 0:
                 return None
 
-            # SWAPPED MAPPING:
-            # Debit = Deposit (Phát sinh có)
-            # Credit = Withdrawal (Phát sinh nợ)
-            debit_val = deposit
-            credit_val = withdrawal
+            # Standard mapping:
+            # Debit = Withdrawal (Phat sinh no, money out)
+            # Credit = Deposit (Phat sinh co, money in)
+            debit_val = withdrawal
+            credit_val = deposit
 
             # Parse date
             tx_date = self._parse_date_from_text(date_str)
@@ -1739,18 +2919,27 @@ class VIBParser(BaseBankParser):
         Fallback balance extraction for a section when primary method fails.
         """
         section_lower = section.lower()
+        summary_markers = [
+            'doanh số', 'doanh so', 'transaction summary',
+            'number of transactions', 'tổng số', 'tong so'
+        ]
 
         for label in labels:
             label_lower = label.lower()
+            normalized_label = unicodedata.normalize("NFKD", label_lower).encode("ascii", "ignore").decode("ascii").lower()
+            is_opening_label = ("opening" in normalized_label) or ("dau" in normalized_label)
+            is_closing_label = ("ending" in normalized_label) or ("cuoi" in normalized_label)
             pos = section_lower.find(label_lower)
-
             if pos == -1:
                 continue
 
-            # Extract window after the label
-            window = section[pos:pos + 400]
+            window = section[pos:pos + 600]
+            window_lower = window.lower()
 
-            # For USD - look for decimal numbers
+            cut_positions = [window_lower.find(marker) for marker in summary_markers if window_lower.find(marker) != -1]
+            if cut_positions:
+                window = window[:min(cut_positions)]
+
             if currency == "USD":
                 usd_matches = re.findall(r'(\d+\.\d{2})', window)
                 for num_str in usd_matches:
@@ -1758,15 +2947,11 @@ class VIBParser(BaseBankParser):
                     if val >= 0:
                         logger.info(f"VIB fallback (USD): found {val} for '{label}'")
                         return val
-
-            # For VND - look for comma-separated numbers with proper format
-            # For closing balance, we want the LAST valid candidate (actual balance comes after totals)
-            is_closing = any(marker in label_lower for marker in ['cuoi', 'cuối', 'ending'])
+                continue
 
             vnd_matches = re.findall(r'\b(\d{1,3}(?:,\d{3})+)\b', window)
             vnd_candidates = []
             for num_str in vnd_matches:
-                # Skip transaction IDs (exactly 10 digits)
                 digits = num_str.replace(',', '')
                 if len(digits) == 10:
                     continue
@@ -1775,10 +2960,9 @@ class VIBParser(BaseBankParser):
                     vnd_candidates.append(val)
 
             if vnd_candidates:
-                if is_closing:
-                    val = vnd_candidates[-1]  # Last candidate for closing balance
-                else:
-                    val = vnd_candidates[0]   # First candidate for opening balance
+                # Prefer first candidate nearest to label to avoid picking
+                # summary totals near footer.
+                val = vnd_candidates[0]
                 logger.info(f"VIB fallback (VND): found {val} for '{label}' from candidates {vnd_candidates}")
                 return val
 
@@ -2096,6 +3280,9 @@ class VIBParser(BaseBankParser):
 
         for label in labels:
             label_lower = label.lower()
+            normalized_label = unicodedata.normalize("NFKD", label_lower).encode("ascii", "ignore").decode("ascii").lower()
+            is_opening_label = ("opening" in normalized_label) or ("dau" in normalized_label)
+            is_closing_label = ("ending" in normalized_label) or ("cuoi" in normalized_label)
 
             # Find lines containing the label
             for i, line in enumerate(lines):
@@ -2115,15 +3302,12 @@ class VIBParser(BaseBankParser):
                         logger.info(f"VIB section balance (USD): found {val} for '{label}' on line: {line[:80]}")
                         return val
 
-                    # Check for opening balance labels
-                    is_opening = any(marker in label.lower() for marker in ['dau', 'đầu', 'opening'])
-
                     # For OPENING balance: In some OCR formats, the balance appears BEFORE the label
                     # Example:
                     #   53.80
                     #   Số dư đầu ngày :
                     #   16 December 2025
-                    if is_opening:
+                    if is_opening_label:
                         # Look backward from the label line to find USD value
                         for j in range(i - 1, max(-1, i - 10), -1):
                             prev_line = lines[j].strip()
@@ -2164,7 +3348,7 @@ class VIBParser(BaseBankParser):
                     # For opening balance, also take the FIRST candidate
                     if usd_candidates:
                         # Filter out zero values for closing balance - we want the actual balance
-                        is_closing = any(marker in label.lower() for marker in ['cuoi', 'cuối', 'ending'])
+                        is_closing = is_closing_label
                         if is_closing:
                             # For closing, find first non-zero value (actual balance, not zero from empty fields)
                             for val in usd_candidates:
@@ -2208,10 +3392,41 @@ class VIBParser(BaseBankParser):
                         logger.info(f"VIB section balance (VND plain): found {val} for '{label}' on line: {line[:80]}")
                         return val
 
+                # In many VIB OCR outputs, opening balance is on a standalone
+                # numeric line BEFORE "Số dư đầu..." label.
+                if is_opening_label and not is_usd:
+                    for j in range(i - 1, max(-1, i - 12), -1):
+                        prev_line = lines[j].strip()
+                        if not prev_line:
+                            continue
+
+                        prev_norm = unicodedata.normalize("NFKD", prev_line).encode("ascii", "ignore").decode("ascii").lower()
+                        if any(stop in prev_norm for stop in ['vib', 'page', 'trang', 'statement period', 'a/c no', 'so tk']):
+                            break
+                        if re.search(r'\d{1,2}/\d{1,2}/\d{4}', prev_line):
+                            continue
+
+                        m_comma = re.match(r'^(\d{1,3}(?:,\d{3})+)$', prev_line)
+                        if m_comma:
+                            val = self._parse_number_from_text(m_comma.group(1))
+                            if val is not None and val > 0:
+                                logger.info(f"VIB section balance (VND before label): found {val} for '{label}'")
+                                return val
+
+                        m_plain = re.match(r'^(\d{4,})$', prev_line)
+                        if m_plain:
+                            num_str = m_plain.group(1)
+                            if len(num_str) == 10 or re.match(r'^20[2-3]\d$', num_str):
+                                continue
+                            val = float(num_str)
+                            if val > 0:
+                                logger.info(f"VIB section balance (VND before label): found {val} for '{label}'")
+                                return val
+
                 # Check next few lines for standalone balance value
                 # For closing balance, collect ALL candidates and pick the LARGEST
                 # (to avoid picking transaction amounts instead of actual balance)
-                is_closing = any(marker in label.lower() for marker in ['cuoi', 'cuối', 'ending'])
+                is_closing = is_closing_label
                 balance_candidates = []
 
                 for j in range(i + 1, min(i + 15, len(lines))):

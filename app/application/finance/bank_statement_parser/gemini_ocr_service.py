@@ -273,18 +273,7 @@ class GeminiOCRService:
         )
 
         try:
-            # Check cache first
-            from app.infrastructure.cache.redis_cache import get_cache_service, RedisCacheService
-            cache = await get_cache_service()
-            file_hash = RedisCacheService.hash_content(pdf_bytes)
-
-            cached_text = await cache.get_ocr_result(file_hash)
-            if cached_text:
-                logger.info(f"Cache hit for {file_name} (hash: {file_hash[:16]}...)")
-                metrics.processing_time_ms = (time.time() - start_time) * 1000
-                metrics.success = True
-                metrics.cache_hit = True
-                return cached_text, metrics
+            # Redis OCR cache disabled — always call Gemini for fresh results
 
             # Check if PDF is encrypted and decrypt if needed
             if self._is_pdf_encrypted(pdf_bytes):
@@ -337,9 +326,6 @@ Output the extracted text:"""
                 extracted_text = response.text
                 metrics.processing_time_ms = (time.time() - start_time) * 1000
                 metrics.success = True
-
-                # Cache the result
-                await cache.set_ocr_result(file_hash, extracted_text)
 
                 logger.info(
                     f"Successfully extracted {len(extracted_text)} chars from {file_name} "

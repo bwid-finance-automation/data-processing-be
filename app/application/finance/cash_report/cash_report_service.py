@@ -169,6 +169,19 @@ OPEN_NEW_EXCLUDED_REGEXES = frozenset({
     r"^WITHDRAWAL$",
 })
 
+# Intercompany profit-distribution payments are operational transfers,
+# not dividend expense and never open-new savings.
+PROFIT_DISTRIBUTION_KEYWORDS = (
+    "profit distribution",
+    "advance for profit distribution",
+    "phan loi nhuan",
+    "phan phoi loi nhuan",
+    "tam ung phan loi nhuan",
+    "tam ung phan phoi",
+    "chia loi nhuan",
+    "co tuc",
+)
+
 # Normalize known legacy/variant category names from reference files.
 TRANSACTION_NATURE_ALIASES = {
     "Operating Expense": "Operating expense",
@@ -1781,6 +1794,16 @@ class CashReportService:
                     tx._classified_by = "rule_guardrail"
                     return
         else:
+            # Intercompany profit-distribution payments should be transfer-out.
+            desc_lower = description.lower()
+            if (
+                self._has_dual_entity_transfer(desc_lower)
+                and self._is_profit_distribution_transfer(description)
+            ):
+                tx.nature = "Internal transfer out"
+                tx._classified_by = "rule_guardrail"
+                return
+
             # Open-new patterns (from OpenNew.csv) — explicit curated rules, always override
             if any(pattern.search(description) for pattern in self._open_new_patterns_compiled):
                 tx.nature = "Internal transfer out"
@@ -2800,14 +2823,328 @@ class CashReportService:
         writer = MovementDataWriter(working_file)
         return writer.get_data_preview(limit)
 
+    async def run_reconcile_checks(
+        self,
+        session_id: str,
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run Step 8 + Step 9 reconciliation checks with real data.
+
+        Step 8:
+        - Internal transfer in (debit) must equal internal transfer out (credit)
+
+        Step 9:
+        - Per account/currency closing balance reconciliation versus
+          ``Cash balance (BS)`` end-of-period balance.
+        """
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
+
+        working_file = self.template_manager.get_working_file_path(session_id)
+        if not working_file:
+            raise ValueError(f"Session {session_id} not found")
+
+        def _normalize_account_text(value: Any) -> str:
+            text = str(value or "").strip().replace("'", "")
+            if not text:
+                return ""
+            try:
+                if "." in text and float(text) == int(float(text)):
+                    return str(int(float(text)))
+            except (ValueError, OverflowError):
+                pass
+            return text
+
+        def _parse_decimal(value: Any, *, default_none: Optional[Decimal] = Decimal("0")) -> Optional[Decimal]:
+            if value is None:
+                return default_none
+            if isinstance(value, Decimal):
+                return value
+            if isinstance(value, (int, float)):
+                return Decimal(str(value))
+
+            raw = str(value).strip().replace("\u00A0", "").replace(" ", "")
+            if not raw:
+                return default_none
+
+            negative = False
+            if raw.startswith("(") and raw.endswith(")"):
+                negative = True
+                raw = raw[1:-1]
+
+            if re.match(r"^\d{1,3}(?:\.\d{3})+(?:,\d+)?$", raw):
+                raw = raw.replace(".", "").replace(",", ".")
+            else:
+                raw = raw.replace(",", "")
+
+            try:
+                parsed = Decimal(raw)
+            except Exception:
+                return default_none
+            return -parsed if negative else parsed
+
+        def _to_float(value: Optional[Decimal]) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        writer = MovementDataWriter(working_file)
+        transactions = writer.get_all_transactions()
+        acc_char_data = self._read_acc_char_full_data(working_file)
+
+        # account -> canonical currency fallback for rows where formula cache is empty
+        account_currency_map: Dict[str, str] = {}
+        for acc, info in acc_char_data.items():
+            cur = str((info or {}).get("currency") or "").strip().upper()
+            if cur:
+                account_currency_map[_normalize_account_text(acc)] = cur
+
+        # Movement aggregates by (account, currency)
+        movement_by_key: Dict[Tuple[str, str], Dict[str, Decimal]] = defaultdict(
+            lambda: {"debit": Decimal("0"), "credit": Decimal("0")}
+        )
+        internal_by_currency: Dict[str, Dict[str, Decimal]] = defaultdict(
+            lambda: {"in": Decimal("0"), "out": Decimal("0")}
+        )
+
+        for tx in transactions:
+            account = _normalize_account_text(tx.account)
+            if not account:
+                continue
+            currency = account_currency_map.get(account, "VND")
+            key = (account, currency)
+
+            debit = tx.debit or Decimal("0")
+            credit = tx.credit or Decimal("0")
+            movement_by_key[key]["debit"] += debit
+            movement_by_key[key]["credit"] += credit
+
+            nature = (tx.nature or "").strip().lower()
+            if nature == "internal transfer in":
+                internal_by_currency[currency]["in"] += debit
+            elif nature == "internal transfer out":
+                internal_by_currency[currency]["out"] += credit
+
+        # Read prior-period opening balances (by account/currency)
+        prior_opening_by_key: Dict[Tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
+        # Read bank statement balances from "Cash balance (BS)"
+        bank_bs_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Read metadata from current "Cash Balance" table
+        cash_balance_meta_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+        import openpyxl
+        wb = openpyxl.load_workbook(working_file, data_only=True, read_only=True)
+        try:
+            # Step 9 input A: prior period closing balances (opening for current period)
+            prior_sheet = None
+            for sheet_name in wb.sheetnames:
+                name_lower = sheet_name.lower()
+                if "prior" in name_lower and "cash" in name_lower:
+                    prior_sheet = wb[sheet_name]
+                    break
+            if prior_sheet is not None:
+                for row in prior_sheet.iter_rows(min_row=4, max_col=7):
+                    account = _normalize_account_text(row[2].value if len(row) > 2 else None)  # C
+                    currency = str(row[4].value or "").strip().upper() if len(row) > 4 else ""  # E
+                    if not account or not currency:
+                        continue
+                    value_raw = (row[5].value if currency == "VND" else row[6].value) if len(row) > 6 else None
+                    opening_val = _parse_decimal(value_raw)
+                    if opening_val is None:
+                        continue
+                    prior_opening_by_key[(account, currency)] += opening_val
+
+            # Step 9 input B: bank statement balances
+            if "Cash balance (BS)" in wb.sheetnames:
+                ws_bs = wb["Cash balance (BS)"]
+                for row in ws_bs.iter_rows(min_row=2, max_col=5):
+                    account = _normalize_account_text(row[0].value if len(row) > 0 else None)  # A
+                    currency = str(row[1].value or "").strip().upper() if len(row) > 1 else ""  # B
+                    if not account or not currency:
+                        continue
+                    bop = _parse_decimal(row[2].value if len(row) > 2 else None)  # C
+                    eop = _parse_decimal(row[3].value if len(row) > 3 else None, default_none=None)  # D
+                    bank_name = str(row[4].value or "").strip() if len(row) > 4 else ""  # E
+                    bank_bs_by_key[(account, currency)] = {
+                        "bop": bop,
+                        "eop": eop,
+                        "bank_name": bank_name,
+                    }
+
+            # Step 9 metadata: account display info from current Cash Balance sheet
+            if "Cash Balance" in wb.sheetnames:
+                ws_cb = wb["Cash Balance"]
+                for row_num, row in enumerate(ws_cb.iter_rows(min_row=4, max_col=25), start=4):
+                    account = _normalize_account_text(row[2].value if len(row) > 2 else None)  # C
+                    if not account or account.lower() == "x":
+                        continue
+                    currency = str(row[4].value or "").strip().upper() if len(row) > 4 else ""  # E
+                    if not currency:
+                        currency = account_currency_map.get(account, "VND")
+                    key = (account, currency)
+                    if key in cash_balance_meta_by_key:
+                        continue
+
+                    entity = str(row[0].value or "").strip() if len(row) > 0 else ""  # A
+                    branch = str(row[1].value or "").strip() if len(row) > 1 else ""  # B
+                    bank_name = str(row[24].value or "").strip() if len(row) > 24 else ""  # Y
+                    bank_1 = str(row[23].value or "").strip() if len(row) > 23 else ""  # X
+
+                    # Fallback to Acc_Char if formula cache on Cash Balance is empty
+                    acc_info = acc_char_data.get(account, {})
+                    if not entity:
+                        entity = str(acc_info.get("entity") or "").strip()
+                    if not branch:
+                        branch = str(acc_info.get("branch") or "").strip()
+
+                    cash_balance_meta_by_key[key] = {
+                        "row": row_num,
+                        "entity": entity,
+                        "branch": branch,
+                        "bank": bank_name,
+                        "bank_1": bank_1,
+                    }
+        finally:
+            wb.close()
+
+        # Step 8: internal transfer in/out balance
+        tolerance_by_currency = {
+            "VND": Decimal("1"),
+            "USD": Decimal("0.01"),
+        }
+        internal_rows = []
+        internal_balanced = True
+        for currency in sorted(internal_by_currency.keys()):
+            total_in = internal_by_currency[currency]["in"]
+            total_out = internal_by_currency[currency]["out"]
+            diff = total_in - total_out
+            tolerance = tolerance_by_currency.get(currency, Decimal("1"))
+            is_balanced = abs(diff) <= tolerance
+            if not is_balanced:
+                internal_balanced = False
+            internal_rows.append({
+                "currency": currency,
+                "total_in": _to_float(total_in),
+                "total_out": _to_float(total_out),
+                "difference": _to_float(diff),
+                "tolerance": _to_float(tolerance),
+                "is_balanced": is_balanced,
+            })
+
+        # Step 9: account-level cash balance reconciliation
+        all_keys = (
+            set(movement_by_key.keys())
+            | set(prior_opening_by_key.keys())
+            | set(bank_bs_by_key.keys())
+            | set(cash_balance_meta_by_key.keys())
+        )
+
+        account_rows: List[Dict[str, Any]] = []
+        matched_bank_count = 0
+        reconciled_count = 0
+        missing_bank_count = 0
+        not_reconciled_count = 0
+        total_abs_diff = Decimal("0")
+
+        for account, currency in sorted(all_keys, key=lambda x: (x[0], x[1])):
+            opening = prior_opening_by_key.get((account, currency), Decimal("0"))
+            movement = movement_by_key.get((account, currency), {"debit": Decimal("0"), "credit": Decimal("0")})
+            total_debit = movement["debit"]
+            total_credit = movement["credit"]
+            calculated_closing = opening + total_debit - total_credit
+
+            bs_info = bank_bs_by_key.get((account, currency), {})
+            bank_eop = bs_info.get("eop")
+            bank_bop = bs_info.get("bop")
+            bank_name = str(bs_info.get("bank_name") or "").strip()
+
+            meta = cash_balance_meta_by_key.get((account, currency), {})
+            entity = str(meta.get("entity") or "").strip()
+            branch = str(meta.get("branch") or "").strip()
+            bank = str(meta.get("bank") or "").strip() or bank_name
+
+            tolerance = tolerance_by_currency.get(currency, Decimal("1"))
+            issues: List[str] = []
+            difference: Optional[Decimal] = None
+            is_reconciled = False
+
+            if bank_eop is None:
+                missing_bank_count += 1
+                issues.append("Missing EOP in Cash balance (BS)")
+            else:
+                matched_bank_count += 1
+                difference = calculated_closing - bank_eop
+                total_abs_diff += abs(difference)
+                if abs(difference) <= tolerance:
+                    is_reconciled = True
+                    reconciled_count += 1
+                else:
+                    not_reconciled_count += 1
+                    issues.append(f"Difference exceeds tolerance ({tolerance})")
+
+            account_rows.append({
+                "account": account,
+                "currency": currency,
+                "entity": entity,
+                "branch": branch,
+                "bank": bank,
+                "opening_balance": _to_float(opening),
+                "movement_debit": _to_float(total_debit),
+                "movement_credit": _to_float(total_credit),
+                "calculated_closing": _to_float(calculated_closing),
+                "bank_statement_bop": _to_float(bank_bop),
+                "bank_statement_eop": _to_float(bank_eop),
+                "difference": _to_float(difference),
+                "tolerance": _to_float(tolerance),
+                "is_reconciled": is_reconciled,
+                "issues": issues,
+            })
+
+        cash_balance_balanced = (not_reconciled_count == 0 and missing_bank_count == 0)
+
+        result = {
+            "session_id": session_id,
+            "status": "success",
+            "step8_internal_transfer_reconcile": {
+                "is_balanced": internal_balanced,
+                "rows": internal_rows,
+                "movement_rows_scanned": len(transactions),
+            },
+            "step9_cash_balance_reconcile": {
+                "is_balanced": cash_balance_balanced,
+                "total_accounts": len(account_rows),
+                "accounts_with_bank_balance": matched_bank_count,
+                "reconciled_count": reconciled_count,
+                "not_reconciled_count": not_reconciled_count,
+                "missing_bank_balance_count": missing_bank_count,
+                "total_absolute_difference": _to_float(total_abs_diff),
+                "rows": account_rows,
+            },
+        }
+
+        logger.info(
+            "Reconcile checks finished: session=%s step8_balanced=%s step9_balanced=%s accounts=%s not_reconciled=%s missing_bank=%s",
+            session_id,
+            internal_balanced,
+            cash_balance_balanced,
+            len(account_rows),
+            not_reconciled_count,
+            missing_bank_count,
+        )
+        return result
+
 
     def _read_saving_accounts(self, working_file: str) -> List[Dict[str, Any]]:
         """
         Read Saving Account sheet from working file.
 
         Returns:
-            List of dicts with keys: account, bank_1, bank, entity, branch,
-            closing_balance_vnd, maturity_date
+            List of dicts with keys: row, account, bank_1, bank, entity, branch,
+            term_months, closing_balance_vnd, maturity_date, interest_rate
         """
         import openpyxl
         from datetime import datetime
@@ -2821,12 +3158,29 @@ class CashReportService:
             ws = wb["Saving Account"]
             # Row 3 = headers, Row 4+ = data
             # Col A=Entity, B=Branch, C=Account Number, D=Type, E=Currency,
-            # Col F=CLOSING BALANCE (VND), Col K=Maturity date,
+            # Col F=CLOSING BALANCE (VND), Col H=Term (months), Col K=Maturity date,
             # Col N(14)=Bank_1 (short code like TCB, BIDV), Col O(15)=Bank (full name)
-            for row_data in ws.iter_rows(min_row=4, values_only=False):
+            for row_num, row_data in enumerate(ws.iter_rows(min_row=4, values_only=False), start=4):
                 account = row_data[2].value if len(row_data) > 2 else None
                 if not account:
                     continue
+                account_str = str(account).strip()
+                if not account_str or account_str.lower() == "x":
+                    continue
+
+                # Col H (index 7): Term (months), usually "1 month"/"3 months"
+                term_months = None
+                term_raw = row_data[7].value if len(row_data) > 7 else None
+                if term_raw is not None and term_raw != "":
+                    if isinstance(term_raw, (int, float)):
+                        term_months = int(term_raw)
+                    else:
+                        text = str(term_raw).strip().upper()
+                        m = re.search(r"(\d{1,2})\s*(?:THANG|MONTHS?|M)\b", text)
+                        if m:
+                            term_months = int(m.group(1))
+                        elif text.isdigit():
+                            term_months = int(text)
 
                 # Col F (index 5): CLOSING BALANCE (VND)
                 closing_raw = row_data[5].value if len(row_data) > 5 else None
@@ -2863,11 +3217,13 @@ class CashReportService:
                         pass
 
                 saving_accounts.append({
+                    "row": row_num,
                     "entity": str(row_data[0].value or "").strip(),
                     "branch": str(row_data[1].value or "").strip(),
-                    "account": str(account).strip(),
+                    "account": account_str,
                     "bank_1": str(row_data[13].value or "").strip() if len(row_data) > 13 else "",
                     "bank": str(row_data[14].value or "").strip() if len(row_data) > 14 else "",
+                    "term_months": term_months,
                     "closing_balance_vnd": closing_balance,
                     "maturity_date": maturity_date,
                     "interest_rate": interest_rate,
@@ -2877,6 +3233,145 @@ class CashReportService:
 
         logger.info(f"Loaded {len(saving_accounts)} saving accounts")
         return saving_accounts
+
+    async def _sync_saving_account_lookup_fields(
+        self,
+        working_file: Path,
+        lookup_account_details: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, int]:
+        """
+        Sync all Saving Account rows with lookup metadata by account number.
+
+        Updates existing rows (not only newly inserted rows) for:
+        - H: Term (months)
+        - K: Maturity date
+        - L: Interest rate
+        """
+        if not lookup_account_details:
+            return {
+                "rows_checked": 0,
+                "rows_matched_lookup": 0,
+                "rows_updated": 0,
+                "term_months_updated": 0,
+                "maturity_date_updated": 0,
+                "interest_rate_updated": 0,
+                "provider_mismatch_skipped": 0,
+            }
+
+        def _normalize_account_text(value: Any) -> str:
+            text = str(value or "").strip().replace("'", "")
+            if not text:
+                return ""
+            try:
+                if "." in text and float(text) == int(float(text)):
+                    return str(int(float(text)))
+            except (ValueError, OverflowError):
+                pass
+            return text
+
+        def _excel_serial(dt: date) -> int:
+            # Excel 1900 date system (same convention used by openpyxl_handler)
+            base = date(1899, 12, 30)
+            return (dt - base).days
+
+        saving_rows = self._read_saving_accounts(str(working_file))
+        modifications: Dict[int, Dict[str, str]] = {}
+
+        rows_matched_lookup = 0
+        rows_updated = 0
+        term_months_updated = 0
+        maturity_date_updated = 0
+        interest_rate_updated = 0
+        provider_mismatch_skipped = 0
+
+        for row in saving_rows:
+            row_num = int(row.get("row") or 0)
+            if row_num <= 0:
+                continue
+
+            account = _normalize_account_text(row.get("account"))
+            if not account:
+                continue
+
+            lookup_meta = lookup_account_details.get(account)
+            if not lookup_meta:
+                continue
+            rows_matched_lookup += 1
+
+            provider = str(lookup_meta.get("provider") or "").strip().upper()
+            bank_1 = str(row.get("bank_1") or row.get("bank") or "").strip().upper()
+            if provider and bank_1 and not self._bank_matches(bank_1, provider):
+                provider_mismatch_skipped += 1
+                continue
+
+            row_mod: Dict[str, str] = {}
+
+            new_term_months = lookup_meta.get("term_months")
+            if new_term_months is not None:
+                try:
+                    new_term_int = int(new_term_months)
+                except (ValueError, TypeError):
+                    new_term_int = None
+                if new_term_int and new_term_int > 0:
+                    current_term = row.get("term_months")
+                    if current_term != new_term_int:
+                        suffix = "month" if new_term_int == 1 else "months"
+                        row_mod["H"] = f"{new_term_int} {suffix}"
+                        term_months_updated += 1
+
+            new_maturity = lookup_meta.get("maturity_date")
+            if isinstance(new_maturity, datetime):
+                new_maturity = new_maturity.date()
+            if isinstance(new_maturity, date):
+                current_maturity = row.get("maturity_date")
+                if current_maturity != new_maturity:
+                    row_mod["K"] = str(_excel_serial(new_maturity))
+                    maturity_date_updated += 1
+
+            new_rate = lookup_meta.get("interest_rate")
+            if new_rate is not None:
+                try:
+                    new_rate_f = float(new_rate)
+                except (ValueError, TypeError):
+                    new_rate_f = None
+                if new_rate_f is not None and new_rate_f > 0:
+                    current_rate = row.get("interest_rate")
+                    if current_rate is None or abs(float(current_rate) - new_rate_f) > 1e-9:
+                        row_mod["L"] = str(new_rate_f)
+                        interest_rate_updated += 1
+
+            if row_mod:
+                modifications[row_num] = row_mod
+                rows_updated += 1
+
+        if modifications:
+            from .openpyxl_handler import get_openpyxl_handler
+            handler = get_openpyxl_handler()
+            await asyncio.to_thread(
+                handler.modify_cell_values,
+                Path(working_file),
+                "Saving Account",
+                modifications,
+            )
+            logger.info(
+                "Saving Account lookup sync: updated_rows=%s term_months=%s maturity_dates=%s rates=%s",
+                rows_updated,
+                term_months_updated,
+                maturity_date_updated,
+                interest_rate_updated,
+            )
+        else:
+            logger.info("Saving Account lookup sync: no field changes detected")
+
+        return {
+            "rows_checked": len(saving_rows),
+            "rows_matched_lookup": rows_matched_lookup,
+            "rows_updated": rows_updated,
+            "term_months_updated": term_months_updated,
+            "maturity_date_updated": maturity_date_updated,
+            "interest_rate_updated": interest_rate_updated,
+            "provider_mismatch_skipped": provider_mismatch_skipped,
+        }
 
     @staticmethod
     def _read_acc_char_account_to_code(working_file) -> Dict[str, str]:
@@ -3485,6 +3980,13 @@ class CashReportService:
         }
         return len(filtered) >= 2
 
+    def _is_profit_distribution_transfer(self, description: str) -> bool:
+        """Detect profit-distribution wording in transfer descriptions."""
+        desc_norm = self._normalize_text_for_match(description or "")
+        if not desc_norm:
+            return False
+        return any(keyword in desc_norm for keyword in PROFIT_DISTRIBUTION_KEYWORDS)
+
     def _is_settlement_candidate(self, tx) -> bool:
         """
         Detect if a transaction is a settlement candidate.
@@ -3593,6 +4095,10 @@ class CashReportService:
             return False
 
         description = tx.description or ""
+
+        # Profit-distribution transfers are not savings open-new transactions.
+        if self._is_profit_distribution_transfer(description):
+            return False
 
         # Check open-new regex patterns (Group B patterns)
         for pattern in self._open_new_patterns_compiled:
@@ -4432,6 +4938,56 @@ class CashReportService:
         logger.info(f"Open-new detect: {len(open_new_transactions)} candidates, skip reasons: {_on_skip}")
 
         if not open_new_transactions:
+            saving_lookup_sync = {
+                "rows_checked": 0,
+                "rows_matched_lookup": 0,
+                "rows_updated": 0,
+                "term_months_updated": 0,
+                "maturity_date_updated": 0,
+                "interest_rate_updated": 0,
+                "provider_mismatch_skipped": 0,
+            }
+
+            # Even when there is no open-new candidate, allow lookup-based
+            # whole-sheet sync for Saving Account term/maturity/rate.
+            if lookup_file_contents and not dry_run:
+                emit(
+                    "step_start",
+                    "sync_lookup",
+                    "No open-new candidates. Syncing Saving Account from lookup metadata...",
+                    percentage=80,
+                )
+                await asyncio.sleep(0.2)
+                try:
+                    lookup_only_details: Dict[str, Dict[str, Any]] = {}
+                    for file_content in lookup_file_contents:
+                        _, parsed_details = self._parse_saving_lookup_file_with_metadata(file_content)
+                        for acc, meta in parsed_details.items():
+                            if not acc:
+                                continue
+                            dst = lookup_only_details.setdefault(acc, {})
+                            for mk, mv in meta.items():
+                                if mv in (None, ""):
+                                    continue
+                                if dst.get(mk) in (None, ""):
+                                    dst[mk] = mv
+
+                    saving_lookup_sync = await self._sync_saving_account_lookup_fields(
+                        Path(working_file),
+                        lookup_only_details,
+                    )
+                except Exception as e:
+                    logger.warning(f"Saving Account lookup sync failed (no_open_new path): {e}")
+
+                emit(
+                    "step_complete",
+                    "sync_lookup",
+                    f"Saving Account sync updated {saving_lookup_sync.get('rows_updated', 0)} rows",
+                    percentage=95,
+                    data={"saving_account_lookup_sync": saving_lookup_sync},
+                )
+                await asyncio.sleep(0.2)
+
             emit("complete", "done", "No open-new transactions found", percentage=100,
                  data={"status": "no_open_new", "total_transactions_scanned": len(transactions)})
             return _finish({
@@ -4440,6 +4996,7 @@ class CashReportService:
                 "message": "No open-new transactions found (GROUP B patterns)",
                 "counter_entries_created": 0,
                 "total_transactions_scanned": len(transactions),
+                "saving_account_lookup_sync": saving_lookup_sync,
             })
 
         emit("step_complete", "detecting",
@@ -4972,6 +5529,16 @@ class CashReportService:
              })
         await asyncio.sleep(0.4)
 
+        saving_lookup_sync = {
+            "rows_checked": 0,
+            "rows_matched_lookup": 0,
+            "rows_updated": 0,
+            "term_months_updated": 0,
+            "maturity_date_updated": 0,
+            "interest_rate_updated": 0,
+            "provider_mismatch_skipped": 0,
+        }
+
         # ── Dry-run: return preview without writing ──
         if dry_run:
             candidates_preview = []
@@ -5029,6 +5596,30 @@ class CashReportService:
             })
 
         if not counter_entries:
+            if lookup_account_details:
+                emit(
+                    "step_start",
+                    "sync_lookup",
+                    "Syncing all Saving Account rows with lookup metadata...",
+                    percentage=85,
+                )
+                await asyncio.sleep(0.2)
+                try:
+                    saving_lookup_sync = await self._sync_saving_account_lookup_fields(
+                        Path(working_file),
+                        lookup_account_details,
+                    )
+                except Exception as e:
+                    logger.warning(f"Saving Account lookup sync failed (no_counter_entries path): {e}")
+                emit(
+                    "step_complete",
+                    "sync_lookup",
+                    f"Saving Account sync updated {saving_lookup_sync.get('rows_updated', 0)} rows",
+                    percentage=95,
+                    data={"saving_account_lookup_sync": saving_lookup_sync},
+                )
+                await asyncio.sleep(0.2)
+
             msg = "No counter entries created"
             if skipped_no_account:
                 msg += f". {len(skipped_no_account)} skipped (no matching saving account)"
@@ -5044,6 +5635,7 @@ class CashReportService:
                 "skipped_no_account": len(skipped_no_account),
                 "skipped_duplicate": len(skipped_duplicate),
                 "total_transactions_scanned": len(transactions),
+                "saving_account_lookup_sync": saving_lookup_sync,
             })
 
         # â”€â”€ Step 4: Create counter entries â”€â”€
@@ -5144,6 +5736,31 @@ class CashReportService:
              })
         await asyncio.sleep(0.3)
 
+        # Step 4.6: sync ALL Saving Account rows by lookup metadata.
+        if lookup_account_details:
+            emit(
+                "step_start",
+                "sync_lookup",
+                "Syncing all Saving Account rows with lookup metadata...",
+                percentage=85,
+            )
+            await asyncio.sleep(0.2)
+            try:
+                saving_lookup_sync = await self._sync_saving_account_lookup_fields(
+                    Path(working_file),
+                    lookup_account_details,
+                )
+            except Exception as e:
+                logger.warning(f"Saving Account lookup sync failed: {e}")
+            emit(
+                "step_complete",
+                "sync_lookup",
+                f"Saving Account sync updated {saving_lookup_sync.get('rows_updated', 0)} rows",
+                percentage=93,
+                data={"saving_account_lookup_sync": saving_lookup_sync},
+            )
+            await asyncio.sleep(0.2)
+
         # â”€â”€ Step 5: Finalize â”€â”€
         if self.db_session:
             await self.db_session.execute(
@@ -5171,6 +5788,8 @@ class CashReportService:
             "acc_char_added": acc_char_added,
             "saving_account_added": saving_account_added,
             "cash_balance_added": cash_balance_added,
+            # Whole-sheet sync stats from lookup metadata
+            "saving_account_lookup_sync": saving_lookup_sync,
         }
 
         # Save snapshot so this step's result can be downloaded independently

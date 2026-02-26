@@ -47,7 +47,7 @@ from app.core.exceptions import (
 
 # Import routers from presentation layer (Department + Function Structure)
 from app.presentation.api import health_router
-from app.presentation.api import project_router
+from app.presentation.api import history_router
 from app.presentation.api.finance import variance_analysis_router
 from app.presentation.api.finance import utility_billing_router
 from app.presentation.api.finance import contract_ocr_router
@@ -115,8 +115,8 @@ app.add_exception_handler(AnalysisError, analysis_error_handler)
 app.add_exception_handler(FileProcessingError, analysis_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
 
-# Include Project router (cross-module)
-app.include_router(project_router.router, prefix="/api", tags=["Projects"])
+# Include History router (cross-module)
+app.include_router(history_router.router, prefix="/api", tags=["History"])
 
 # Include Finance Department routers with /api/finance prefix
 app.include_router(health_router.router, prefix="/api/finance", tags=["Finance - Health"])
@@ -183,6 +183,19 @@ async def scheduled_cleanup_job():
     except Exception as e:
         logger.warning(f"FPA cleanup warning: {e}")
 
+    # Cleanup history records older than 14 days
+    try:
+        from app.presentation.api.history_router import cleanup_old_history
+
+        async for db in get_db():
+            counts = await cleanup_old_history(db)
+            total = sum(counts.values())
+            if total > 0:
+                logger.info(f"History cleanup: deleted {total} records ({counts})")
+            break
+    except Exception as e:
+        logger.warning(f"History cleanup warning: {e}")
+
 
 # Startup event for cleanup and database initialization
 @app.on_event("startup")
@@ -238,6 +251,19 @@ async def startup_event():
             break
     except Exception as e:
         logger.warning(f"Bank statement cleanup skipped: {e}")
+
+    # Cleanup history records older than 14 days
+    try:
+        from app.presentation.api.history_router import cleanup_old_history
+
+        async for db in get_db():
+            counts = await cleanup_old_history(db)
+            total = sum(counts.values())
+            if total > 0:
+                logger.info(f"Startup history cleanup: deleted {total} old records ({counts})")
+            break
+    except Exception as e:
+        logger.warning(f"History cleanup skipped: {e}")
 
     # Start the scheduler for daily cleanup at 3AM
     scheduler.add_job(

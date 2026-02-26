@@ -18,7 +18,6 @@ from sqladmin.filters import (
 
 from app.infrastructure.database.models.user import UserModel, UserSessionModel
 from app.infrastructure.database.models.system_settings import SystemSettingsModel
-from app.infrastructure.database.models.project import ProjectModel, ProjectCaseModel
 from app.infrastructure.database.models.bank_statement import (
     BankStatementModel,
     BankTransactionModel,
@@ -309,101 +308,7 @@ class SystemSettingsAdmin(ModelView, model=SystemSettingsModel):
     }
 
 
-# ==================== 3. Project Management ====================
-
-class ProjectAdmin(ModelView, model=ProjectModel):
-    name = "Project"
-    name_plural = "Projects"
-    icon = "fa-solid fa-folder-open"
-    category = "Project Management"
-
-    can_create = False
-    can_edit = False
-    can_delete = True
-    can_export = True
-
-    column_list = [
-        ProjectModel.id,
-        ProjectModel.project_name,
-        ProjectModel.description,
-        ProjectModel.is_protected,
-        ProjectModel.last_accessed_at,
-        ProjectModel.created_at,
-    ]
-
-    column_details_exclude_list = [
-        ProjectModel.password_hash,
-    ]
-
-    column_searchable_list = [
-        ProjectModel.project_name,
-        ProjectModel.description,
-    ]
-
-    column_filters = [
-        BooleanFilter(ProjectModel.is_protected, title="Protected"),
-    ]
-
-    column_sortable_list = [
-        ProjectModel.id,
-        ProjectModel.project_name,
-        ProjectModel.last_accessed_at,
-        ProjectModel.created_at,
-    ]
-
-    column_default_sort = [(ProjectModel.id, True)]
-
-    column_labels = {
-        ProjectModel.project_name: "Name",
-        ProjectModel.is_protected: "Protected",
-        ProjectModel.last_accessed_at: "Last Accessed",
-    }
-
-
-class ProjectCaseAdmin(ModelView, model=ProjectCaseModel):
-    name = "Project Case"
-    name_plural = "Project Cases"
-    icon = "fa-solid fa-briefcase"
-    category = "Project Management"
-
-    can_create = False
-    can_edit = False
-    can_delete = False
-
-    column_list = [
-        ProjectCaseModel.id,
-        ProjectCaseModel.project_id,
-        ProjectCaseModel.case_type,
-        ProjectCaseModel.total_files,
-        ProjectCaseModel.last_processed_at,
-        ProjectCaseModel.created_at,
-    ]
-
-    column_searchable_list = [
-        ProjectCaseModel.case_type,
-    ]
-
-    column_filters = [
-        AllUniqueStringValuesFilter(ProjectCaseModel.case_type, title="Case Type"),
-        OperationColumnFilter(ProjectCaseModel.project_id, title="Project ID"),
-    ]
-
-    column_sortable_list = [
-        ProjectCaseModel.id,
-        ProjectCaseModel.project_id,
-        ProjectCaseModel.case_type,
-        ProjectCaseModel.total_files,
-        ProjectCaseModel.created_at,
-    ]
-
-    column_labels = {
-        ProjectCaseModel.case_type: "Type",
-        ProjectCaseModel.total_files: "Files",
-        ProjectCaseModel.last_processed_at: "Last Processed",
-    }
-
-
-# ==================== 4. AI Usage Monitoring ====================
+# ==================== 3. AI Usage Monitoring ====================
 
 class AIUsageAdmin(ModelView, model=AIUsageModel):
     name = "AI Usage Log"

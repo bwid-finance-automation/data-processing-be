@@ -31,7 +31,6 @@ from app.core.dependencies import get_bank_statement_db_service, get_ai_usage_re
 from app.infrastructure.persistence.repositories import AIUsageRepository
 from app.infrastructure.database.models.user import UserModel
 from app.shared.utils.logging_config import get_logger
-from uuid import UUID as PyUUID
 
 logger = get_logger(__name__)
 
@@ -598,7 +597,6 @@ async def parse_bank_statements(
     files: List[UploadFile] = File(..., description="Bank statement files (.xlsx, .xls, .zip containing Excel/PDF)"),
     zip_passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted ZIP files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted ZIPs."),
     zip_pdf_passwords: Optional[str] = Form(None, description="JSON object mapping PDF filenames inside ZIP to passwords (e.g., '{\"file1.pdf\": \"pass1\", \"file2.pdf\": \"pass2\"}'). Use this for password-protected PDFs inside ZIP files."),
-    project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
     sequential: bool = Form(True, description="Process PDF files one by one (default). Set to false for concurrent processing."),
     max_concurrent: Optional[int] = Form(None, description="Maximum number of concurrent PDF file processing (default: 3). Only used when sequential=false."),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
@@ -787,13 +785,7 @@ async def parse_bank_statements(
 
         # Save to database
         try:
-            # Parse project_uuid if provided
-            parsed_project_uuid = None
-            if project_uuid:
-                try:
-                    parsed_project_uuid = PyUUID(project_uuid)
-                except ValueError:
-                    logger.warning(f"Invalid project_uuid format: {project_uuid}")
+            user_id = current_user.id if current_user else None
 
             # Save file upload records (with file content for download later)
             for filename, content in original_uploads:
@@ -801,17 +793,15 @@ async def parse_bank_statements(
                 lower_name = filename.lower()
                 if lower_name.endswith('.xlsx'):
                     content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    file_metadata = {"source": "parse-excel", "project_uuid": project_uuid}
+                    file_metadata = {"source": "parse-excel"}
                 elif lower_name.endswith('.xls'):
                     content_type = "application/vnd.ms-excel"
-                    file_metadata = {"source": "parse-excel", "project_uuid": project_uuid}
+                    file_metadata = {"source": "parse-excel"}
                 elif lower_name.endswith('.zip'):
                     content_type = "application/zip"
-                    # Include extraction info for ZIP files
                     extraction_info = zip_extraction_info.get(filename, {})
                     file_metadata = {
                         "source": "parse-zip",
-                        "project_uuid": project_uuid,
                         "extracted_excel_count": extraction_info.get("excel_count", 0),
                         "extracted_pdf_count": extraction_info.get("pdf_count", 0),
                         "extracted_excel_files": extraction_info.get("excel_files", []),
@@ -819,12 +809,12 @@ async def parse_bank_statements(
                     }
                 else:
                     content_type = "application/octet-stream"
-                    file_metadata = {"source": "parse-excel", "project_uuid": project_uuid}
+                    file_metadata = {"source": "parse-excel"}
 
                 await db_service.save_file_upload(
                     filename=filename,
                     file_size=len(content),
-                    file_content=content,  # Save actual file to disk
+                    file_content=content,
                     file_type="bank_statement",
                     session_id=session_id,
                     content_type=content_type,
@@ -832,18 +822,18 @@ async def parse_bank_statements(
                     metadata=file_metadata,
                 )
 
-            # Save parsed statements to database (with project linkage if provided)
+            # Save parsed statements to database
             await db_service.save_statements_batch(
                 result["statements"],
                 session_id,
-                project_uuid=parsed_project_uuid
+                user_id=user_id,
             )
 
             # Save Excel output to disk for later download from history
             await db_service.save_excel_output(session_id, excel_bytes)
 
             await db_service.db.commit()
-            logger.info(f"Saved {len(result['statements'])} statements to database (session: {session_id}, project: {project_uuid})")
+            logger.info(f"Saved {len(result['statements'])} statements to database (session: {session_id}, user_id: {user_id})")
         except Exception as db_error:
             logger.error(f"Failed to save to database: {db_error}")
             # Don't fail the request, just log the error - parsing was successful
@@ -961,7 +951,6 @@ async def parse_bank_statements_pdf(
     passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted PDF files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted PDFs."),
     zip_passwords: Optional[str] = Form(None, description="Comma-separated passwords for encrypted ZIP files (e.g., 'pass1,,pass3'). Use empty string for non-encrypted ZIPs."),
     zip_pdf_passwords: Optional[str] = Form(None, description="JSON object mapping PDF filenames inside ZIP to passwords (e.g., '{\"file1.pdf\": \"pass1\", \"file2.pdf\": \"pass2\"}'). Use this for password-protected PDFs inside ZIP files."),
-    project_uuid: Optional[str] = Form(None, description="Project UUID to save statements to (optional)"),
     sequential: bool = Form(True, description="Process PDF files one by one (default). Set to false for concurrent processing."),
     max_concurrent: Optional[int] = Form(None, description="Maximum number of concurrent file processing (default: 3). Only used when sequential=false. Set to 1 for pseudo-sequential processing."),
     db_service: BankStatementDbService = Depends(get_bank_statement_db_service),
@@ -1107,13 +1096,7 @@ async def parse_bank_statements_pdf(
 
         # Save to database
         try:
-            # Parse project_uuid if provided
-            parsed_project_uuid = None
-            if project_uuid:
-                try:
-                    parsed_project_uuid = PyUUID(project_uuid)
-                except ValueError:
-                    logger.warning(f"Invalid project_uuid format: {project_uuid}")
+            user_id = current_user.id if current_user else None
 
             # Save file upload records (with file content for download later)
             for filename, content in original_uploads:
@@ -1121,14 +1104,12 @@ async def parse_bank_statements_pdf(
                 lower_name = filename.lower()
                 if lower_name.endswith('.pdf'):
                     content_type = "application/pdf"
-                    file_metadata = {"source": "parse-pdf", "project_uuid": project_uuid}
+                    file_metadata = {"source": "parse-pdf"}
                 elif lower_name.endswith('.zip'):
                     content_type = "application/zip"
-                    # Include extraction info for ZIP files
                     extraction_info = zip_extraction_info.get(filename, {})
                     file_metadata = {
                         "source": "parse-zip",
-                        "project_uuid": project_uuid,
                         "extracted_excel_count": extraction_info.get("excel_count", 0),
                         "extracted_pdf_count": extraction_info.get("pdf_count", 0),
                         "extracted_excel_files": extraction_info.get("excel_files", []),
@@ -1136,12 +1117,12 @@ async def parse_bank_statements_pdf(
                     }
                 else:
                     content_type = "application/octet-stream"
-                    file_metadata = {"source": "parse-pdf", "project_uuid": project_uuid}
+                    file_metadata = {"source": "parse-pdf"}
 
                 await db_service.save_file_upload(
                     filename=filename,
                     file_size=len(content),
-                    file_content=content,  # Save actual file to disk
+                    file_content=content,
                     file_type="bank_statement",
                     session_id=session_id,
                     content_type=content_type,
@@ -1149,18 +1130,18 @@ async def parse_bank_statements_pdf(
                     metadata=file_metadata,
                 )
 
-            # Save parsed statements to database (with project linkage if provided)
+            # Save parsed statements to database
             await db_service.save_statements_batch(
                 result["statements"],
                 session_id,
-                project_uuid=parsed_project_uuid
+                user_id=user_id,
             )
 
             # Save Excel output to disk for later download from history
             await db_service.save_excel_output(session_id, excel_bytes)
 
             await db_service.db.commit()
-            logger.info(f"Saved {len(result['statements'])} statements to database (session: {session_id}, project: {project_uuid})")
+            logger.info(f"Saved {len(result['statements'])} statements to database (session: {session_id}, user_id: {user_id})")
         except Exception as db_error:
             logger.error(f"Failed to save to database: {db_error}")
             # Don't fail the request, just log the error - parsing was successful

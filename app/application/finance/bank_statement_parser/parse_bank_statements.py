@@ -191,6 +191,12 @@ class ParseBankStatementsUseCase:
         Returns:
             Tuple of (statement, transactions, balances_list)
         """
+        sheet_label = sheet_name if sheet_name else "sheet0"
+        logger.info(
+            f"Parse start: bank={parser.bank_name}, file={file_name}, "
+            f"sheet={sheet_label}, size={len(file_bytes)} bytes"
+        )
+
         # Fresh instance → safe for instance-level caching inside parse_statement
         fresh_parser = type(parser)()
         transactions, balances = fresh_parser.parse_statement(file_bytes, file_name)
@@ -202,11 +208,11 @@ class ParseBankStatementsUseCase:
             transactions=transactions
         )
 
-        if sheet_name:
-            logger.info(
-                f"Parsed {parser.bank_name} from sheet '{sheet_name}' in {file_name}: "
-                f"{len(transactions)} transactions"
-            )
+        logger.info(
+            f"Parse done: bank={parser.bank_name}, file={file_name}, "
+            f"sheet={sheet_label}, transactions={len(transactions)}, "
+            f"balances={len(balances)}"
+        )
 
         return statement, transactions, balances
 
@@ -240,10 +246,16 @@ class ParseBankStatementsUseCase:
 
         for file_name, file_bytes in files:
             try:
+                logger.info(
+                    f"File processing start: file={file_name}, size={len(file_bytes)} bytes"
+                )
                 # Try multi-bank detection (handles both single and multi-sheet files)
                 bank_detections = self.parser_factory.detect_all_banks_in_file(file_bytes)
 
                 if not bank_detections:
+                    logger.warning(
+                        f"File processing failed: file={file_name}, reason=bank_not_recognized"
+                    )
                     failed += 1
                     failed_files.append({
                         "file_name": file_name,
@@ -280,8 +292,14 @@ class ParseBankStatementsUseCase:
                         })
 
                 successful += 1
+                logger.info(
+                    f"File processing done: file={file_name}, detected_banks={len(bank_detections)}"
+                )
 
             except Exception as e:
+                logger.error(
+                    f"File processing error: file={file_name}, error={e}"
+                )
                 failed += 1
                 failed_files.append({
                     "file_name": file_name,
@@ -350,14 +368,15 @@ class ParseBankStatementsUseCase:
                         })
                         continue
 
-                    # Validate parser supports text parsing
+                    # Validate parser supports text parsing.
+                    # If user explicitly forces bank_code, don't fail hard when
+                    # OCR text is noisy or has encoding artifacts. Attempt parse
+                    # with the selected parser and let parser-level logic decide.
                     if not parser.can_parse_text(ocr_text):
-                        failed += 1
-                        failed_files.append({
-                            "file_name": file_name,
-                            "error": f"Parser {parser.bank_name} does not support OCR text parsing"
-                        })
-                        continue
+                        logger.warning(
+                            f"Forced parser {parser.bank_name} for {file_name} "
+                            "despite weak text detection"
+                        )
                 else:
                     # Auto-detect bank from text
                     parser = self.parser_factory.get_parser_for_text(ocr_text)

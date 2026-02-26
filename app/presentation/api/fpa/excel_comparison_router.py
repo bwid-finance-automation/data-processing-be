@@ -7,15 +7,14 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends
 from fastapi.responses import FileResponse
 from typing import Optional
 from datetime import datetime
-from uuid import UUID
 import uuid as uuid_lib
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.fpa.excel_comparison.compare_excel_files import CompareExcelFilesUseCase
-from app.application.project.project_service import ProjectService
-from app.core.dependencies import get_db
+from app.core.dependencies import get_db, get_current_user_optional
 from app.infrastructure.database.models.analysis_session import AnalysisSessionModel
+from app.infrastructure.database.models.user import UserModel
 from app.shared.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -26,59 +25,41 @@ router = APIRouter(prefix="/fpa", tags=["FP&A - Excel Comparison"])
 compare_use_case = CompareExcelFilesUseCase()
 
 
-async def save_comparison_to_project(
+async def save_comparison_session(
     db: AsyncSession,
-    project_uuid: str,
     old_filename: str,
     new_filename: str,
-    result: dict
+    result: dict,
+    user_id: Optional[int] = None,
 ) -> None:
-    """
-    Save excel comparison to project.
-
-    Args:
-        db: Database session
-        project_uuid: Project UUID string
-        old_filename: Old file name
-        new_filename: New file name
-        result: Comparison result
-    """
+    """Save excel comparison session to database with user tracking."""
     try:
-        project_service = ProjectService(db)
-        case = await project_service.get_or_create_case(UUID(project_uuid), "excel_comparison")
+        statistics = result.get('statistics', {})
+        session_id = f"compare_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
 
-        if case:
-            statistics = result.get('statistics', {})
-            session_id = f"compare_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-
-            # Create AnalysisSessionModel record for comparison
-            analysis_session = AnalysisSessionModel(
-                session_id=session_id,
-                case_id=case.id,
-                status="COMPLETED",
-                analysis_type="EXCEL_COMPARISON",
-                files_count=2,
-                progress_percentage=100,
-                started_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
-                processing_details={
-                    "old_file": old_filename,
-                    "new_file": new_filename,
-                    "new_rows": statistics.get('new_rows', 0),
-                    "updated_rows": statistics.get('updated_rows', 0),
-                    "output_file": result.get('output_file'),
-                    "highlighted_file": result.get('highlighted_file'),
-                },
-            )
-            db.add(analysis_session)
-
-            # Update case file count
-            await project_service.increment_case_file_count(case.id)
-            await db.commit()
-
-            logger.info(f"Saved excel comparison to project {project_uuid}, case {case.id}")
+        analysis_session = AnalysisSessionModel(
+            session_id=session_id,
+            user_id=user_id,
+            status="COMPLETED",
+            analysis_type="EXCEL_COMPARISON",
+            files_count=2,
+            progress_percentage=100,
+            started_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            processing_details={
+                "old_file": old_filename,
+                "new_file": new_filename,
+                "new_rows": statistics.get('new_rows', 0),
+                "updated_rows": statistics.get('updated_rows', 0),
+                "output_file": result.get('output_file'),
+                "highlighted_file": result.get('highlighted_file'),
+            },
+        )
+        db.add(analysis_session)
+        await db.commit()
+        logger.info(f"Saved excel comparison session {session_id} (user_id: {user_id})")
     except Exception as e:
-        logger.error(f"Failed to save excel comparison to project: {e}")
+        logger.error(f"Failed to save excel comparison session: {e}")
         await db.rollback()
 
 @router.get("/health")
@@ -95,8 +76,8 @@ async def health_check():
 async def compare_files(
     old_file: UploadFile = File(..., description="Previous month Excel file"),
     new_file: UploadFile = File(..., description="Current month Excel file"),
-    project_uuid: Optional[str] = Form(None, description="Project UUID to save comparison to (optional)"),
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[UserModel] = Depends(get_current_user_optional),
 ):
     """
     Compare two Excel files and return comparison results.
@@ -113,13 +94,9 @@ async def compare_files(
         result = await compare_use_case.execute(old_file, new_file)
         logger.info(f"Comparison successful: {result['statistics']}")
 
-        # Save to project if project_uuid provided
-        if project_uuid:
-            await save_comparison_to_project(
-                db, project_uuid,
-                old_file.filename, new_file.filename,
-                result
-            )
+        # Save comparison session
+        user_id = current_user.id if current_user else None
+        await save_comparison_session(db, old_file.filename, new_file.filename, result, user_id=user_id)
 
         return result
     except Exception as e:

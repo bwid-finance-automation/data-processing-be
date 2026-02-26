@@ -307,9 +307,10 @@ class MovementDataWriter:
         if not row_numbers:
             return
 
+        # Match Excel built-in color: "Green, Accent 6, Lighter 60%"
         green_fill = (
             b'<fill><patternFill patternType="solid">'
-            b'<fgColor rgb="FF92D050"/>'
+            b'<fgColor theme="9" tint="0.5999938962981048"/>'
             b'</patternFill></fill>'
         )
 

@@ -57,6 +57,7 @@ async def get_info():
             "POST /confirm-upload/{session_id}": "Confirm and write pending classifications to Excel",
             "POST /run-settlement/{session_id}": "Run settlement automation (tất toán)",
             "POST /run-open-new/{session_id}": "Run open-new automation (mở mới)",
+            "POST /run-reconcile/{session_id}": "Run Step 8+9 reconcile checks with real workbook data",
             "GET /session/{session_id}": "Get session status",
             "GET /download/{session_id}": "Download result",
             "POST /reset/{session_id}": "Reset session",
@@ -809,6 +810,37 @@ async def stream_open_new_progress(session_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/run-reconcile/{session_id}")
+async def run_reconcile(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    """
+    Run Step 8 + Step 9 reconcile checks using real data in the session workbook.
+
+    Step 8:
+    - Reconcile "Internal transfer in" vs "Internal transfer out"
+
+    Step 9:
+    - Reconcile calculated closing balances vs "Cash balance (BS)" EOP balances
+    """
+    try:
+        service = CashReportService(db_session=db)
+        result = await service.run_reconcile_checks(
+            session_id=session_id,
+            user_id=current_user.id,
+        )
+        return {"success": True, **result}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error running reconcile checks: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/preview-settlement/{session_id}")

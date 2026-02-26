@@ -18,7 +18,6 @@ from app.infrastructure.database.models.bank_statement import (
     BankBalanceModel,
 )
 from app.infrastructure.database.models.file_upload import FileUploadModel
-from app.infrastructure.database.models.project import ProjectModel, ProjectCaseModel
 from app.domain.finance.bank_statement_parser.models.bank_statement import (
     BankStatement,
     BankTransaction,
@@ -243,64 +242,11 @@ class BankStatementDbService:
 
         return content, file_record.original_filename, file_record.content_type
 
-    async def get_or_create_case(
-        self,
-        project_uuid: UUID,
-    ) -> Optional[ProjectCaseModel]:
-        """
-        Get or create bank_statement case for a project.
-
-        Args:
-            project_uuid: Project UUID
-
-        Returns:
-            ProjectCaseModel or None if project not found
-        """
-        # Find project
-        result = await self.db.execute(
-            select(ProjectModel).where(ProjectModel.uuid == project_uuid)
-        )
-        project = result.scalar_one_or_none()
-        if not project:
-            logger.warning(f"Project not found: {project_uuid}")
-            return None
-
-        # Find or create case
-        result = await self.db.execute(
-            select(ProjectCaseModel).where(
-                ProjectCaseModel.project_id == project.id,
-                ProjectCaseModel.case_type == "bank_statement",
-            )
-        )
-        case = result.scalar_one_or_none()
-
-        if not case:
-            case = ProjectCaseModel(
-                project_id=project.id,
-                case_type="bank_statement",
-                total_files=0,
-            )
-            self.db.add(case)
-            await self.db.flush()
-            logger.info(f"Created bank_statement case for project: {project_uuid}")
-
-        return case
-
-    async def _update_case_file_count(self, case_id: int, count: int = 1) -> None:
-        """Update file count for a case (increment by count)."""
-        result = await self.db.execute(
-            select(ProjectCaseModel).where(ProjectCaseModel.id == case_id)
-        )
-        case = result.scalar_one_or_none()
-        if case:
-            case.total_files += count
-            case.last_processed_at = datetime.utcnow()
-
     async def save_bank_statement(
         self,
         statement: BankStatement,
         session_id: Optional[str] = None,
-        case_id: Optional[int] = None,
+        user_id: Optional[int] = None,
     ) -> BankStatementModel:
         """
         Save a bank statement with its transactions and balances to database.
@@ -308,7 +254,7 @@ class BankStatementDbService:
         Args:
             statement: Domain BankStatement object
             session_id: Optional session ID for tracking
-            case_id: Optional project case ID for linking to project
+            user_id: Optional user ID for tracking ownership
 
         Returns:
             Created BankStatementModel with related records
@@ -319,8 +265,8 @@ class BankStatementDbService:
             file_name=statement.file_name,
             uploaded_at=datetime.utcnow(),
             processed_at=datetime.utcnow(),
-            case_id=case_id,
-            session_id=session_id,  # Store session_id directly for grouping
+            user_id=user_id,
+            session_id=session_id,
             metadata_json={
                 "transaction_count": len(statement.transactions),
                 "has_balance": statement.balance is not None,
@@ -344,7 +290,7 @@ class BankStatementDbService:
         self,
         statements: List[BankStatement],
         session_id: Optional[str] = None,
-        project_uuid: Optional[UUID] = None,
+        user_id: Optional[int] = None,
     ) -> List[BankStatementModel]:
         """
         Save multiple bank statements in a batch.
@@ -352,34 +298,22 @@ class BankStatementDbService:
         Args:
             statements: List of domain BankStatement objects
             session_id: Optional session ID for tracking
-            project_uuid: Optional project UUID for linking to project
+            user_id: Optional user ID for tracking ownership
 
         Returns:
             List of created BankStatementModel objects
         """
         saved_statements = []
 
-        # Get or create case if project_uuid is provided
-        case_id = None
-        if project_uuid:
-            case = await self.get_or_create_case(project_uuid)
-            if case:
-                case_id = case.id
-
         for statement in statements:
             try:
-                db_statement = await self.save_bank_statement(statement, session_id, case_id)
+                db_statement = await self.save_bank_statement(statement, session_id, user_id)
                 saved_statements.append(db_statement)
             except Exception as e:
                 logger.error(f"Failed to save statement {statement.file_name}: {e}")
-                # Continue with other statements
                 continue
 
-        # Update case file count - increment by actual number of saved statements
-        if case_id and saved_statements:
-            await self._update_case_file_count(case_id, len(saved_statements))
-
-        logger.info(f"Batch saved {len(saved_statements)} of {len(statements)} statements (case_id: {case_id})")
+        logger.info(f"Batch saved {len(saved_statements)} of {len(statements)} statements (user_id: {user_id})")
         return saved_statements
 
     async def _save_transaction(

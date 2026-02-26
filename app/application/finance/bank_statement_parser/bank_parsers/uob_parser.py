@@ -21,44 +21,44 @@ class UOBParser(BaseBankParser):
 
     def can_parse(self, file_bytes: bytes) -> bool:
         """
-        Detect if file is UOB bank statement.
+        Detect if file is UOB bank statement (Excel).
 
-        Detection markers:
-        - "Tài khoản Thanh toán/Tiết kiệm" in first rows
-        - "Tiền gửi (DEBIT)" and "Tiền rút (CREDIT)" in header
-        - Sheet name contains "Account Activities"
+        Current UOB exports use English markers, for example:
+        - sheet: "Account Activities_xxxx"
+        - header: "Value Date", "Deposit", "Withdrawal"
+        - account block: "Account Number", "Ledger Balance"
         """
         try:
             xls = self.get_excel_file(file_bytes)
 
-            # Check sheet name for UOB pattern
             sheet_name = xls.sheet_names[0] if xls.sheet_names else ""
-            has_account_activities = "Account Activities" in sheet_name
+            sheet_name_norm = self.to_text(sheet_name).upper().replace("_", " ")
+            has_account_activities = "ACCOUNT ACTIVITIES" in sheet_name_norm
 
             df = pd.read_excel(xls, sheet_name=0, header=None)
+            top_20 = df.head(20)
 
-            # Get first 15 rows
-            top_15 = df.head(15)
-
-            # Convert all cells to text
             all_text = []
-            for _, row in top_15.iterrows():
+            for _, row in top_20.iterrows():
                 row_text = " ".join([self.to_text(cell).upper() for cell in row])
                 all_text.append(row_text)
 
             combined = " ".join(all_text)
 
-            # Check for UOB-specific markers
-            has_title = "TÀI KHOẢN THANH TOÁN" in combined or "TÀI KHOẢN TIẾT KIỆM" in combined
-            has_deposit = "TIỀN GỬI" in combined and "DEBIT" in combined
-            has_withdraw = "TIỀN RÚT" in combined and "CREDIT" in combined
-            has_ledger_balance = "SỐ DƯ SỔ CÁI" in combined
+            has_account_details = "ACCOUNT DETAILS" in combined
+            has_account_number = "ACCOUNT NUMBER" in combined
+            has_ledger_balance = "LEDGER BALANCE" in combined
+            has_value_date = "VALUE DATE" in combined
+            has_deposit = "DEPOSIT" in combined
+            has_withdraw = "WITHDRAWAL" in combined
 
-            # UOB files have specific combination of markers
-            is_uob = (has_account_activities or has_title) and (has_deposit or has_withdraw or has_ledger_balance)
-
-            return is_uob
-
+            return (
+                (has_account_activities or has_account_details)
+                and (has_account_number or has_ledger_balance)
+                and has_value_date
+                and has_deposit
+                and has_withdraw
+            )
         except Exception:
             return False
 
@@ -99,15 +99,22 @@ class UOBParser(BaseBankParser):
 
                 # Stop at totals row
                 row_text = " ".join([self.to_text(cell) for cell in row])
-                if "Tổng số theo Loại tiền tệ" in row_text:
+                row_text_upper = row_text.upper()
+                if "TOTAL IN ACCOUNT CURRENCY" in row_text_upper or "T?NG S? THEO LO?I TI?N T?" in row_text_upper:
                     break
 
                 # Skip empty rows
                 if pd.isna(row.iloc[0]) or self.to_text(row.iloc[0]).strip() == "":
                     continue
 
-                # Skip note rows
-                if "Lưu ý:" in row_text or "Bảo hiểm Tiền gửi" in row_text:
+                # Skip note/footer rows
+                if (
+                    "NOTE:" in row_text_upper
+                    or "DEPOSIT INSURANCE SCHEME" in row_text_upper
+                    or "THIS IS A COMPUTER-GENERATED DOCUMENT" in row_text_upper
+                    or "L?U ?:" in row_text_upper
+                    or "B?O HI?M TI?N G?I" in row_text_upper
+                ):
                     break
 
                 # Parse date (Col 0)
@@ -152,7 +159,7 @@ class UOBParser(BaseBankParser):
             return transactions
 
         except Exception as e:
-            print(f"Error parsing UOB transactions: {e}")
+            logger.error(f"Error parsing UOB transactions: {e}")
             return []
 
     def parse_balances(self, file_bytes: bytes, file_name: str) -> Optional[BankBalance]:
@@ -188,7 +195,7 @@ class UOBParser(BaseBankParser):
             )
 
         except Exception as e:
-            print(f"Error parsing UOB balances: {e}")
+            logger.error(f"Error parsing UOB balances: {e}")
             return None
 
     # ========== Helper Methods ==========
@@ -196,16 +203,15 @@ class UOBParser(BaseBankParser):
     def _extract_account_number(self, top_rows: pd.DataFrame) -> Optional[str]:
         """
         Extract account number from header area.
-        Located in Row 2, Col 4 after "Số Tài khoản:"
+        Usually located in row with "Account Number:".
         """
         for _, row in top_rows.iterrows():
-            row_text = " ".join([self.to_text(cell) for cell in row])
+            row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "Số Tài khoản:" in row_text or "Số tài khoản:" in row_text:
-                # Account number is in column 4
+            if "ACCOUNT NUMBER" in row_text or "S? T?I KHO?N" in row_text:
+                # Account number value is typically in column 4
                 if len(row) > 4:
                     acc_text = self.to_text(row.iloc[4])
-                    # Extract digits
                     digits = ''.join(c for c in acc_text if c.isdigit())
                     if 8 <= len(digits) <= 15:
                         return digits
@@ -215,12 +221,12 @@ class UOBParser(BaseBankParser):
     def _extract_currency(self, top_rows: pd.DataFrame) -> str:
         """
         Extract currency from header area.
-        Located in Row 5 after "Loại tiền tệ Tài khoản:"
+        Usually located in row with "Account Currency".
         """
         for _, row in top_rows.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "LOẠI TIỀN TỆ" in row_text:
+            if "ACCOUNT CURRENCY" in row_text or "LO?I TI?N T?" in row_text:
                 if len(row) > 1:
                     curr_val = self.to_text(row.iloc[1]).upper().strip()
                     if curr_val in ["VND", "USD", "EUR", "SGD", "JPY"]:
@@ -231,13 +237,17 @@ class UOBParser(BaseBankParser):
 
     def _extract_closing_balance(self, top_rows: pd.DataFrame) -> Optional[float]:
         """
-        Extract closing balance from "Số dư Sổ cái:" or "Số dư khả dụng:" row.
+        Extract closing balance from ledger/available balance row.
         """
         for _, row in top_rows.iterrows():
-            row_text = " ".join([self.to_text(cell) for cell in row])
+            row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            if "Số dư Sổ cái:" in row_text or "Số dư khả dụng:" in row_text:
-                # Balance value is in column 4
+            if (
+                "LEDGER BALANCE" in row_text
+                or "AVAILABLE BALANCE" in row_text
+                or "S? D? S? C?I" in row_text
+                or "S? D? KH? D?NG" in row_text
+            ):
                 if len(row) > 4:
                     return self.fix_number(row.iloc[4])
 
@@ -288,14 +298,19 @@ class UOBParser(BaseBankParser):
     def _find_header_row(self, top_rows: pd.DataFrame) -> Optional[int]:
         """
         Find header row by looking for specific column names.
-        Header contains: "Ngày hiệu lực", "Tiền gửi", "Tiền rút"
+        Header contains date + deposit/withdrawal markers.
         """
         for idx, row in top_rows.iterrows():
             row_text = " ".join([self.to_text(cell).upper() for cell in row])
 
-            has_date = "NGÀY HIỆU LỰC" in row_text or "NGÀY GIAO DỊCH" in row_text
-            has_deposit = "TIỀN GỬI" in row_text
-            has_withdraw = "TIỀN RÚT" in row_text
+            has_date = (
+                "VALUE DATE" in row_text
+                or "TRANSACTION DATE" in row_text
+                or "NG?Y HI?U L?C" in row_text
+                or "NG?Y GIAO D?CH" in row_text
+            )
+            has_deposit = "DEPOSIT" in row_text or "TI?N G?I" in row_text
+            has_withdraw = "WITHDRAWAL" in row_text or "TI?N R?T" in row_text
 
             if has_date and (has_deposit or has_withdraw):
                 return int(idx)

@@ -11,9 +11,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.base import Base, TimestampMixin
 
-if TYPE_CHECKING:
-    from app.infrastructure.database.models.project import ProjectCaseModel
-
 
 class ContractModel(Base, TimestampMixin):
     """Model for contract information extracted via OCR."""
@@ -28,9 +25,9 @@ class ContractModel(Base, TimestampMixin):
         nullable=False,
     )
 
-    # Link to project case (nullable for backward compatibility)
-    case_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("project_cases.id", ondelete="SET NULL"),
+    # Link to user (nullable, 0 for anonymous)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -83,10 +80,6 @@ class ContractModel(Base, TimestampMixin):
     processing_time: Mapped[Optional[float]] = mapped_column(nullable=True)
 
     # Relationships
-    case: Mapped[Optional["ProjectCaseModel"]] = relationship(
-        "ProjectCaseModel",
-        back_populates="contracts",
-    )
     parties: Mapped[List["ContractPartyModel"]] = relationship(
         "ContractPartyModel",
         back_populates="contract",
@@ -104,7 +97,7 @@ class ContractModel(Base, TimestampMixin):
     )
 
     __table_args__ = (
-        Index("ix_contracts_case_id", "case_id"),
+        Index("ix_contracts_user_id", "user_id"),
         Index("ix_contracts_contract_number", "contract_number"),
         Index("ix_contracts_tenant", "tenant"),
         Index("ix_contracts_customer_name", "customer_name"),

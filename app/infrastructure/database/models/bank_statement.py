@@ -11,9 +11,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.base import Base, TimestampMixin
 
-if TYPE_CHECKING:
-    from app.infrastructure.database.models.project import ProjectCaseModel
-
 
 class BankStatementModel(Base, TimestampMixin):
     """Model for bank statement metadata."""
@@ -28,9 +25,9 @@ class BankStatementModel(Base, TimestampMixin):
         nullable=False,
     )
 
-    # Link to project case (nullable for backward compatibility)
-    case_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("project_cases.id", ondelete="SET NULL"),
+    # Link to user (nullable, 0 for anonymous)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -47,10 +44,6 @@ class BankStatementModel(Base, TimestampMixin):
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     # Relationships
-    case: Mapped[Optional["ProjectCaseModel"]] = relationship(
-        "ProjectCaseModel",
-        back_populates="bank_statements",
-    )
     transactions: Mapped[List["BankTransactionModel"]] = relationship(
         "BankTransactionModel",
         back_populates="statement",
@@ -64,7 +57,7 @@ class BankStatementModel(Base, TimestampMixin):
     )
 
     __table_args__ = (
-        Index("ix_bank_statements_case_id", "case_id"),
+        Index("ix_bank_statements_user_id", "user_id"),
         Index("ix_bank_statements_bank_name", "bank_name"),
         Index("ix_bank_statements_uploaded_at", "uploaded_at"),
     )

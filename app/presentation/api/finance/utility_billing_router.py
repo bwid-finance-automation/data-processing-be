@@ -6,7 +6,6 @@ from fastapi.responses import FileResponse
 from typing import List, Optional
 from datetime import datetime
 from pathlib import Path
-from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,9 +15,9 @@ from app.presentation.schemas.billing_schemas import (
     ProcessingStats, ValidationIssue
 )
 from app.application.finance.utility_billing.generate_billing import BillingProcessor
-from app.application.project.project_service import ProjectService
-from app.core.dependencies import get_db
+from app.core.dependencies import get_db, get_current_user_optional
 from app.infrastructure.database.models.analysis_session import AnalysisSessionModel
+from app.infrastructure.database.models.user import UserModel
 from app.shared.utils.file_utils import (
     save_upload_file, validate_file_extension,
     get_files_in_directory, get_file_size, delete_file
@@ -31,54 +30,36 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])
 
 
-async def save_billing_to_project(
+async def save_billing_session(
     db: AsyncSession,
-    project_uuid: str,
     session_id: str,
-    result: dict
+    result: dict,
+    user_id: Optional[int] = None,
 ) -> None:
-    """
-    Save utility billing session to project.
-
-    Args:
-        db: Database session
-        project_uuid: Project UUID string
-        session_id: Billing session ID
-        result: Processing result
-    """
+    """Save utility billing session to database with user tracking."""
     try:
-        project_service = ProjectService(db)
-        case = await project_service.get_or_create_case(UUID(project_uuid), "utility_billing")
-
-        if case:
-            stats = result.get('stats', {})
-
-            # Create AnalysisSessionModel record for billing
-            analysis_session = AnalysisSessionModel(
-                session_id=session_id,
-                case_id=case.id,
-                status="COMPLETED" if result.get('success') else "FAILED",
-                analysis_type="UTILITY_BILLING",
-                files_count=stats.get('total_records', 0),
-                progress_percentage=100,
-                started_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
-                processing_details={
-                    "total_invoices": stats.get('total_invoices', 0),
-                    "total_line_items": stats.get('total_line_items', 0),
-                    "validation_issues_count": stats.get('validation_issues_count', 0),
-                    "output_file": result.get('output_file'),
-                },
-            )
-            db.add(analysis_session)
-
-            # Update case file count
-            await project_service.increment_case_file_count(case.id)
-            await db.commit()
-
-            logger.info(f"Saved utility billing to project {project_uuid}, case {case.id}")
+        stats = result.get('stats', {})
+        analysis_session = AnalysisSessionModel(
+            session_id=session_id,
+            user_id=user_id,
+            status="COMPLETED" if result.get('success') else "FAILED",
+            analysis_type="UTILITY_BILLING",
+            files_count=stats.get('total_records', 0),
+            progress_percentage=100,
+            started_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            processing_details={
+                "total_invoices": stats.get('total_invoices', 0),
+                "total_line_items": stats.get('total_line_items', 0),
+                "validation_issues_count": stats.get('validation_issues_count', 0),
+                "output_file": result.get('output_file'),
+            },
+        )
+        db.add(analysis_session)
+        await db.commit()
+        logger.info(f"Saved utility billing session {session_id} (user_id: {user_id})")
     except Exception as e:
-        logger.error(f"Failed to save utility billing to project: {e}")
+        logger.error(f"Failed to save utility billing session: {e}")
         await db.rollback()
 
 
@@ -98,16 +79,9 @@ def get_session_id(session_id: Optional[str] = Header(None, alias="X-Session-ID"
 
 
 @router.post("/session/create", response_model=SessionResponse)
-async def create_session(
-    project_uuid: Optional[str] = Form(None, description="Project UUID to associate with session (optional)"),
-):
-    """Create a new session for file uploads and processing.
-    Optionally associate with a project for tracking."""
+async def create_session():
+    """Create a new session for file uploads and processing."""
     session_id = SessionManager.create_session()
-
-    # Store project association if provided
-    if project_uuid:
-        SessionManager.set_project_uuid(session_id, project_uuid)
 
     return SessionResponse(
         session_id=session_id,
@@ -357,9 +331,9 @@ async def process_billing(
     session_id: str = Header(..., alias="X-Session-ID"),
     request: ProcessingRequest = None,
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[UserModel] = Depends(get_current_user_optional),
 ):
-    """Process utility billing files and generate ERP CSV.
-    If session is associated with a project, saves to project."""
+    """Process utility billing files and generate ERP CSV."""
     if not SessionManager.validate_session(session_id):
         raise HTTPException(status_code=401, detail="Invalid or expired session")
 
@@ -374,10 +348,10 @@ async def process_billing(
 
         SessionManager.update_activity(session_id)
 
-        # Save to project if session is associated with a project
-        project_uuid = SessionManager.get_project_uuid(session_id)
-        if project_uuid and result.get('success'):
-            await save_billing_to_project(db, project_uuid, session_id, result)
+        # Save billing session
+        if result.get('success'):
+            user_id = current_user.id if current_user else None
+            await save_billing_session(db, session_id, result, user_id=user_id)
 
         if result['success']:
             # Convert stats dictionary to ProcessingStats object

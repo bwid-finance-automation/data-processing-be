@@ -7,7 +7,6 @@ import queue
 from contextlib import redirect_stdout, redirect_stderr
 from typing import List, Optional
 from datetime import datetime
-from uuid import UUID
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -18,9 +17,9 @@ from app.presentation.schemas.analysis import (
     DebugFilesResponse, ErrorResponse
 )
 from app.application.finance.variance_analysis.analyze_variance import analysis_service
-from app.application.project.project_service import ProjectService
-from app.core.dependencies import get_db, get_ai_usage_repository
+from app.core.dependencies import get_db, get_ai_usage_repository, get_current_user_optional
 from app.infrastructure.database.models.analysis_session import AnalysisSessionModel
+from app.infrastructure.database.models.user import UserModel
 from app.infrastructure.persistence.repositories.ai_usage_repository import AIUsageRepository
 from app.shared.utils.helpers import build_config_overrides
 from app.shared.utils.file_validation import validate_file_list, FileValidator
@@ -36,49 +35,32 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["analysis"])
 
 
-async def save_variance_to_project(
+async def save_analysis_session(
     db: AsyncSession,
-    project_uuid: str,
     session_id: str,
     files_count: int,
-    analysis_type: str = "PYTHON_VARIANCE"
+    analysis_type: str,
+    user_id: Optional[int] = None,
+    processing_details: Optional[dict] = None,
 ) -> None:
-    """
-    Save variance analysis session to project.
-
-    Args:
-        db: Database session
-        project_uuid: Project UUID string
-        session_id: Analysis session ID
-        files_count: Number of files processed
-        analysis_type: Type of analysis
-    """
+    """Save analysis session to database with user tracking."""
     try:
-        project_service = ProjectService(db)
-        case = await project_service.get_or_create_case(UUID(project_uuid), "variance")
-
-        if case:
-            # Create AnalysisSessionModel record
-            analysis_session = AnalysisSessionModel(
-                session_id=session_id,
-                case_id=case.id,
-                status="COMPLETED",
-                analysis_type=analysis_type,
-                files_count=files_count,
-                progress_percentage=100,
-                started_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
-            )
-            db.add(analysis_session)
-
-            # Update case file count
-            await project_service.increment_case_file_count(case.id)
-            await db.commit()
-
-            logger.info(f"Saved variance analysis to project {project_uuid}, case {case.id}")
+        analysis_session = AnalysisSessionModel(
+            session_id=session_id,
+            user_id=user_id,
+            status="COMPLETED",
+            analysis_type=analysis_type,
+            files_count=files_count,
+            progress_percentage=100,
+            started_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            processing_details=processing_details,
+        )
+        db.add(analysis_session)
+        await db.commit()
+        logger.info(f"Saved {analysis_type} session {session_id} (user_id: {user_id})")
     except Exception as e:
-        logger.error(f"Failed to save variance analysis to project: {e}")
-        # Don't fail the request if saving to project fails
+        logger.error(f"Failed to save analysis session: {e}")
         await db.rollback()
 
 @router.post("/process")
@@ -88,8 +70,8 @@ async def process_python_analysis(
     loan_interest_file: Optional[UploadFile] = File(None, description="Optional: ERP Loan Interest Rate file for enhanced A2 analysis"),
     revenue_breakdown_file: Optional[UploadFile] = File(None, description="Optional: RevenueBreakdown file for Account 511 drill-down"),
     unit_for_lease_file: Optional[UploadFile] = File(None, description="Optional: UnitForLeaseList file for Account 511 drill-down"),
-    project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[UserModel] = Depends(get_current_user_optional),
 ):
     """Process Excel files using Python-based 22-rule variance analysis.
 
@@ -97,14 +79,6 @@ async def process_python_analysis(
     Optionally upload an ERP Loan Interest Rate file (from Save Search) to enable
     enhanced Rule A2 analysis with interest rate lookups.
     Optionally upload RevenueBreakdown and UnitForLeaseList files for Account 511 drill-down.
-    Optionally save to project if project_uuid is provided.
-
-    Args:
-        excel_files: List of BS/PL Breakdown Excel files (required)
-        loan_interest_file: Optional ERP Loan Interest Rate file for enhanced A2
-        revenue_breakdown_file: Optional RevenueBreakdown file for 511 drill-down
-        unit_for_lease_file: Optional UnitForLeaseList file for 511 drill-down
-        project_uuid: Optional project UUID to save analysis to
 
     Returns:
         Excel file with variance flags and raw data sheets
@@ -177,11 +151,11 @@ async def process_python_analysis(
 
         logger.info("Python variance analysis completed successfully")
 
-        # Save to project if project_uuid provided
-        if project_uuid:
-            import uuid as uuid_lib
-            session_id = f"python_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-            await save_variance_to_project(db, project_uuid, session_id, len(excel_files), "PYTHON_VARIANCE")
+        # Save analysis session
+        import uuid as uuid_lib
+        session_id = f"python_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        user_id = current_user.id if current_user else None
+        await save_analysis_session(db, session_id, len(excel_files), "PYTHON_VARIANCE", user_id=user_id)
 
         return StreamingResponse(
             iter([xlsx_bytes]),
@@ -205,11 +179,10 @@ async def start_ai_analysis(
     loan_interest_file: Optional[UploadFile] = File(None, description="Optional: ERP Loan Interest Rate file for enhanced A2 analysis"),
     revenue_breakdown_file: Optional[UploadFile] = File(None, description="Optional: RevenueBreakdown file for Account 511 drill-down"),
     unit_for_lease_file: Optional[UploadFile] = File(None, description="Optional: UnitForLeaseList file for Account 511 drill-down"),
-    project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[UserModel] = Depends(get_current_user_optional),
 ):
     """Start AI-powered analysis with file validation.
-    Optionally save to project if project_uuid is provided.
     Optionally upload RevenueBreakdown and UnitForLeaseList files for Account 511 drill-down."""
     logger.info(f"Starting AI analysis for {len(excel_files)} files")
     if loan_interest_file:
@@ -271,9 +244,9 @@ async def start_ai_analysis(
 
         logger.info(f"AI analysis session started: {session.session_id}")
 
-        # Save to project if project_uuid provided
-        if project_uuid:
-            await save_variance_to_project(db, project_uuid, session.session_id, len(excel_files), "AI_POWERED")
+        # Save analysis session
+        user_id = current_user.id if current_user else None
+        await save_analysis_session(db, session.session_id, len(excel_files), "AI_POWERED", user_id=user_id)
 
         return session
 
@@ -388,18 +361,17 @@ async def stream_logs(
 @router.post("/analyze-revenue-variance", response_model=RevenueVarianceAnalysisResponse)
 async def analyze_revenue_variance(
     excel_file: UploadFile = File(...),
-    project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[UserModel] = Depends(get_current_user_optional),
 ):
-    """Perform comprehensive revenue variance analysis with net effect breakdown.
-    Optionally save to project if project_uuid is provided."""
+    """Perform comprehensive revenue variance analysis with net effect breakdown."""
     result = await analysis_service.analyze_revenue_variance(excel_file)
 
-    # Save to project if project_uuid provided
-    if project_uuid:
-        import uuid as uuid_lib
-        session_id = f"revenue_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-        await save_variance_to_project(db, project_uuid, session_id, 1, "REVENUE_VARIANCE")
+    # Save analysis session
+    import uuid as uuid_lib
+    session_id = f"revenue_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    user_id = current_user.id if current_user else None
+    await save_analysis_session(db, session_id, 1, "REVENUE_VARIANCE", user_id=user_id)
 
     return result
 
@@ -513,9 +485,9 @@ async def analyze_account_511_standalone(
     request: Request,
     revenue_breakdown_file: UploadFile = File(..., description="RevenueBreakdown file from NetSuite"),
     unit_for_lease_file: UploadFile = File(..., description="UnitForLeaseList file from NetSuite"),
-    project_uuid: Optional[str] = Form(None, description="Project UUID to save analysis to (optional)"),
     db: AsyncSession = Depends(get_db),
     ai_usage_repo: AIUsageRepository = Depends(get_ai_usage_repository),
+    current_user: Optional[UserModel] = Depends(get_current_user_optional),
 ):
     """
     Revenue Variance Analysis with UFL Linkage.
@@ -583,11 +555,11 @@ async def analyze_account_511_standalone(
                 file_count=2,
             )
 
-        # Save to project if project_uuid provided
-        if project_uuid:
-            import uuid as uuid_lib
-            session_id = f"rev_var_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-            await save_variance_to_project(db, project_uuid, session_id, 2, "REVENUE_VARIANCE")
+        # Save analysis session
+        import uuid as uuid_lib
+        session_id = f"rev_var_{uuid_lib.uuid4().hex[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        user_id = current_user.id if current_user else None
+        await save_analysis_session(db, session_id, 2, "REVENUE_VARIANCE", user_id=user_id)
 
         # Generate filename with timestamp
         timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
