@@ -150,11 +150,27 @@ async def get_history_summary(
 async def get_bank_statement_history(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    date_from: Optional[str] = Query(None, description="Filter from date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="Filter to date (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ):
     """Get bank statement parse sessions for the current user. Requires authentication."""
     user_id = current_user.id
+
+    # Parse date filters
+    date_from_dt = None
+    date_to_dt = None
+    if date_from:
+        try:
+            date_from_dt = datetime.strptime(date_from, "%Y-%m-%d")
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            date_to_dt = datetime.strptime(date_to, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        except ValueError:
+            pass
 
     # Get distinct sessions
     session_query = (
@@ -165,6 +181,13 @@ async def get_bank_statement_history(
         )
         .where(BankStatementModel.user_id == user_id)
         .where(BankStatementModel.session_id.isnot(None))
+    )
+    if date_from_dt:
+        session_query = session_query.where(BankStatementModel.processed_at >= date_from_dt)
+    if date_to_dt:
+        session_query = session_query.where(BankStatementModel.processed_at <= date_to_dt)
+    session_query = (
+        session_query
         .group_by(BankStatementModel.session_id)
         .order_by(desc("processed_at"))
         .offset(skip)
@@ -178,6 +201,10 @@ async def get_bank_statement_history(
         .where(BankStatementModel.user_id == user_id)
         .where(BankStatementModel.session_id.isnot(None))
     )
+    if date_from_dt:
+        count_query = count_query.where(BankStatementModel.processed_at >= date_from_dt)
+    if date_to_dt:
+        count_query = count_query.where(BankStatementModel.processed_at <= date_to_dt)
     total = (await db.execute(count_query)).scalar() or 0
 
     # Build session items with details
