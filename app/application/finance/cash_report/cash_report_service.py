@@ -8,6 +8,7 @@ import re
 import shutil
 import uuid
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime
 from difflib import SequenceMatcher
 from decimal import Decimal
@@ -139,6 +140,16 @@ HDTG_DEPOSIT_KEYWORDS = [
 ]
 _UNIT_1B = Decimal("1000000000")  # 1 billion VND
 
+
+@dataclass(frozen=True)
+class ExternalKeywordRule:
+    """One keyword-classification rule loaded from Key Words CSV."""
+    keyword_norm: str
+    category: str
+    is_receipt: Optional[bool]
+    amount_operator: Optional[str]
+    amount_threshold: Optional[Decimal]
+
 # Targeted settlement exceptions observed in production data.
 # Keep these narrow to avoid broad side effects.
 CA_TARGET_NORMALIZED = "ca target"
@@ -187,6 +198,10 @@ PROFIT_DISTRIBUTION_KEYWORDS = (
     "chia loi nhuan",
     "co tuc",
 )
+
+# Targeted open-new exception observed for Woori statements where
+# savings placement transactions are labeled as "Withdrawal - Withdrawal".
+WOORI_WITHDRAWAL_WITHDRAWAL_NORMALIZED = "withdrawal withdrawal"
 
 # Normalize known legacy/variant category names from reference files.
 TRANSACTION_NATURE_ALIASES = {
@@ -451,9 +466,10 @@ class CashReportService:
         if self.db_session:
             query = select(CashReportSessionModel).where(
                 CashReportSessionModel.status == CashReportSessionStatus.ACTIVE
-            )
+            ).options(selectinload(CashReportSessionModel.uploaded_files))
             if user_id is not None:
                 query = query.where(CashReportSessionModel.user_id == user_id)
+            query = query.options(selectinload(CashReportSessionModel.uploaded_files))
             query = query.order_by(CashReportSessionModel.created_at.desc())
 
             result = await self.db_session.execute(query)
@@ -466,13 +482,25 @@ class CashReportService:
                 if working_file and working_file.exists():
                     file_size_mb = round(working_file.stat().st_size / (1024 * 1024), 2)
 
+                uploaded_transactions = sum(
+                    int(f.transactions_added or 0)
+                    for f in (existing_session.uploaded_files or [])
+                )
+                breakdown = self._session_breakdown(
+                    existing_session.total_transactions,
+                    existing_session.metadata_json,
+                    original_transactions=uploaded_transactions,
+                )
+
                 logger.info(f"Returning existing session: {existing_session.session_id}")
                 return {
                     "session_id": existing_session.session_id,
                     "is_existing": True,
                     "working_file": str(working_file) if working_file else None,
                     "file_size_mb": file_size_mb,
-                    "movement_rows": existing_session.total_transactions,
+                    "movement_rows": breakdown["transactions"],
+                    "movement_rows_total": existing_session.total_transactions,
+                    "breakdown": breakdown,
                     "config": {
                         "opening_date": existing_session.opening_date.isoformat() if existing_session.opening_date else None,
                         "ending_date": existing_session.ending_date.isoformat() if existing_session.ending_date else None,
@@ -517,7 +545,12 @@ class CashReportService:
                 total_files_uploaded=0,
                 user_id=user_id,
                 # Track whether Movement prep already ran (user-uploaded template)
-                metadata_json={"movement_prepared": session_info.get("movement_prepared", False)},
+                metadata_json={
+                    "movement_prepared": session_info.get("movement_prepared", False),
+                    "settlement_counter_entries": 0,
+                    "open_new_counter_entries": 0,
+                    "settlement_interest_splits": 0,
+                },
             )
             self.db_session.add(db_model)
             await self.db_session.commit()
@@ -526,6 +559,13 @@ class CashReportService:
         return {
             **session_info,
             "is_existing": False,
+            "breakdown": {
+                "transactions": 0,
+                "settlement": 0,
+                "open_new": 0,
+                "interest_splits": 0,
+                "total_rows": 0,
+            },
         }
 
     async def upload_bank_statements(
@@ -1506,11 +1546,15 @@ class CashReportService:
         is_round = amount >= _UNIT_100M and amount % _UNIT_100M == 0
         desc_norm = self._normalize_text_for_match(description or "")
 
+        # Align with keyword CSV SUB_Category:
+        # [Receipt] CA - TARGET + amount < 1B -> Other receipts.
+        if CA_TARGET_NORMALIZED in desc_norm and amount < _UNIT_1B:
+            return "Other receipts"
+
         if not is_round:
             # CA - TARGET:
-            # - round amount => principal movement (Internal transfer in)
             # - non-round >= 1B => Receipt from tenants
-            # - non-round < 1B  => Other receipts
+            # - non-round < 1B  => Other receipts (handled above)
             if CA_TARGET_NORMALIZED in desc_norm:
                 return "Receipt from tenants" if amount >= _UNIT_1B else "Other receipts"
 
@@ -1571,19 +1615,146 @@ class CashReportService:
 
         return None, None
 
-    def _build_external_keyword_index(self) -> List[Tuple[str, str]]:
+    @staticmethod
+    def _extract_external_rule_column(
+        row: Dict[str, Any],
+        *column_names: str,
+    ) -> str:
+        """Read CSV column by candidate names (case-insensitive)."""
+        if not row:
+            return ""
+        lowered = {
+            (str(key).strip().lower() if key is not None else ""): (value or "")
+            for key, value in row.items()
+        }
+        for name in column_names:
+            value = lowered.get(name.strip().lower(), "")
+            if str(value).strip():
+                return str(value).strip()
+        return ""
+
+    @staticmethod
+    def _parse_external_rule_type(raw_type: str) -> Optional[bool]:
         """
-        Build a flattened keyword index from movement_nature_filter/Key Words.csv rules.
-        Longest keywords are matched first for better specificity.
+        Parse rule Type column to cash-flow direction.
+        Returns:
+            True  -> Receipt
+            False -> Payment
+            None  -> no direction constraint
         """
-        rules = getattr(self.ai_classifier, "_keyword_rules", {}) or {}
-        index: List[Tuple[str, str]] = []
-        for category, keywords in rules.items():
-            for keyword in keywords or []:
-                keyword_norm = self._normalize_text_for_match(keyword)
-                if keyword_norm:
-                    index.append((keyword_norm, category))
-        index.sort(key=lambda item: len(item[0]), reverse=True)
+        type_norm = (raw_type or "").strip().lower()
+        if type_norm == "receipt":
+            return True
+        if type_norm == "payment":
+            return False
+        return None
+
+    @staticmethod
+    def _parse_amount_condition(raw_condition: str) -> Tuple[Optional[str], Optional[Decimal]]:
+        """
+        Parse SUB_Category amount condition.
+        Examples:
+            "> 1.000.000.000" -> (">", Decimal("1000000000"))
+            "< 500.000.000"   -> ("<", Decimal("500000000"))
+        """
+        text = (raw_condition or "").strip()
+        if not text:
+            return None, None
+
+        matched = re.match(r"^(<=|>=|<|>)\s*([0-9][0-9\.,\s]*)$", text)
+        if not matched:
+            return None, None
+
+        operator = matched.group(1)
+        digits = re.sub(r"\D+", "", matched.group(2))
+        if not digits:
+            return None, None
+        return operator, Decimal(digits)
+
+    @staticmethod
+    def _amount_condition_matches(
+        amount: Decimal,
+        operator: Optional[str],
+        threshold: Optional[Decimal],
+    ) -> bool:
+        """Evaluate amount against parsed SUB_Category condition."""
+        if operator is None or threshold is None:
+            return True
+        if operator == ">":
+            return amount > threshold
+        if operator == ">=":
+            return amount >= threshold
+        if operator == "<":
+            return amount < threshold
+        if operator == "<=":
+            return amount <= threshold
+        return True
+
+    def _build_external_keyword_index(self) -> List[ExternalKeywordRule]:
+        """
+        Build keyword-rule index from movement_nature_filter/Key Words CSV.csv.
+        Supports Type + SUB_Category amount conditions for deterministic matching.
+        """
+        rules_file = getattr(self.ai_classifier, "_rules_file", None)
+        if not rules_file:
+            return []
+
+        path = Path(rules_file)
+        if not path.exists():
+            logger.warning("Keyword rules file not found: %s", path)
+            return []
+
+        index: List[ExternalKeywordRule] = []
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f, delimiter=";")
+                for row in reader:
+                    category = self._extract_external_rule_column(
+                        row,
+                        "Category Cash consol",
+                        "Category",
+                    )
+                    keyword = self._extract_external_rule_column(
+                        row,
+                        "Key word",
+                        "Keyword",
+                    )
+                    if not category or not keyword:
+                        continue
+
+                    keyword_norm = self._normalize_text_for_match(keyword)
+                    if not keyword_norm:
+                        continue
+
+                    is_receipt = self._parse_external_rule_type(
+                        self._extract_external_rule_column(row, "Type")
+                    )
+                    operator, threshold = self._parse_amount_condition(
+                        self._extract_external_rule_column(row, "SUB_Category")
+                    )
+
+                    index.append(
+                        ExternalKeywordRule(
+                            keyword_norm=keyword_norm,
+                            category=category,
+                            is_receipt=is_receipt,
+                            amount_operator=operator,
+                            amount_threshold=threshold,
+                        )
+                    )
+        except Exception as e:
+            logger.warning("Failed to load keyword rules from %s: %s", path, e)
+            return []
+
+        # Priority: longer keyword first, then direction-specific, then amount-constrained.
+        index.sort(
+            key=lambda rule: (
+                len(rule.keyword_norm),
+                1 if rule.is_receipt is not None else 0,
+                1 if rule.amount_operator else 0,
+            ),
+            reverse=True,
+        )
         return index
 
     def _get_rules_file_mtime(self) -> Optional[float]:
@@ -1598,7 +1769,7 @@ class CashReportService:
 
     def _refresh_external_keyword_index_if_needed(self) -> None:
         """
-        Reload keyword rules when `Key Words.csv` changes and rebuild the matching index.
+        Reload keyword rules when keyword CSV changes and rebuild the matching index.
         This keeps the flow aligned with latest CSV without restarting the service.
         """
         current_mtime = self._get_rules_file_mtime()
@@ -1755,6 +1926,7 @@ class CashReportService:
         self,
         description: str,
         is_receipt: bool,
+        amount: Optional[Decimal],
     ) -> Optional[str]:
         """
         Deterministic classification using external keyword CSV rules.
@@ -1767,12 +1939,19 @@ class CashReportService:
         if not description_norm:
             return None
         description_tokens = set(description_norm.split())
+        tx_amount = amount or Decimal("0")
 
-        for keyword_norm, category in self._external_keyword_index:
-            if self._keyword_matches_description(description_norm, description_tokens, keyword_norm):
-                mapped = self._canonical_nature_for_direction(category, is_receipt)
-                if mapped:
-                    return mapped
+        for rule in self._external_keyword_index:
+            if rule.is_receipt is not None and rule.is_receipt != is_receipt:
+                continue
+            if not self._keyword_matches_description(description_norm, description_tokens, rule.keyword_norm):
+                continue
+            if not self._amount_condition_matches(tx_amount, rule.amount_operator, rule.amount_threshold):
+                continue
+
+            mapped = self._canonical_nature_for_direction(rule.category, is_receipt)
+            if mapped:
+                return mapped
         return None
 
     def _apply_classification_guardrails(self, tx: MovementTransaction) -> None:
@@ -1988,7 +2167,12 @@ class CashReportService:
                 continue
 
             is_receipt = bool(tx.debit)  # Debit = money in = Receipt
-            external_rule_nature = self._classify_from_external_keyword_rules(tx.description or "", is_receipt)
+            tx_amount = tx.debit if is_receipt else tx.credit
+            external_rule_nature = self._classify_from_external_keyword_rules(
+                tx.description or "",
+                is_receipt,
+                tx_amount,
+            )
             if external_rule_nature:
                 tx.nature = external_rule_nature
                 tx._classified_by = "rule"
@@ -2642,6 +2826,38 @@ class CashReportService:
         )
         await self.db_session.commit()
 
+    @staticmethod
+    def _session_breakdown(
+        total_transactions: int,
+        metadata: Optional[Dict[str, Any]],
+        original_transactions: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """Build UI-friendly transaction breakdown for session cards/status."""
+        meta = metadata or {}
+
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        settlement = _as_int(meta.get("settlement_counter_entries"))
+        open_new = _as_int(meta.get("open_new_counter_entries"))
+        interest_splits = _as_int(meta.get("settlement_interest_splits"))
+        if original_transactions is None:
+            original = _as_int(total_transactions) - settlement - open_new - interest_splits
+            if original < 0:
+                original = 0
+        else:
+            original = _as_int(original_transactions)
+        return {
+            "transactions": original,
+            "settlement": settlement,
+            "open_new": open_new,
+            "interest_splits": interest_splits,
+            "total_rows": _as_int(total_transactions),
+        }
+
     async def get_session_status(self, session_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
         Get session status and statistics (fast - uses database).
@@ -2672,10 +2888,22 @@ class CashReportService:
                 if working_file and working_file.exists():
                     file_size_mb = round(working_file.stat().st_size / (1024 * 1024), 2)
 
+                uploaded_transactions = sum(
+                    int(f.transactions_added or 0)
+                    for f in (db_session.uploaded_files or [])
+                )
+                breakdown = self._session_breakdown(
+                    db_session.total_transactions,
+                    db_session.metadata_json,
+                    original_transactions=uploaded_transactions,
+                )
+
                 return {
                     "session_id": session_id,
                     "status": db_session.status.value,
-                    "movement_rows": db_session.total_transactions,
+                    "movement_rows": breakdown["transactions"],
+                    "movement_rows_total": db_session.total_transactions,
+                    "breakdown": breakdown,
                     "file_size_mb": file_size_mb,
                     "total_files_uploaded": db_session.total_files_uploaded,
                     "config": {
@@ -2697,7 +2925,13 @@ class CashReportService:
                 }
 
         # Fallback to reading file (slower)
-        return self.template_manager.get_session_info(session_id)
+        info = self.template_manager.get_session_info(session_id)
+        if info:
+            info["breakdown"] = self._session_breakdown(
+                info.get("movement_rows", 0),
+                None,
+            )
+        return info
 
     async def reset_session(self, session_id: str, user_id: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -2735,6 +2969,11 @@ class CashReportService:
                 # Reset stats
                 db_session.total_transactions = 0
                 db_session.total_files_uploaded = 0
+                metadata = dict(db_session.metadata_json or {})
+                metadata["settlement_counter_entries"] = 0
+                metadata["open_new_counter_entries"] = 0
+                metadata["settlement_interest_splits"] = 0
+                db_session.metadata_json = metadata
                 await self.db_session.commit()
 
         logger.info(f"Reset session {session_id}")
@@ -2814,28 +3053,46 @@ class CashReportService:
             )
             if user_id is not None:
                 query = query.where(CashReportSessionModel.user_id == user_id)
+            query = query.options(selectinload(CashReportSessionModel.uploaded_files))
             query = query.order_by(CashReportSessionModel.created_at.desc())
 
             result = await self.db_session.execute(query)
             db_sessions = result.scalars().all()
 
-            return [
-                {
+            sessions: List[Dict[str, Any]] = []
+            for s in db_sessions:
+                uploaded_transactions = sum(
+                    int(f.transactions_added or 0)
+                    for f in (s.uploaded_files or [])
+                )
+                breakdown = self._session_breakdown(
+                    s.total_transactions,
+                    s.metadata_json,
+                    original_transactions=uploaded_transactions,
+                )
+                sessions.append({
                     "session_id": s.session_id,
-                    "movement_rows": s.total_transactions,
+                    "movement_rows": breakdown["transactions"],
+                    "movement_rows_total": s.total_transactions,
+                    "breakdown": breakdown,
                     "file_size_mb": 0,  # Don't read file for listing
                     "config": {
                         "opening_date": s.opening_date.isoformat() if s.opening_date else None,
                         "ending_date": s.ending_date.isoformat() if s.ending_date else None,
                         "fx_rate": float(s.fx_rate) if s.fx_rate else None,
                         "period_name": s.period_name,
-                    }
-                }
-                for s in db_sessions
-            ]
+                    },
+                })
+            return sessions
 
         # Fallback to file system (slower)
-        return self.template_manager.list_sessions()
+        sessions = self.template_manager.list_sessions()
+        for s in sessions:
+            s["breakdown"] = self._session_breakdown(
+                s.get("movement_rows", 0),
+                None,
+            )
+        return sessions
 
     async def get_data_preview(self, session_id: str, limit: int = 20, user_id: Optional[int] = None) -> List[dict]:
         """
@@ -3743,15 +4000,16 @@ class CashReportService:
         entity_branches: Dict[str, List[str]],
         original_bank: str,
         def_bank_alias_to_name: Optional[Dict[str, str]] = None,
+        provider_hint: str = "",
     ) -> str:
         """
-        Determine BRANCH for a new saving account by looking up the entity's
+        Determine BRANCH for a new saving account by looking up the entity’s
         branches in Cash Balance (Prior period), then matching with the saving
-        account's bank prefix.
+        account’s bank prefix.
 
         Logic:
-        1. Get all branches for entity from prior period
-        2. Determine bank from saving account prefix (8xxâ†’BIDV, 1xx/10â†’VCB, 2xx/12â†’VTB)
+        1. If provider_hint is given (from lookup metadata), use it as primary
+        2. Otherwise determine bank from saving account prefix
         3. Pick the branch that matches the bank
         4. Fallback: first branch for entity, or normalized original_bank
         """
@@ -3760,19 +4018,37 @@ class CashReportService:
             original_bank, def_bank_alias_to_name,
         )
 
-        # Determine bank keyword from account prefix
+        # Determine bank keyword — prefer provider_hint from lookup metadata
         bank_keyword = ""
-        if len(acc) >= 10:
+        hint_norm = str(provider_hint or "").strip().upper()
+        if hint_norm:
+            # Map provider to keyword used in branch names
+            _PROVIDER_TO_KEYWORD = {
+                "BIDV": "BIDV",
+                "VCB": "VIETCOMBANK",
+                "VTB": "VIETINBANK",
+                "WOORI": "WOORI",
+                "SNP": "SINOPAC",
+                "TCB": "TECHCOMBANK",
+                "TECHCOMBANK": "TECHCOMBANK",
+                "VIETCOMBANK": "VIETCOMBANK",
+                "VIETINBANK": "VIETINBANK",
+            }
+            bank_keyword = _PROVIDER_TO_KEYWORD.get(hint_norm, hint_norm)
+
+        # Fallback: determine bank from account prefix
+        if not bank_keyword and len(acc) >= 10:
             if acc.startswith("8"):
                 bank_keyword = "BIDV"
-            elif acc.startswith("1") and len(acc) == 10:
+            elif acc.startswith("1") and len(acc) in (10, 13):
                 bank_keyword = "VIETCOMBANK"
-            elif acc.startswith("1") and len(acc) == 13:
-                bank_keyword = "VIETCOMBANK"
+            elif acc.startswith("2007") and len(acc) == 12:
+                # Woori accounts: 200700xxxxx pattern
+                bank_keyword = "WOORI"
             elif acc.startswith("2") and len(acc) == 12:
                 bank_keyword = "VIETINBANK"
 
-        # Look up entity's branches
+        # Look up entity’s branches
         branches = entity_branches.get((entity or "").upper(), [])
         if branches and bank_keyword:
             for br in branches:
@@ -3840,7 +4116,8 @@ class CashReportService:
         """
         Split a settlement amount into principal (round) and interest.
 
-        >= 1B  → always split at 1B boundary (principal = floor(amount/1B)*1B)
+        Round (divisible by 100M) → no split (full amount is principal)
+        >= 1B non-round           → split at 1B boundary (principal = floor(amount/1B)*1B)
         < 1B & divisible by 100M → no split (round, full amount is principal)
         < 1B & not divisible by 100M → principal=0, pure interest
 
@@ -3849,12 +4126,12 @@ class CashReportService:
         """
         UNIT_100M = Decimal("100000000")   # 100M VND
         UNIT_1B = Decimal("1000000000")    # 1B VND
+        # Round totals (e.g. 3.8B) are principal-only and should not be split.
+        if amount >= UNIT_100M and amount % UNIT_100M == 0:
+            return amount, Decimal("0")
         # Always split at 1B boundary first
         principal = (amount // UNIT_1B) * UNIT_1B
         interest = amount - principal
-        # Small round amount (< 1B, divisible by 100M) → no split
-        if principal == 0 and amount % UNIT_100M == 0:
-            return amount, Decimal("0")
         return principal, interest
 
     @staticmethod
@@ -4134,6 +4411,19 @@ class CashReportService:
         # Profit-distribution transfers are not savings open-new transactions.
         if self._is_profit_distribution_transfer(description):
             return False
+
+        # Woori-specific override:
+        # "Withdrawal - Withdrawal" with large round credit is a known open-new flow.
+        credit_amount = tx.credit or Decimal("0")
+        desc_norm = self._normalize_text_for_match(description)
+        unit_100m = Decimal("100000000")
+        if (
+            self._bank_matches(tx.bank or "", "WOORI")
+            and desc_norm == WOORI_WITHDRAWAL_WITHDRAWAL_NORMALIZED
+            and credit_amount >= unit_100m
+            and credit_amount % unit_100m == 0
+        ):
+            return True
 
         # Check open-new regex patterns (Group B patterns)
         for pattern in self._open_new_patterns_compiled:
@@ -4806,13 +5096,23 @@ class CashReportService:
 
         total_new_rows = rows_added + len(interest_inserts)
         if self.db_session:
-            await self.db_session.execute(
-                update(CashReportSessionModel)
-                .where(CashReportSessionModel.session_id == session_id)
-                .values(
-                    total_transactions=CashReportSessionModel.total_transactions + total_new_rows,
+            db_result = await self.db_session.execute(
+                select(CashReportSessionModel).where(
+                    CashReportSessionModel.session_id == session_id
                 )
             )
+            db_session = db_result.scalar_one_or_none()
+            if db_session:
+                db_session.total_transactions = int(db_session.total_transactions or 0) + total_new_rows
+                metadata = dict(db_session.metadata_json or {})
+                metadata["settlement_counter_entries"] = (
+                    int(metadata.get("settlement_counter_entries") or 0) + len(counter_entries)
+                )
+                metadata.setdefault("open_new_counter_entries", int(metadata.get("open_new_counter_entries") or 0))
+                metadata["settlement_interest_splits"] = (
+                    int(metadata.get("settlement_interest_splits") or 0) + len(interest_inserts)
+                )
+                db_session.metadata_json = metadata
             await self.db_session.commit()
 
         nature_corrections = len([m for m in cell_modifications.values() if "I" in m])
@@ -5117,9 +5417,14 @@ class CashReportService:
         # Check for existing counter entries to avoid duplicates
         # Counter entries have nature "Internal transfer in" (from any source)
         existing_descs = set()
+        existing_counter_accounts: Dict[str, str] = {}  # desc → saving account
         for tx in transactions:
             if tx.nature and "transfer in" in tx.nature.lower():
-                existing_descs.add(tx.description.strip() if tx.description else "")
+                desc_key = tx.description.strip() if tx.description else ""
+                existing_descs.add(desc_key)
+                # Map description to the counter entry's account (the saving account)
+                if desc_key and tx.account:
+                    existing_counter_accounts[desc_key] = str(tx.account).strip()
 
         counter_entries = []
         counter_entry_info = []  # Additional info for B1-B3 steps
@@ -5127,8 +5432,6 @@ class CashReportService:
         skipped_no_account = []
         skipped_duplicate = []
         skipped_existing = []  # Accounts that already exist (not genuinely new)
-        used_lookup_accounts = set()
-
         def _normalize_account_text(value: str) -> str:
             text = str(value or "").strip().replace("'", "")
             if not text:
@@ -5139,6 +5442,30 @@ class CashReportService:
             except (ValueError, OverflowError):
                 pass
             return text
+
+        # Normalize lookup details/account values once so downstream matching
+        # and metadata lookups remain stable even if source files contain
+        # numeric strings with decimal artifacts.
+        normalized_lookup_account_details: Dict[str, Dict[str, Any]] = {}
+        for acc, meta in lookup_account_details.items():
+            acc_norm = _normalize_account_text(acc)
+            if not acc_norm:
+                continue
+            dst = normalized_lookup_account_details.setdefault(acc_norm, {})
+            for mk, mv in (meta or {}).items():
+                if mv in (None, ""):
+                    continue
+                if dst.get(mk) in (None, ""):
+                    dst[mk] = mv
+        lookup_account_details = normalized_lookup_account_details
+
+        for key, accounts in list(lookup_accounts.items()):
+            normalized_accounts: List[str] = []
+            for account in accounts:
+                acc_norm = _normalize_account_text(account)
+                if acc_norm and acc_norm not in normalized_accounts:
+                    normalized_accounts.append(acc_norm)
+            lookup_accounts[key] = normalized_accounts
 
         # Normalize existing account set once to prevent same-run duplicates.
         existing_saving_acc_set = {_normalize_account_text(acc) for acc in existing_saving_acc_set if acc}
@@ -5160,6 +5487,200 @@ class CashReportService:
                 acc_norm = _normalize_account_text(account)
                 if acc_norm and acc_norm not in bucket:
                     bucket.append(acc_norm)
+
+        lookup_accounts_by_opening_date: Dict[date, List[str]] = {}
+        for account, meta in lookup_account_details.items():
+            opening_date = meta.get("opening_date")
+            if not isinstance(opening_date, date):
+                continue
+            acc_norm = _normalize_account_text(account)
+            if not acc_norm:
+                continue
+            bucket = lookup_accounts_by_opening_date.setdefault(opening_date, [])
+            if acc_norm not in bucket:
+                bucket.append(acc_norm)
+
+        account_like_pattern = re.compile(r"\d{8,20}")
+
+        def _parse_raw_lookup_amount(raw: Any) -> Optional[float]:
+            if raw is None or raw == "":
+                return None
+            if isinstance(raw, (int, float)):
+                value = float(raw)
+                if value <= 0:
+                    return None
+                if abs(value - round(value)) <= 1e-6:
+                    serial = int(round(value))
+                    if 20000 <= serial <= 80000:
+                        return None
+                return value
+
+            text = str(raw).strip().replace(" ", "")
+            if not text:
+                return None
+
+            if re.match(r"^\d{1,3}(?:\.\d{3})+(?:,\d+)?$", text):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+
+            try:
+                value = float(text)
+            except (TypeError, ValueError):
+                return None
+            if value <= 0:
+                return None
+            return value
+
+        def _parse_raw_lookup_date(raw: Any) -> Optional[date]:
+            if raw is None or raw == "":
+                return None
+            if isinstance(raw, datetime):
+                return raw.date()
+            if isinstance(raw, date):
+                return raw
+            if isinstance(raw, (int, float)):
+                try:
+                    serial = int(float(raw))
+                    if 20000 <= serial <= 80000:
+                        base_ord = datetime(1899, 12, 30).toordinal()
+                        return datetime.fromordinal(base_ord + serial).date()
+                except Exception:
+                    return None
+                return None
+
+            text = str(raw).strip()
+            if not text:
+                return None
+            text = text.split()[0]
+            if text.replace(".", "", 1).isdigit():
+                try:
+                    serial = int(float(text))
+                    if 20000 <= serial <= 80000:
+                        base_ord = datetime(1899, 12, 30).toordinal()
+                        return datetime.fromordinal(base_ord + serial).date()
+                except Exception:
+                    pass
+            for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
+                try:
+                    return datetime.strptime(text, fmt).date()
+                except ValueError:
+                    continue
+            return None
+
+        def _extract_accounts_from_raw_cell(raw: Any) -> List[str]:
+            accounts: List[str] = []
+            if raw is None or raw == "":
+                return accounts
+
+            if isinstance(raw, (int, float)):
+                try:
+                    value = float(raw)
+                    if abs(value - int(value)) <= 1e-6:
+                        token = str(int(value))
+                        if account_like_pattern.fullmatch(token):
+                            accounts.append(token)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+            text = str(raw).strip().replace("'", "")
+            if text:
+                for token in account_like_pattern.findall(text):
+                    if token not in accounts:
+                        accounts.append(token)
+            return accounts
+
+        def _collect_raw_lookup_rows(file_content: bytes) -> List[Dict[str, Any]]:
+            rows: List[Dict[str, Any]] = []
+
+            def _append_row(cells: List[Any]) -> None:
+                text_parts: List[str] = []
+                accounts: List[str] = []
+                dates: List[date] = []
+                amounts: List[float] = []
+
+                for cell in cells:
+                    if cell in (None, ""):
+                        continue
+                    cell_text = str(cell).strip()
+                    if not cell_text:
+                        continue
+                    text_parts.append(cell_text.upper())
+
+                    for account in _extract_accounts_from_raw_cell(cell):
+                        account_norm = _normalize_account_text(account)
+                        if account_norm and account_norm not in accounts:
+                            accounts.append(account_norm)
+
+                    parsed_date = _parse_raw_lookup_date(cell)
+                    if parsed_date and parsed_date not in dates:
+                        dates.append(parsed_date)
+
+                    parsed_amount = _parse_raw_lookup_amount(cell)
+                    if parsed_amount is not None and parsed_amount not in amounts:
+                        amounts.append(parsed_amount)
+
+                if not accounts:
+                    return
+
+                rows.append({
+                    "accounts": accounts,
+                    "dates": dates,
+                    "amounts": amounts,
+                    "text": " ".join(text_parts),
+                })
+
+            # Try xlsx
+            try:
+                import io
+                import openpyxl
+
+                wb = openpyxl.load_workbook(io.BytesIO(file_content), data_only=True, read_only=True)
+                for ws in wb.worksheets:
+                    for row in ws.iter_rows(values_only=True):
+                        _append_row(list(row))
+                if rows:
+                    return rows
+            except Exception:
+                pass
+
+            # Try xls
+            try:
+                import xlrd
+
+                wb = xlrd.open_workbook(file_contents=file_content)
+                for ws in wb.sheets():
+                    for row_idx in range(ws.nrows):
+                        row_values = [ws.cell_value(row_idx, c) for c in range(ws.ncols)]
+                        _append_row(row_values)
+                if rows:
+                    return rows
+            except Exception:
+                pass
+
+            # Try PDF (Woori-style)
+            try:
+                parsed_pdf = self._parse_woori_pdf_lookup(file_content)
+                for entry in parsed_pdf:
+                    _append_row([
+                        entry.get("account"),
+                        entry.get("entity"),
+                        entry.get("amount"),
+                        entry.get("opening_date"),
+                        entry.get("maturity_date"),
+                        entry.get("rate"),
+                        entry.get("currency"),
+                        entry.get("term"),
+                    ])
+            except Exception:
+                pass
+
+            return rows
+
+        raw_lookup_rows: List[Dict[str, Any]] = []
+        if lookup_file_contents:
+            for file_content in lookup_file_contents:
+                raw_lookup_rows.extend(_collect_raw_lookup_rows(file_content))
 
         entity_noise_tokens = {
             "CT", "CTY", "CONG", "TY", "TNHH", "MTV", "CP", "CO", "PHAN", "VA",
@@ -5190,20 +5711,257 @@ class CashReportService:
             acc_norm = _normalize_account_text(candidate)
             if not acc_norm:
                 return False
-            if acc_norm in existing_saving_acc_set:
-                return False
-            if acc_norm in used_lookup_accounts:
-                return False
             return True
 
         def _select_lookup_account(candidates: List[str]) -> Optional[str]:
-            """Pick first available lookup account not already used/existing."""
+            """
+            Pick a lookup account, preferring genuinely new accounts first.
+            If only existing accounts are available, still return one so caller
+            can create a suffixed variant based on lookup account (not current account).
+            """
+            normalized = []
             for candidate in candidates:
                 acc_norm = _normalize_account_text(candidate)
+                if acc_norm and acc_norm not in normalized:
+                    normalized.append(acc_norm)
+
+            # Pass 1: prefer non-existing accounts.
+            for acc_norm in normalized:
                 if not _available_account(acc_norm):
                     continue
+                if acc_norm in existing_saving_acc_set:
+                    continue
                 return acc_norm
+
+            # Pass 2: allow existing accounts (caller will suffix if needed).
+            for acc_norm in normalized:
+                if _available_account(acc_norm):
+                    return acc_norm
             return None
+
+        def _opening_date_match(
+            candidates: List[str],
+            tx_date: Optional[date],
+            *,
+            strict: bool,
+        ) -> Optional[List[str]]:
+            if not tx_date:
+                return None if strict else candidates
+            matched = [
+                acc for acc in candidates
+                if lookup_account_details.get(acc, {}).get("opening_date") == tx_date
+            ]
+            if matched:
+                return matched
+            return None if strict else candidates
+
+        def _bank_match(
+            candidates: List[str],
+            tx_bank: str,
+            *,
+            strict: bool,
+        ) -> Optional[List[str]]:
+            bank_norm = str(tx_bank or "").strip().upper()
+            if not bank_norm:
+                return candidates
+            matched = [
+                acc for acc in candidates
+                if self._bank_matches(
+                    bank_norm,
+                    str(lookup_account_details.get(acc, {}).get("provider") or "").strip().upper(),
+                )
+            ]
+            if matched:
+                return matched
+            return None if strict else candidates
+
+        def _lookup_amount_for_account(account: str) -> Optional[float]:
+            meta = lookup_account_details.get(account, {})
+            raw_amount = meta.get("amount")
+            try:
+                amount_value = float(raw_amount)
+            except (TypeError, ValueError):
+                return None
+            return amount_value if amount_value > 0 else None
+
+        def _filter_candidates_by_lookup_amount(
+            candidates: List[str],
+            tx_amount: float,
+        ) -> List[str]:
+            """
+            Amount selection rule for open-new lookup:
+            1. Prefer exact amount match (lookup == movement).
+            2. If no exact match, accept lookup amount > Movement amount.
+               Pick the closest greater amount (smallest lookup-transaction gap).
+            """
+            if not candidates:
+                return []
+            if tx_amount <= 0:
+                return []
+
+            exact_matches = []
+            greater_than = []
+            for acc in candidates:
+                lookup_amount = _lookup_amount_for_account(acc)
+                if lookup_amount is None:
+                    continue
+                if abs(lookup_amount - tx_amount) <= 1:
+                    exact_matches.append(acc)
+                    continue
+                if lookup_amount > tx_amount + 1:
+                    greater_than.append((lookup_amount - tx_amount, acc))
+
+            if exact_matches:
+                return exact_matches
+            if not greater_than:
+                return []
+
+            min_gap = min(item[0] for item in greater_than)
+            return [acc for gap, acc in greater_than if abs(gap - min_gap) <= 1]
+
+        def _filter_candidates_by_entity(
+            candidates: List[str],
+            entity_name: str,
+            *,
+            require_match: bool,
+        ) -> List[str]:
+            """
+            Narrow candidates to the same entity when lookup rows provide entity text.
+            If entity cannot be matched confidently, return empty list when required.
+            """
+            if not candidates:
+                return []
+            unique_candidates = list(dict.fromkeys([acc for acc in candidates if acc]))
+            if not unique_candidates or not entity_name:
+                return unique_candidates
+
+            scored: List[Tuple[float, str]] = []
+            has_lookup_entity = False
+            for acc in unique_candidates:
+                lookup_entity = str(lookup_account_details.get(acc, {}).get("entity") or "")
+                if _normalize_entity_text(lookup_entity):
+                    has_lookup_entity = True
+                score = _entity_similarity_score(entity_name, lookup_entity)
+                scored.append((score, acc))
+
+            if not has_lookup_entity:
+                return unique_candidates
+
+            scored.sort(key=lambda item: item[0], reverse=True)
+            top_score = scored[0][0] if scored else 0.0
+            if top_score <= 0:
+                return [] if require_match else unique_candidates
+
+            # Keep a compact band near top score to avoid drifting to another entity.
+            cutoff = max(0.35, top_score - 0.12)
+            filtered = [acc for score, acc in scored if score >= cutoff and score > 0]
+            if filtered:
+                return filtered
+            return [] if require_match else unique_candidates
+
+        def _select_by_entity_similarity(candidates: List[str], entity_name: str) -> Optional[str]:
+            if not candidates:
+                return None
+            if len(candidates) == 1 or not entity_name:
+                return _select_lookup_account(candidates)
+            entity_candidates = _filter_candidates_by_entity(
+                candidates,
+                entity_name,
+                require_match=False,
+            )
+            if entity_candidates:
+                selected = _select_lookup_account(entity_candidates)
+                if selected:
+                    return selected
+            return _select_lookup_account(candidates)
+
+        def _match_lookup_by_opening_date(
+            *,
+            tx_bank: str,
+            tx_date: Optional[date],
+            amount_value: float,
+            entity_name: str,
+            term_info: Optional[Dict[str, Any]] = None,
+        ) -> Optional[str]:
+            """
+            Primary lookup for open-new:
+            - Opening date must match.
+            - Amount selection:
+              * exact amount first
+              * else closest amount > Movement amount
+            """
+            if not tx_date:
+                return None
+            date_candidates = lookup_accounts_by_opening_date.get(tx_date, [])
+            candidates = [
+                _normalize_account_text(acc)
+                for acc in date_candidates
+                if _available_account(acc)
+            ]
+            candidates = list(dict.fromkeys([acc for acc in candidates if acc]))
+            if not candidates:
+                return None
+            bank_candidates = _bank_match(candidates, tx_bank, strict=True)
+            if not bank_candidates:
+                return None
+            candidates = bank_candidates
+
+            if entity_name:
+                entity_candidates = _filter_candidates_by_entity(
+                    candidates,
+                    entity_name,
+                    require_match=True,
+                )
+                if not entity_candidates:
+                    return None
+                candidates = entity_candidates
+
+            amount_candidates = _filter_candidates_by_lookup_amount(candidates, amount_value)
+            if not amount_candidates:
+                return None
+            candidates = amount_candidates
+
+            info = term_info or {}
+            maturity = info.get("maturity_date")
+            if maturity:
+                maturity_candidates = [
+                    acc for acc in candidates
+                    if lookup_account_details.get(acc, {}).get("maturity_date") == maturity
+                ]
+                if maturity_candidates:
+                    candidates = maturity_candidates
+
+            term_days = info.get("term_days")
+            if term_days:
+                day_candidates = [
+                    acc for acc in candidates
+                    if lookup_account_details.get(acc, {}).get("term_days") == term_days
+                ]
+                if day_candidates:
+                    candidates = day_candidates
+
+            term_months = info.get("term_months")
+            if term_months:
+                month_candidates = [
+                    acc for acc in candidates
+                    if lookup_account_details.get(acc, {}).get("term_months") == term_months
+                ]
+                if month_candidates:
+                    candidates = month_candidates
+
+            rate = info.get("interest_rate")
+            if rate is not None:
+                rate_candidates = []
+                for acc in candidates:
+                    lookup_rate = lookup_account_details.get(acc, {}).get("interest_rate")
+                    if lookup_rate is None:
+                        continue
+                    if abs(float(lookup_rate) - float(rate)) <= 0.0005:
+                        rate_candidates.append(acc)
+                if rate_candidates:
+                    candidates = rate_candidates
+
+            return _select_by_entity_similarity(candidates, entity_name)
 
         def _has_lookup_for_bank(tx_bank: str) -> bool:
             """Check whether uploaded lookup files contain data for tx_bank."""
@@ -5221,15 +5979,16 @@ class CashReportService:
             amount_value: float,
             entity_name: str,
             term_info: Dict[str, Any],
+            require_opening_date: bool = False,
         ) -> Optional[str]:
             """
             Fallback matcher when description has no explicit account and entity text is abbreviated.
-            Uses amount + bank + opening date + term/maturity + fuzzy entity score.
+            Uses bank + opening date + term/maturity + fuzzy entity score,
+            with amount rule: exact first, else closest amount > Movement amount.
             """
-            amount_candidates = lookup_accounts_by_amount.get(_amount_key(amount_value), [])
             candidates = [
                 _normalize_account_text(acc)
-                for acc in amount_candidates
+                for acc in lookup_account_details.keys()
                 if _available_account(acc)
             ]
             # Keep order stable and unique.
@@ -5237,25 +5996,30 @@ class CashReportService:
             if not candidates:
                 return None
 
-            bank_norm = str(tx_bank or "").strip().upper()
-            if bank_norm:
-                bank_candidates = [
-                    acc for acc in candidates
-                    if self._bank_matches(
-                        bank_norm,
-                        str(lookup_account_details.get(acc, {}).get("provider") or "").strip().upper(),
-                    )
-                ]
-                if bank_candidates:
-                    candidates = bank_candidates
+            bank_candidates = _bank_match(candidates, tx_bank, strict=False)
+            if bank_candidates is None:
+                return None
+            candidates = bank_candidates
 
-            if tx_date:
-                date_candidates = [
-                    acc for acc in candidates
-                    if lookup_account_details.get(acc, {}).get("opening_date") == tx_date
-                ]
-                if date_candidates:
-                    candidates = date_candidates
+            date_candidates = _opening_date_match(candidates, tx_date, strict=require_opening_date)
+            if date_candidates is None:
+                return None
+            candidates = date_candidates
+
+            if entity_name:
+                entity_candidates = _filter_candidates_by_entity(
+                    candidates,
+                    entity_name,
+                    require_match=True,
+                )
+                if not entity_candidates:
+                    return None
+                candidates = entity_candidates
+
+            amount_candidates = _filter_candidates_by_lookup_amount(candidates, amount_value)
+            if not amount_candidates:
+                return None
+            candidates = amount_candidates
 
             maturity = term_info.get("maturity_date")
             if maturity:
@@ -5284,27 +6048,215 @@ class CashReportService:
                 if month_candidates:
                     candidates = month_candidates
 
-            if len(candidates) == 1:
-                return candidates[0]
+            return _select_by_entity_similarity(candidates, entity_name)
 
-            if entity_name and candidates:
-                scored = []
-                for acc in candidates:
-                    lookup_entity = str(lookup_account_details.get(acc, {}).get("entity") or "")
-                    score = _entity_similarity_score(entity_name, lookup_entity)
-                    scored.append((score, acc))
-                scored.sort(key=lambda item: item[0], reverse=True)
-                top_score, top_acc = scored[0]
-                second_score = scored[1][0] if len(scored) > 1 else 0.0
-                if top_score >= 0.55 and (top_score - second_score) >= 0.12:
-                    return top_acc
+        def _match_lookup_by_raw_cells(
+            *,
+            tx_bank: str,
+            tx_date: Optional[date],
+            amount_value: float,
+            entity_name: str,
+        ) -> Optional[str]:
+            """
+            Rescue matcher: scan all raw lookup cells (not only structured columns).
+            This is used before suffix fallback so current_account_N is created only
+            when no account can be found from any lookup cell by date+amount.
+            Amount rule remains: exact first, else closest amount > Movement amount.
+            """
+            if not raw_lookup_rows or not tx_date or amount_value <= 0:
+                return None
 
-            return None
+            bank_norm = str(tx_bank or "").strip().upper()
+            ranked_rows: List[Tuple[int, float, float, List[str]]] = []
+            min_entity_score = 0.35
+
+            for row in raw_lookup_rows:
+                row_dates = row.get("dates") or []
+                if tx_date not in row_dates:
+                    continue
+
+                row_accounts = [_normalize_account_text(acc) for acc in (row.get("accounts") or [])]
+                row_accounts = list(dict.fromkeys([acc for acc in row_accounts if acc and _available_account(acc)]))
+                if not row_accounts:
+                    continue
+
+                # If row carries known provider(s), at least one must match tx bank.
+                if bank_norm:
+                    row_has_known_provider = False
+                    row_has_matching_provider = False
+                    filtered_accounts: List[str] = []
+                    for acc in row_accounts:
+                        provider = str(lookup_account_details.get(acc, {}).get("provider") or "").strip().upper()
+                        if provider:
+                            row_has_known_provider = True
+                            if self._bank_matches(bank_norm, provider):
+                                row_has_matching_provider = True
+                                filtered_accounts.append(acc)
+                        else:
+                            filtered_accounts.append(acc)
+                    if row_has_known_provider and not row_has_matching_provider:
+                        continue
+                    row_accounts = list(dict.fromkeys(filtered_accounts))
+                    if not row_accounts:
+                        continue
+
+                row_amounts: List[float] = []
+                for raw_amount in (row.get("amounts") or []):
+                    try:
+                        amount_float = float(raw_amount)
+                    except (TypeError, ValueError):
+                        continue
+                    if amount_float > 0:
+                        row_amounts.append(amount_float)
+                if not row_amounts:
+                    continue
+
+                exact = any(abs(row_amount - amount_value) <= 1 for row_amount in row_amounts)
+                gt_gaps = [
+                    row_amount - amount_value
+                    for row_amount in row_amounts
+                    if row_amount > amount_value + 1
+                ]
+                if not exact and not gt_gaps:
+                    continue
+
+                amount_priority = 0 if exact else 1
+                amount_gap = 0.0 if exact else min(gt_gaps)
+
+                entity_score = 0.0
+                if entity_name:
+                    row_text = str(row.get("text") or "")
+                    entity_score = _entity_similarity_score(entity_name, row_text)
+                    for acc in row_accounts:
+                        lookup_entity = str(lookup_account_details.get(acc, {}).get("entity") or "")
+                        entity_score = max(entity_score, _entity_similarity_score(entity_name, lookup_entity))
+                    # Do not accept rows that cannot be tied to the same entity.
+                    if entity_score < min_entity_score:
+                        continue
+
+                ranked_rows.append((amount_priority, amount_gap, -entity_score, row_accounts))
+
+            if not ranked_rows:
+                return None
+
+            ranked_rows.sort(key=lambda item: (item[0], item[1], item[2]))
+            best_key = ranked_rows[0][:3]
+            pooled_accounts: List[str] = []
+            for item in ranked_rows:
+                if item[:3] != best_key:
+                    break
+                pooled_accounts.extend(item[3])
+
+            candidates = list(dict.fromkeys([acc for acc in pooled_accounts if acc]))
+            if entity_name:
+                entity_candidates = _filter_candidates_by_entity(
+                    candidates,
+                    entity_name,
+                    require_match=True,
+                )
+                if not entity_candidates:
+                    return None
+                candidates = entity_candidates
+
+            return _select_by_entity_similarity(candidates, entity_name)
+
+        # Track catalog-only entries: pre-existing counter entries that need
+        # Cash Balance / Saving Account / Acc_Char rows but NOT new Movement rows.
+        catalog_only_entries: List[Dict[str, Any]] = []
 
         for tx, row_idx in open_new_transactions:
             desc = tx.description.strip() if tx.description else ""
             if desc in existing_descs:
-                skipped_duplicate.append(desc)
+                # Counter entry already exists in Movement — but we may still need
+                # to create catalog rows (Acc_Char, Saving Account, Cash Balance)
+                # if the saving account hasn’t been registered yet.
+                pre_existing_acc = _normalize_account_text(
+                    existing_counter_accounts.get(desc, "")
+                )
+                if pre_existing_acc and pre_existing_acc not in existing_saving_acc_set:
+                    # Skip Current Account entries — they are NOT saving accounts.
+                    # This happens when the "Internal transfer in" counter is a
+                    # current account receiving funds from a settled time deposit
+                    # (e.g., "TAT TOAN HDTG" flows: saving → current).
+                    _acc_type = (
+                        acc_char_data.get(pre_existing_acc, {}).get("account_type", "")
+                    )
+                    if _acc_type.lower() == "current account":
+                        logger.info(
+                            "Open-new: skipping pre-existing counter '%s' — "
+                            "account %s is a Current Account, not Saving Account",
+                            desc[:60], pre_existing_acc,
+                        )
+                        skipped_duplicate.append(desc)
+                        continue
+                    # Resolve entity/code/bank for catalog creation
+                    _tx_acc = str(tx.account).strip() if tx.account else ""
+                    _entity = account_entity_map.get(_tx_acc, "")
+                    if not _entity:
+                        _code = account_to_code.get(_tx_acc, "")
+                        if _code:
+                            for ent_name, c in def_entity_to_code.items():
+                                if c == _code:
+                                    _entity = ent_name
+                                    break
+                            if not _entity:
+                                _entity = _code
+                    _code = ""
+                    if _entity:
+                        _code = def_entity_to_code.get(_entity.upper(), "")
+                        if not _code:
+                            _ent_norm = re.sub(r'\s+', '', _entity.upper())
+                            for ent_name, c in def_entity_to_code.items():
+                                ent_n = re.sub(r'\s+', '', ent_name)
+                                if ent_n == _ent_norm or ent_n in _ent_norm or _ent_norm in ent_n:
+                                    _code = c
+                                    break
+                    if not _code:
+                        _code = account_to_code.get(_tx_acc, "")
+                    # Determine bank from lookup or original bank
+                    _lookup_key = _normalize_account_text(pre_existing_acc)
+                    _lmeta = lookup_account_details.get(_lookup_key, {})
+                    _lprov = str(_lmeta.get("provider") or "").strip().upper()
+                    _saving_bank = self._determine_saving_branch(
+                        pre_existing_acc, _entity, entity_branches,
+                        tx.bank or "", def_bank_alias_to_name,
+                        provider_hint=_lprov,
+                    )
+                    _term_info = {"term_months": None, "term_days": None,
+                                  "interest_rate": None, "maturity_date": None}
+                    _currency = str(_lmeta.get("currency") or "VND").strip().upper() or "VND"
+                    _no_lookup = not _lmeta
+                    if _lmeta:
+                        if _lmeta.get("maturity_date"):
+                            _term_info["maturity_date"] = _lmeta["maturity_date"]
+                        if _lmeta.get("term_months"):
+                            _term_info["term_months"] = _lmeta["term_months"]
+                        elif _lmeta.get("term_days"):
+                            _term_info["term_days"] = _lmeta["term_days"]
+                        if _lmeta.get("interest_rate") is not None:
+                            _term_info["interest_rate"] = _lmeta["interest_rate"]
+                    _opening = _lmeta.get("opening_date") or tx.date
+                    catalog_only_entries.append({
+                        "saving_acc": pre_existing_acc,
+                        "entity": _entity,
+                        "bank": _saving_bank,
+                        "code": _code,
+                        "amount": float(tx.credit) if tx.credit else 0,
+                        "currency": _currency,
+                        "term_info": _term_info,
+                        "opening_date": _opening,
+                        "rate_decreased": False,
+                        "account_type": "Saving Account",
+                        "no_lookup_data": _no_lookup,
+                    })
+                    existing_saving_acc_set.add(pre_existing_acc)
+                    logger.info(
+                        "Open-new: pre-existing counter entry for '%s' → saving_acc=%s, "
+                        "will create catalog entries only",
+                        desc[:60], pre_existing_acc,
+                    )
+                else:
+                    skipped_duplicate.append(desc)
                 continue
 
             # Resolve entity from Cash Balance accountâ†’entity map
@@ -5323,65 +6275,174 @@ class CashReportService:
                         entity = code_for_entity
                 logger.debug(f"Derived entity '{entity}' from current account {tx_account}")
             amount = float(tx.credit) if tx.credit else 0
+            tx_date = tx.date if isinstance(tx.date, date) else None
             term_info = self._extract_term_info(desc)
 
             # Try to find saving account:
             # 1. Extract from description
             saving_acc = _normalize_account_text(self._extract_saving_account_for_open_new(desc))
+            matched_lookup_account = (
+                saving_acc
+                if saving_acc and saving_acc in lookup_account_details
+                else None
+            )
             tx_bank_norm = str(tx.bank or "").strip().upper()
             bank_lookup_available = _has_lookup_for_bank(tx_bank_norm)
             if tx_bank_norm and lookup_file_contents and not bank_lookup_available:
                 logger.info(
-                    "Open-new: no lookup provider for bank %s; skip lookup matching for tx account=%s amount=%s",
+                    "Open-new: no lookup provider for bank %s; skip lookup matching for this transaction",
                     tx_bank_norm,
-                    tx_account,
-                    amount,
                 )
 
-            # 2. Lookup from uploaded file by entity + amount
-            if not saving_acc and lookup_accounts and bank_lookup_available:
-                # Try exact match first
-                key = (entity.upper(), amount)
-                saving_acc = _select_lookup_account(lookup_accounts.get(key, []))
-                # Try partial entity match (normalize spaces for shared-string artifacts)
+            # 2. Lookup from uploaded file
+            if (
+                not saving_acc
+                and lookup_account_details
+                and (not tx_bank_norm or bank_lookup_available)
+            ):
+                # 2a. Primary rule: opening date + amount from lookup file.
+                saving_acc = _match_lookup_by_opening_date(
+                    tx_bank=str(tx.bank or ""),
+                    tx_date=tx_date,
+                    amount_value=amount,
+                    entity_name=entity,
+                    term_info=term_info,
+                )
                 if not saving_acc:
+                    logger.info(
+                        "Open-new: no opening-date match found for bank=%s date=%s entity=%s",
+                        tx.bank,
+                        tx_date,
+                        entity,
+                    )
+                else:
+                    matched_lookup_account = saving_acc
+                    logger.info(
+                        "Open-new: matched by opening date: %s (bank=%s, date=%s, entity=%s)",
+                        saving_acc,
+                        tx.bank,
+                        tx_date,
+                        entity,
+                    )
+
+                # 2b. Try entity-aligned candidates from lookup map, then apply amount rule.
+                if not saving_acc and lookup_accounts and entity:
                     entity_norm = re.sub(r'\s+', '', entity.upper())
-                    for (ent, amt), accounts in lookup_accounts.items():
+                    entity_candidates: List[str] = []
+                    for (ent, _amt), accounts in lookup_accounts.items():
+                        ent_norm = re.sub(r'\s+', '', ent)
+                        if not ent_norm:
+                            continue
+                        if ent_norm == entity_norm or ent_norm in entity_norm or entity_norm in ent_norm:
+                            for acc in accounts:
+                                acc_norm = _normalize_account_text(acc)
+                                if acc_norm and _available_account(acc_norm) and acc_norm not in entity_candidates:
+                                    entity_candidates.append(acc_norm)
+                    entity_candidates = _opening_date_match(
+                        entity_candidates,
+                        tx_date,
+                        strict=bool(tx_date),
+                    ) or []
+                    bank_candidates = _bank_match(entity_candidates, str(tx.bank or ""), strict=False)
+                    if bank_candidates:
+                        entity_candidates = list(dict.fromkeys(bank_candidates))
+                    entity_candidates = _filter_candidates_by_lookup_amount(entity_candidates, amount)
+                    if entity_candidates:
+                        saving_acc = _select_by_entity_similarity(entity_candidates, entity)
+                        if saving_acc:
+                            matched_lookup_account = saving_acc
+
+                # 2c. Try partial entity match, with opening date guard.
+                if not saving_acc and lookup_accounts and entity:
+                    entity_norm = re.sub(r'\s+', '', entity.upper())
+                    partial_candidates: List[str] = []
+                    for (ent, _amt), accounts in lookup_accounts.items():
                         ent_norm = re.sub(r'\s+', '', ent)
                         if ent_norm in entity_norm or entity_norm in ent_norm:
-                            if abs(amt - amount) < 1:  # Allow small difference
-                                saving_acc = _select_lookup_account(accounts)
-                                if saving_acc:
-                                    break
-                # Fallback: infer from amount/bank/date/term metadata.
-                if not saving_acc:
+                            for acc in accounts:
+                                acc_norm = _normalize_account_text(acc)
+                                if acc_norm and _available_account(acc_norm) and acc_norm not in partial_candidates:
+                                    partial_candidates.append(acc_norm)
+                    partial_candidates = _opening_date_match(
+                        partial_candidates,
+                        tx_date,
+                        strict=bool(tx_date),
+                    ) or []
+                    bank_candidates = _bank_match(partial_candidates, str(tx.bank or ""), strict=False)
+                    if bank_candidates:
+                        partial_candidates = list(dict.fromkeys(bank_candidates))
+                    partial_candidates = _filter_candidates_by_lookup_amount(partial_candidates, amount)
+                    if partial_candidates:
+                        saving_acc = _select_by_entity_similarity(partial_candidates, entity)
+                        if saving_acc:
+                            matched_lookup_account = saving_acc
+
+                # 2d. Fallback: infer from amount/bank/date/term metadata.
+                if not saving_acc and lookup_account_details:
                     saving_acc = _match_lookup_by_metadata(
                         tx_bank=str(tx.bank or ""),
-                        tx_date=tx.date if isinstance(tx.date, date) else None,
+                        tx_date=tx_date,
                         amount_value=amount,
                         entity_name=entity,
                         term_info=term_info,
+                        require_opening_date=bool(tx_date),
                     )
                     if saving_acc:
+                        matched_lookup_account = saving_acc
                         logger.info(
                             f"Open-new: matched by metadata: {saving_acc} "
                             f"(bank={tx.bank}, amount={amount}, date={tx.date})"
                         )
 
-                # Last fallback: if entity/metadata did not help, match by amount only
-                # when exactly one available account candidate remains for this amount.
-                if not saving_acc:
-                    amount_candidates = lookup_accounts_by_amount.get(_amount_key(amount), [])
-                    available = []
-                    for candidate in amount_candidates:
-                        acc_norm = _normalize_account_text(candidate)
-                        if not _available_account(acc_norm):
-                            continue
-                        available.append(acc_norm)
-                    available_unique = list(dict.fromkeys(available))
-                    if len(available_unique) == 1:
-                        saving_acc = available_unique[0]
-                        logger.info(f"Open-new: matched by amount only: {saving_acc}")
+                # 2e. Last fallback: amount only, but opening date must still match when available.
+                if not saving_acc and lookup_account_details:
+                    available_unique = [
+                        _normalize_account_text(candidate)
+                        for candidate in lookup_account_details.keys()
+                        if _available_account(candidate)
+                    ]
+                    available_unique = list(dict.fromkeys([acc for acc in available_unique if acc]))
+                    available_unique = _opening_date_match(
+                        available_unique,
+                        tx_date,
+                        strict=bool(tx_date),
+                    ) or []
+                    bank_candidates = _bank_match(available_unique, str(tx.bank or ""), strict=False)
+                    if bank_candidates:
+                        available_unique = list(dict.fromkeys(bank_candidates))
+                    if entity:
+                        entity_candidates = _filter_candidates_by_entity(
+                            available_unique,
+                            entity,
+                            require_match=True,
+                        )
+                        available_unique = entity_candidates or []
+                    available_unique = _filter_candidates_by_lookup_amount(available_unique, amount)
+                    if available_unique:
+                        saving_acc = _select_by_entity_similarity(available_unique, entity)
+                        if saving_acc:
+                            matched_lookup_account = saving_acc
+                            logger.info(f"Open-new: matched by amount only: {saving_acc}")
+
+                # 2f. Rescue by full-cell scan across lookup files.
+                # Suffix current account is only allowed after this step also fails.
+                if not saving_acc and raw_lookup_rows:
+                    saving_acc = _match_lookup_by_raw_cells(
+                        tx_bank=str(tx.bank or ""),
+                        tx_date=tx_date,
+                        amount_value=amount,
+                        entity_name=entity,
+                    )
+                    if saving_acc:
+                        matched_lookup_account = _normalize_account_text(saving_acc)
+                        logger.info(
+                            "Open-new: matched by raw lookup cell scan: %s (bank=%s, date=%s, amount=%s, entity=%s)",
+                            saving_acc,
+                            tx.bank,
+                            tx_date,
+                            amount,
+                            entity,
+                        )
 
             # NOTE: Do NOT lookup from existing Saving Account sheet for mở mới.
             # Step 3 from settlement flow is intentionally omitted here because
@@ -5418,9 +6479,9 @@ class CashReportService:
 
             # Reserve this account immediately to prevent duplicate inserts in same run.
             existing_saving_acc_set.add(saving_acc)
-            used_lookup_accounts.add(saving_acc)
 
-            lookup_meta = lookup_account_details.get(saving_acc, {})
+            lookup_meta_key = _normalize_account_text(matched_lookup_account or saving_acc)
+            lookup_meta = lookup_account_details.get(lookup_meta_key, {})
             lookup_provider = str(lookup_meta.get("provider") or "").strip().upper()
             if (
                 lookup_meta
@@ -5430,7 +6491,7 @@ class CashReportService:
             ):
                 logger.info(
                     "Open-new: provider mismatch for %s (tx_bank=%s, lookup_provider=%s); treating as no lookup data",
-                    saving_acc,
+                    lookup_meta_key or saving_acc,
                     tx_bank_norm,
                     lookup_provider,
                 )
@@ -5477,13 +6538,16 @@ class CashReportService:
                         def_bank_alias_to_name,
                     )
             else:
-                # Determine BRANCH from Cash balance (Prior period) by entity + bank prefix
+                # Determine BRANCH from Cash balance (Prior period) by entity + bank prefix.
+                # Pass lookup provider as hint so we don't rely solely on account prefix
+                # (e.g. Woori accounts 200700xxxxx also start with "2" like VietinBank).
                 saving_bank = self._determine_saving_branch(
                     saving_acc,
                     entity,
                     entity_branches,
                     tx.bank or "",
                     def_bank_alias_to_name,
+                    provider_hint=lookup_provider,
                 )
 
             # Create counter entry: swap credit to debit, nature = Internal transfer in
@@ -5630,7 +6694,16 @@ class CashReportService:
                 "candidates": candidates_preview,
             })
 
-        if not counter_entries:
+        # Merge catalog-only entries (pre-existing counter entries that need
+        # Acc_Char / Saving Account / Cash Balance rows but NOT Movement rows).
+        if catalog_only_entries:
+            counter_entry_info.extend(catalog_only_entries)
+            logger.info(
+                "Open-new: added %d catalog-only entries to counter_entry_info",
+                len(catalog_only_entries),
+            )
+
+        if not counter_entries and not catalog_only_entries:
             if lookup_account_details:
                 emit(
                     "step_start",
@@ -5674,25 +6747,27 @@ class CashReportService:
             })
 
         # â”€â”€ Step 4: Create counter entries â”€â”€
-        emit("step_start", "writing", f"Creating {len(counter_entries)} counter entries...", percentage=60)
-        await asyncio.sleep(0.3)
+        rows_added = 0
+        if counter_entries:
+            emit("step_start", "writing", f"Creating {len(counter_entries)} counter entries...", percentage=60)
+            await asyncio.sleep(0.3)
 
-        rows_added, total_rows = writer.append_transactions(counter_entries)
+            rows_added, total_rows = writer.append_transactions(counter_entries)
 
-        # Highlight both original and counter rows
-        counter_start_row = total_rows - rows_added + 4
-        counter_row_indices = list(range(counter_start_row, counter_start_row + rows_added))
-        all_highlight_rows = original_row_indices + counter_row_indices
-        try:
-            writer.highlight_open_new_rows(all_highlight_rows)
-        except Exception as e:
-            logger.warning(f"Failed to highlight open-new rows: {e}")
+            # Highlight both original and counter rows
+            counter_start_row = total_rows - rows_added + 4
+            counter_row_indices = list(range(counter_start_row, counter_start_row + rows_added))
+            all_highlight_rows = original_row_indices + counter_row_indices
+            try:
+                writer.highlight_open_new_rows(all_highlight_rows)
+            except Exception as e:
+                logger.warning(f"Failed to highlight open-new rows: {e}")
 
-        emit("step_complete", "writing",
-             f"Created {rows_added} counter entries, highlighted {len(all_highlight_rows)} rows",
-             percentage=70,
-             data={"rows_added": rows_added})
-        await asyncio.sleep(0.4)
+            emit("step_complete", "writing",
+                 f"Created {rows_added} counter entries, highlighted {len(all_highlight_rows)} rows",
+                 percentage=70,
+                 data={"rows_added": rows_added})
+            await asyncio.sleep(0.4)
 
         # â”€â”€ Step 4.5: Add rows to Acc_Char, Saving Account, Cash Balance (B1-B3) â”€â”€
         # Batch: ONE ZIP read/write for all 3 sheets
@@ -5798,13 +6873,21 @@ class CashReportService:
 
         # â”€â”€ Step 5: Finalize â”€â”€
         if self.db_session:
-            await self.db_session.execute(
-                update(CashReportSessionModel)
-                .where(CashReportSessionModel.session_id == session_id)
-                .values(
-                    total_transactions=CashReportSessionModel.total_transactions + rows_added,
+            db_result = await self.db_session.execute(
+                select(CashReportSessionModel).where(
+                    CashReportSessionModel.session_id == session_id
                 )
             )
+            db_session = db_result.scalar_one_or_none()
+            if db_session:
+                db_session.total_transactions = int(db_session.total_transactions or 0) + rows_added
+                metadata = dict(db_session.metadata_json or {})
+                metadata["open_new_counter_entries"] = (
+                    int(metadata.get("open_new_counter_entries") or 0) + rows_added
+                )
+                metadata.setdefault("settlement_counter_entries", int(metadata.get("settlement_counter_entries") or 0))
+                metadata.setdefault("settlement_interest_splits", int(metadata.get("settlement_interest_splits") or 0))
+                db_session.metadata_json = metadata
             await self.db_session.commit()
 
         result = {
@@ -5848,7 +6931,7 @@ class CashReportService:
         """
         Parse lookup file and return:
         - lookup map: ``(ENTITY_UPPER, AMOUNT) -> [ACCOUNT_NO, ...]``
-        - account metadata: ``ACCOUNT_NO -> {provider, maturity_date, opening_date, term, rate, ...}``
+        - account metadata: ``ACCOUNT_NO -> {provider, amount, maturity_date, opening_date, term, rate, ...}``
         """
         import io
         import zipfile as _zf
@@ -5867,6 +6950,19 @@ class CashReportService:
             except (ValueError, OverflowError):
                 pass
             return acc_str
+
+        def _is_probable_lookup_account(account: str) -> bool:
+            """
+            Keep only plausible saving account values.
+            Prevent header/text noise or mapped amount values from being treated
+            as account metadata.
+            """
+            acc = str(account or "").strip()
+            if not acc:
+                return False
+            if not re.fullmatch(r"\d{8,20}", acc):
+                return False
+            return True
 
         def _parse_lookup_amount(raw: Any) -> Optional[float]:
             if raw is None:
@@ -5903,6 +6999,21 @@ class CashReportService:
             if v <= 0:
                 return None
             return v / 100 if v > 1 else v
+
+        def _prefer_lookup_amount_raw(*raw_values: Any) -> Any:
+            """
+            Select the first positive amount-like raw value.
+            Used for bank exports that expose multiple amount columns
+            (e.g., principal/opening amount and current balance).
+            """
+            fallback = None
+            for raw in raw_values:
+                if fallback is None and raw not in (None, ""):
+                    fallback = raw
+                amount_val = _parse_lookup_amount(raw)
+                if amount_val is not None and amount_val > 0:
+                    return raw
+            return fallback
 
         def _parse_lookup_date(raw: Any) -> Optional[date]:
             if raw is None or raw == "":
@@ -5969,6 +7080,7 @@ class CashReportService:
             entity: str = "",
             currency: str = "",
             provider: str = "",
+            amount: Optional[float] = None,
             opening_date: Optional[date] = None,
             maturity_date: Optional[date] = None,
             interest_rate: Optional[float] = None,
@@ -5981,6 +7093,7 @@ class CashReportService:
                 "entity": "",
                 "currency": "",
                 "provider": "",
+                "amount": None,
                 "opening_date": None,
                 "maturity_date": None,
                 "interest_rate": None,
@@ -5993,6 +7106,8 @@ class CashReportService:
                 meta["currency"] = currency
             if provider and not meta["provider"]:
                 meta["provider"] = provider
+            if amount is not None and amount > 0 and meta["amount"] is None:
+                meta["amount"] = amount
             if opening_date and not meta["opening_date"]:
                 meta["opening_date"] = opening_date
             if maturity_date and not meta["maturity_date"]:
@@ -6018,8 +7133,12 @@ class CashReportService:
             provider_raw: Any = None,
         ) -> None:
             acc_str = _normalize_lookup_account(account_raw)
+            if not _is_probable_lookup_account(acc_str):
+                return
             ent_str = str(entity_raw or "").strip().upper()
             amount_val = _parse_lookup_amount(amount_raw)
+            if amount_val is None or amount_val <= 0:
+                return
             currency_str = str(currency_raw or "").strip().upper()
             provider_str = str(provider_raw or "").strip().upper()
             opening_date_val = _parse_lookup_date(opening_date_raw)
@@ -6045,6 +7164,7 @@ class CashReportService:
                 entity=ent_str,
                 currency=currency_str,
                 provider=provider_str,
+                amount=amount_val,
                 opening_date=opening_date_val,
                 maturity_date=maturity_date_val,
                 interest_rate=interest_rate_val,
@@ -6052,7 +7172,7 @@ class CashReportService:
                 term_days=term_days,
             )
 
-            if not ent_str or not acc_str or amount_val is None or amount_val <= 0:
+            if not ent_str:
                 return
 
             key = (ent_str, amount_val)
@@ -6122,9 +7242,21 @@ class CashReportService:
                     product_raw=row.get("I"),
                     provider_raw="VCB",
                 )
+                # VCB alternate layout (common export):
+                # B=entity, C=account, D=amount, E=currency, F=open, G=maturity, H=term/rate note
+                _add_lookup_account(
+                    row.get("B"), row.get("D"), row.get("C"),
+                    currency_raw=row.get("E"),
+                    opening_date_raw=row.get("F"),
+                    maturity_date_raw=row.get("G"),
+                    product_raw=row.get("H"),
+                    provider_raw="VCB",
+                )
                 # VTB detail style
                 _add_lookup_account(
-                    row.get("E"), row.get("L"), row.get("B"),
+                    row.get("E"),
+                    _prefer_lookup_amount_raw(row.get("N"), row.get("L")),
+                    row.get("B"),
                     term_raw=row.get("G"),
                     rate_raw=row.get("H"),
                     currency_raw=row.get("I"),
@@ -6175,7 +7307,9 @@ class CashReportService:
 
                 # VTB detail block
                 _add_lookup_account(
-                    _v(4), _v(11), _v(1),
+                    _v(4),
+                    _prefer_lookup_amount_raw(_v(13), _v(11)),
+                    _v(1),
                     term_raw=_v(6),
                     rate_raw=_v(7),
                     currency_raw=_v(8),
@@ -6201,6 +7335,16 @@ class CashReportService:
                     opening_date_raw=_v(6),
                     maturity_date_raw=_v(7),
                     product_raw=_v(8),
+                    provider_raw="VCB",
+                )
+                # VCB alternate layout in .xls:
+                # B=entity, C=account, D=amount, E=currency, F=open, G=maturity, H=term/rate note
+                _add_lookup_account(
+                    _v(1), _v(3), _v(2),
+                    currency_raw=_v(4),
+                    opening_date_raw=_v(5),
+                    maturity_date_raw=_v(6),
+                    product_raw=_v(7),
                     provider_raw="VCB",
                 )
                 # SNP (SinoPac) style: cols A=account, B=currency, D=amount,
