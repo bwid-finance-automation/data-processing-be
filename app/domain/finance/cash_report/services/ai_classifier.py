@@ -3,7 +3,7 @@ AI-based Transaction Classifier using Google Gemini API.
 Classifies bank transactions into Nature categories.
 
 Features:
-- Dynamic keyword rules loaded from CSV file (movement_nature_filter/Key Words.csv)
+- Dynamic keyword rules loaded from CSV file (movement_nature_filter/Key Words CSV.csv)
 - temperature=0 for deterministic output
 - Comprehensive few-shot examples from verified data
 - Output validation against allowed categories
@@ -60,7 +60,25 @@ ALL_CATEGORIES = ALL_PAYMENT_CATEGORIES | ALL_RECEIPT_CATEGORIES
 # ai_classifier.py is at: app/domain/finance/cash_report/services/ai_classifier.py
 # parents: [0]=services, [1]=cash_report, [2]=finance, [3]=domain, [4]=app, [5]=project_root
 _PROJECT_ROOT = Path(__file__).resolve().parents[5]
-DEFAULT_RULES_FILE = _PROJECT_ROOT / "movement_nature_filter" / "Key Words.csv"
+
+
+def _resolve_default_rules_file() -> Path:
+    """
+    Resolve default keyword-rules CSV path.
+    Prefer the current finance-maintained file name, fallback to legacy.
+    """
+    candidates = [
+        _PROJECT_ROOT / "movement_nature_filter" / "Key Words CSV.csv",
+        _PROJECT_ROOT / "movement_nature_filter" / "Key Words.csv",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    # Deterministic fallback when file is temporarily missing.
+    return candidates[0]
+
+
+DEFAULT_RULES_FILE = _resolve_default_rules_file()
 # Cash Report AI classification intentionally does NOT use Redis/external cache bridge.
 CASH_REPORT_EXTERNAL_CACHE_ENABLED = False
 
@@ -69,8 +87,9 @@ def load_keyword_rules_from_csv(file_path: Path) -> Dict[str, List[str]]:
     """
     Load keyword → category mapping from CSV file.
 
-    CSV format (semicolon-separated):
-        Category Cash consol;Key word;SUB_Category;...
+    CSV format (semicolon-separated), supports both:
+        1) Type;Category Cash consol;Key word;SUB_Category
+        2) Category Cash consol;Key word;SUB_Category
 
     Returns:
         Dict of category → list of keywords
@@ -82,17 +101,42 @@ def load_keyword_rules_from_csv(file_path: Path) -> Dict[str, List[str]]:
         return dict(rules)
 
     try:
-        with open(file_path, 'r', encoding='utf-8-sig') as f:
-            reader = csv.reader(f, delimiter=';')
-            header = next(reader, None)  # skip header
+        with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.reader(f, delimiter=";")
+            header = next(reader, None) or []
+            header_norm = [(h or "").strip().lower() for h in header]
+
+            def _find_header_index(*candidates: str) -> Optional[int]:
+                for idx, col in enumerate(header_norm):
+                    if col in candidates:
+                        return idx
+                return None
+
+            idx_type = _find_header_index("type")
+            idx_category = _find_header_index("category cash consol", "category")
+            idx_keyword = _find_header_index("key word", "keyword")
+
+            if idx_category is None:
+                idx_category = 1 if idx_type is not None else 0
+            if idx_keyword is None:
+                idx_keyword = 2 if idx_type is not None else 1
+
+            max_idx = max(idx_category, idx_keyword)
+            seen_pairs = set()
 
             for row in reader:
-                if len(row) < 2:
+                if not row or len(row) <= max_idx:
                     continue
-                category = row[0].strip()
-                keyword = row[1].strip()
-                if category and keyword and keyword.lower() != 'nan':
-                    rules[category].append(keyword)
+                category = (row[idx_category] or "").strip()
+                keyword = (row[idx_keyword] or "").strip()
+                if not category or not keyword or keyword.lower() == "nan":
+                    continue
+
+                dedupe_key = (category.lower(), keyword.lower())
+                if dedupe_key in seen_pairs:
+                    continue
+                seen_pairs.add(dedupe_key)
+                rules[category].append(keyword)
 
         total_keywords = sum(len(kws) for kws in rules.values())
         logger.info(f"Loaded {total_keywords} keywords across {len(rules)} categories from {file_path}")
@@ -129,7 +173,7 @@ class AITransactionClassifier:
     Uses Google Gemini API to understand transaction descriptions and classify them.
 
     Features:
-    - Dynamic keyword rules loaded from CSV (movement_nature_filter/Key Words.csv)
+    - Dynamic keyword rules loaded from CSV (movement_nature_filter/Key Words CSV.csv)
     - temperature=0 for deterministic, reproducible results
     - Comprehensive override rules and few-shot examples
     - Validation against allowed categories with direction-aware fallback

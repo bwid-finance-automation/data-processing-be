@@ -103,6 +103,9 @@ class CashReportUploadedFileModel(Base, TimestampMixin):
     # File info
     original_filename: Mapped[str] = mapped_column(String(500), nullable=False)
     file_size: Mapped[int] = mapped_column(default=0, nullable=False)
+    file_type: Mapped[str] = mapped_column(
+        String(50), server_default="bank_statement", default="bank_statement", nullable=False,
+    )
 
     # Processing results
     transactions_count: Mapped[int] = mapped_column(default=0, nullable=False)

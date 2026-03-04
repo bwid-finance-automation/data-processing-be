@@ -2826,12 +2826,14 @@ class OpenpyxlHandler:
             row_el = self._parse_single_row(sheet_xml[start:end])
             col_mods = modifications[row_num]
 
+            modified_cols = set()
             for cell in row_el:
                 cell_ref = cell.get("r", "")
                 col_letter = re.sub(r'\d+', '', cell_ref)
                 if col_letter not in col_mods:
                     continue
 
+                modified_cols.add(col_letter)
                 new_val = col_mods[col_letter]
 
                 # Check if this is a numeric or string value
@@ -2868,6 +2870,64 @@ class OpenpyxlHandler:
                     if t_el is None:
                         t_el = ET.SubElement(is_el, f"{{{ns}}}t")
                     t_el.text = new_val
+
+            # Create new cells for columns that didn't exist in the row
+            missing_cols = set(col_mods.keys()) - modified_cols
+            if missing_cols:
+                # Find column styles using the most frequent style in data
+                # rows (row 4+).  This avoids picking up header or one-off
+                # styles from nearby rows that happen to use a different format.
+                col_styles: Dict[str, str] = {}
+                for col_letter in missing_cols:
+                    from collections import Counter
+                    style_counts: Counter = Counter()
+                    col_b = col_letter.encode()
+                    for sm in re.finditer(
+                        rb'<c\s[^>]*r="' + col_b + rb'(\d+)"[^>]*\ss="(\d+)"',
+                        sheet_xml,
+                    ):
+                        r = int(sm.group(1))
+                        if r < 4:          # skip title / header rows
+                            continue
+                        style_counts[sm.group(2).decode()] += 1
+                    if style_counts:
+                        col_styles[col_letter] = style_counts.most_common(1)[0][0]
+
+                for col_letter in missing_cols:
+                    new_val = col_mods[col_letter]
+                    cell_ref = f"{col_letter}{row_num}"
+                    try:
+                        float(new_val)
+                        is_numeric = True
+                    except (ValueError, TypeError):
+                        is_numeric = False
+
+                    new_cell = ET.SubElement(row_el, f"{{{ns}}}c")
+                    new_cell.set("r", cell_ref)
+                    if col_letter in col_styles:
+                        new_cell.set("s", col_styles[col_letter])
+                    if is_numeric:
+                        v_el = ET.SubElement(new_cell, f"{{{ns}}}v")
+                        v_el.text = new_val
+                    else:
+                        new_cell.set("t", "inlineStr")
+                        is_el = ET.SubElement(new_cell, f"{{{ns}}}is")
+                        t_el = ET.SubElement(is_el, f"{{{ns}}}t")
+                        t_el.text = new_val
+
+                # Sort cells by column reference to maintain ascending order
+                def _col_key(cell_el):
+                    ref = cell_el.get("r", "")
+                    col = re.sub(r'\d+', '', ref)
+                    result = 0
+                    for ch in col:
+                        result = result * 26 + (ord(ch) - ord('A') + 1)
+                    return result
+                children = list(row_el)
+                for child in children:
+                    row_el.remove(child)
+                for child in sorted(children, key=_col_key):
+                    row_el.append(child)
 
             new_bytes = self._serialize_row(row_el)
             replacements.append((start, end, new_bytes))
@@ -6118,6 +6178,19 @@ class OpenpyxlHandler:
                 row_xml = self._inject_formula_cached_values(
                     row_xml, row_num, cached_values
                 )
+                # Inject cached numeric value for column L (CLOSING BALANCE VND)
+                # so Summary SUMIFS can see the value before Excel recalculates.
+                # For new saving accounts: L = H + I - J = 0 + amount - 0 = amount.
+                cb_amount = entry.get("amount")
+                if cb_amount is not None:
+                    try:
+                        cb_amount_f = float(cb_amount)
+                        if cb_amount_f != 0:
+                            row_xml = self._inject_numeric_cached_value(
+                                row_xml, row_num, "L", cb_amount_f
+                            )
+                    except (ValueError, TypeError):
+                        pass
                 row_xml = self._supplement_table_formulas(cb_xml, 4, row_num, row_xml)
 
                 if is_tpl:

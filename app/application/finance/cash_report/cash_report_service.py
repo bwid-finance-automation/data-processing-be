@@ -1205,6 +1205,7 @@ class CashReportService:
                     transactions_count=found_count,
                     transactions_added=rows_added,
                     transactions_skipped=total_skipped,
+                    file_type="movement",
                 )
 
         # Emit completion
@@ -2780,6 +2781,7 @@ class CashReportService:
         transactions_count: int,
         transactions_added: int,
         transactions_skipped: int,
+        file_type: str = "bank_statement",
     ) -> None:
         """Track uploaded file in database."""
         if not self.db_session:
@@ -2802,6 +2804,7 @@ class CashReportService:
                 transactions_added=transactions_added,
                 transactions_skipped=transactions_skipped,
                 processed_at=datetime.utcnow(),
+                file_type=file_type,
             )
             self.db_session.add(file_model)
             await self.db_session.commit()
@@ -2919,6 +2922,7 @@ class CashReportService:
                             "transactions_added": f.transactions_added,
                             "transactions_skipped": f.transactions_skipped,
                             "processed_at": f.processed_at.isoformat() if f.processed_at else None,
+                            "file_type": getattr(f, "file_type", "bank_statement"),
                         }
                         for f in db_session.uploaded_files
                     ],
