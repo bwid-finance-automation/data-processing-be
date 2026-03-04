@@ -4,8 +4,9 @@
 <div class="admin-topbar">
   <div>
     <h2 class="page-title admin-page-title">Admin Dashboard</h2>
-    <div class="admin-subtitle">Centralized control center for workflows, permissions, and core data</div>
+    <div class="admin-subtitle">Live operations telemetry, permissions, and business data controls</div>
   </div>
+  <div class="dashboard-last-sync" id="metric-last-sync">Loading live statistics...</div>
 </div>
 {% endblock %}
 
@@ -13,22 +14,22 @@
 <div class="col-12">
   <section class="dashboard-showcase">
     <div class="dashboard-showcase-main">
-      <span class="dashboard-overline">Minimalist Workspace</span>
-      <h3>Powerful and Crisp Data Control</h3>
+      <span class="dashboard-overline">Operations Cockpit</span>
+      <h3>Real-Time Admin Analytics</h3>
       <p>
-        Manage identity, feature flags, projects, banking data, and reports from one focused interface.
-        Fast operations, high readability, and low-noise design.
+        Monitor system activity across identity, AI usage, financial ingestion, and contract processing.
+        Focus on throughput, quality, and response speed from one control center.
       </p>
       <div class="dashboard-quick-actions">
         <a class="dashboard-quick-action is-primary" href="{{ request.url_for('admin:list', identity='user-model').path }}">
-          <span>User Permissions</span>
+          <span>Manage Users</span>
           <i class="fa-solid fa-arrow-right ms-1"></i>
         </a>
         <a class="dashboard-quick-action" href="{{ request.url_for('admin:feature_toggles_ui').path }}">
-          <span>Feature Toggles</span>
+          <span>Feature Controls</span>
         </a>
         <a class="dashboard-quick-action" href="{{ request.url_for('admin:list', identity='ai-usage-model').path }}">
-          <span>AI Reports</span>
+          <span>AI Usage Logs</span>
         </a>
       </div>
     </div>
@@ -36,20 +37,24 @@
     <div class="dashboard-showcase-side">
       <div class="dashboard-health-pill">
         <span class="dot"></span>
-        <span>System Stable</span>
+        <span>Live Data Feed</span>
       </div>
       <div class="dashboard-mini-grid">
         <div class="dashboard-mini-card">
-          <div class="mini-label">Identity</div>
-          <div class="mini-value">Users + Sessions</div>
+          <div class="mini-label">Total Users</div>
+          <div class="mini-value" id="metric-users-total">0</div>
         </div>
         <div class="dashboard-mini-card">
-          <div class="mini-label">Portfolio</div>
-          <div class="mini-value">Projects + Cases</div>
+          <div class="mini-label">Active Sessions</div>
+          <div class="mini-value" id="metric-active-sessions">0</div>
         </div>
         <div class="dashboard-mini-card">
-          <div class="mini-label">AI Cost</div>
-          <div class="mini-value">Provider Logs</div>
+          <div class="mini-label">AI Requests (30d)</div>
+          <div class="mini-value" id="metric-ai-requests-30d">0</div>
+        </div>
+        <div class="dashboard-mini-card">
+          <div class="mini-label">Success Rate</div>
+          <div class="mini-value" id="metric-ai-success-rate">0%</div>
         </div>
       </div>
     </div>
@@ -57,26 +62,63 @@
 </div>
 
 <div class="col-12">
-  <section class="dashboard-kpi-strip">
-    <article class="dashboard-kpi">
-      <span class="kpi-title">Access Control</span>
-      <strong>Users and Sessions</strong>
-      <span class="kpi-meta">Role/status management and remote logout.</span>
+  <section class="dashboard-metric-grid">
+    <article class="dashboard-metric-card">
+      <span class="metric-label">AI Cost (30d)</span>
+      <strong class="metric-value" id="metric-ai-cost-30d">$0.00</strong>
+      <span class="metric-meta">Total estimated provider spend in the last 30 days.</span>
     </article>
-    <article class="dashboard-kpi">
-      <span class="kpi-title">Feature Governance</span>
-      <strong>Toggle Management</strong>
-      <span class="kpi-meta">Enable/disable services with maintenance messages.</span>
+    <article class="dashboard-metric-card">
+      <span class="metric-label">AI Tokens (30d)</span>
+      <strong class="metric-value" id="metric-ai-tokens-30d">0</strong>
+      <span class="metric-meta">Aggregated token throughput across all AI requests.</span>
     </article>
-    <article class="dashboard-kpi">
-      <span class="kpi-title">Usage Intelligence</span>
-      <strong>AI Usage Logs</strong>
-      <span class="kpi-meta">Track provider, model, token usage, and costs.</span>
+    <article class="dashboard-metric-card">
+      <span class="metric-label">Bank Data Rows</span>
+      <strong class="metric-value" id="metric-bank-transactions-total">0</strong>
+      <span class="metric-meta">Total parsed transactions currently stored in DB.</span>
     </article>
-    <article class="dashboard-kpi">
-      <span class="kpi-title">Data Lifecycle</span>
-      <strong>Project and Report Cleanup</strong>
-      <span class="kpi-meta">Remove obsolete projects and stale report data.</span>
+    <article class="dashboard-metric-card">
+      <span class="metric-label">Cash Sessions In Progress</span>
+      <strong class="metric-value" id="metric-cash-sessions-running">0</strong>
+      <span class="metric-meta">Sessions with active or processing state.</span>
+    </article>
+  </section>
+</div>
+
+<div class="col-12">
+  <section class="dashboard-chart-grid">
+    <article class="dashboard-chart-card dashboard-chart-card-wide">
+      <div class="dashboard-chart-head">
+        <h4>AI Requests Trend</h4>
+        <span>Last 14 days</span>
+      </div>
+      <div class="trend-chart" id="ai-daily-chart"></div>
+      <div class="chart-empty-state" id="ai-daily-empty" hidden>No AI activity in this period.</div>
+    </article>
+
+    <article class="dashboard-chart-card">
+      <div class="dashboard-chart-head">
+        <h4>Provider Mix</h4>
+        <span>Last 30 days</span>
+      </div>
+      <div class="provider-chart-shell">
+        <div class="provider-donut" id="provider-donut">
+          <div class="provider-donut-core">
+            <strong id="provider-total-requests">0</strong>
+            <small>Requests</small>
+          </div>
+        </div>
+        <div class="provider-legend" id="provider-legend"></div>
+      </div>
+    </article>
+
+    <article class="dashboard-chart-card">
+      <div class="dashboard-chart-head">
+        <h4>Data Volume by Module</h4>
+        <span>Current snapshot</span>
+      </div>
+      <div class="module-bars" id="module-volume-chart"></div>
     </article>
   </section>
 </div>
@@ -103,12 +145,11 @@
     </section>
 
     <section class="dashboard-module">
-      <span class="module-tag">Portfolio</span>
-      <h4 class="module-title">Project Management</h4>
-      <p class="module-desc">Track project records, review case allocation, and clean obsolete projects.</p>
+      <span class="module-tag">AI Ops</span>
+      <h4 class="module-title">AI Usage Monitoring</h4>
+      <p class="module-desc">Review provider activity, token volume, request outcomes, and estimated AI costs.</p>
       <div class="module-links">
-        <a class="module-link" href="{{ request.url_for('admin:list', identity='project-model').path }}">Projects</a>
-        <a class="module-link" href="{{ request.url_for('admin:list', identity='project-case-model').path }}">Cases</a>
+        <a class="module-link" href="{{ request.url_for('admin:list', identity='ai-usage-model').path }}">Usage Logs</a>
       </div>
     </section>
 
@@ -143,4 +184,254 @@
     </section>
   </div>
 </div>
+{% endblock %}
+
+{% block tail %}
+{{ super() }}
+<script>
+(() => {
+  const endpoint = "/api/admin/dashboard-stats";
+  const colors = [
+    "var(--admin-chart-1)",
+    "var(--admin-chart-2)",
+    "var(--admin-chart-3)",
+    "var(--admin-chart-4)",
+    "var(--admin-chart-5)",
+    "var(--admin-chart-6)"
+  ];
+
+  const numberFormatter = new Intl.NumberFormat("en-US");
+  const compactFormatter = new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1
+  });
+  const currencyFormatter = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2
+  });
+
+  const asNumber = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const setText = (id, value) => {
+    const element = document.getElementById(id);
+    if (element) {
+      element.textContent = value;
+    }
+  };
+
+  const parseDateLabel = (isoDate) => {
+    if (!isoDate) return "";
+    const parsed = new Date(`${isoDate}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return isoDate;
+    return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  };
+
+  const renderDailyChart = (dailyRows) => {
+    const chart = document.getElementById("ai-daily-chart");
+    const emptyState = document.getElementById("ai-daily-empty");
+    if (!chart) return;
+
+    chart.innerHTML = "";
+
+    const rows = Array.isArray(dailyRows) ? dailyRows : [];
+    const totals = rows.map((row) => asNumber(row.total_requests));
+    const maxTotal = Math.max(1, ...totals);
+    const hasData = totals.some((value) => value > 0);
+
+    if (!hasData) {
+      if (emptyState) emptyState.hidden = false;
+      return;
+    }
+
+    if (emptyState) emptyState.hidden = true;
+
+    rows.forEach((row) => {
+      const total = asNumber(row.total_requests);
+      const successful = asNumber(row.successful_requests);
+      const failed = asNumber(row.failed_requests);
+      const successHeight = (successful / maxTotal) * 100;
+      const failedHeight = (failed / maxTotal) * 100;
+
+      const group = document.createElement("div");
+      group.className = "trend-bar-group";
+
+      const stack = document.createElement("div");
+      stack.className = "trend-bar-stack";
+      stack.title = `${parseDateLabel(row.date)}: ${numberFormatter.format(total)} requests`;
+
+      const successBar = document.createElement("div");
+      successBar.className = "trend-bar trend-bar-success";
+      successBar.style.height = `${Math.max(0, successHeight)}%`;
+
+      const failedBar = document.createElement("div");
+      failedBar.className = "trend-bar trend-bar-failed";
+      failedBar.style.height = `${Math.max(0, failedHeight)}%`;
+
+      const label = document.createElement("div");
+      label.className = "trend-bar-label";
+      label.textContent = parseDateLabel(row.date);
+
+      stack.appendChild(successBar);
+      stack.appendChild(failedBar);
+      group.appendChild(stack);
+      group.appendChild(label);
+      chart.appendChild(group);
+    });
+  };
+
+  const renderProviderChart = (providers) => {
+    const donut = document.getElementById("provider-donut");
+    const totalLabel = document.getElementById("provider-total-requests");
+    const legend = document.getElementById("provider-legend");
+    if (!donut || !legend || !totalLabel) return;
+
+    const items = Array.isArray(providers) ? providers : [];
+    const total = items.reduce((acc, item) => acc + asNumber(item.requests), 0);
+
+    totalLabel.textContent = numberFormatter.format(total);
+    legend.innerHTML = "";
+
+    if (total === 0 || items.length === 0) {
+      donut.style.background = "conic-gradient(var(--admin-border) 0% 100%)";
+      const empty = document.createElement("div");
+      empty.className = "provider-empty";
+      empty.textContent = "No provider data yet.";
+      legend.appendChild(empty);
+      return;
+    }
+
+    let cursor = 0;
+    const gradientStops = items.map((item, index) => {
+      const share = (asNumber(item.requests) / total) * 100;
+      const start = cursor;
+      cursor += share;
+      return `${colors[index % colors.length]} ${start}% ${cursor}%`;
+    });
+    donut.style.background = `conic-gradient(${gradientStops.join(", ")})`;
+
+    items.forEach((item, index) => {
+      const requests = asNumber(item.requests);
+      const ratio = total > 0 ? (requests / total) * 100 : 0;
+
+      const row = document.createElement("div");
+      row.className = "provider-legend-row";
+
+      const name = document.createElement("div");
+      name.className = "provider-legend-name";
+      const swatch = document.createElement("span");
+      swatch.className = "provider-swatch";
+      swatch.style.backgroundColor = colors[index % colors.length];
+      const text = document.createElement("span");
+      text.textContent = item.provider || "UNKNOWN";
+      name.appendChild(swatch);
+      name.appendChild(text);
+
+      const value = document.createElement("div");
+      value.className = "provider-legend-value";
+      value.textContent = `${numberFormatter.format(requests)} (${ratio.toFixed(1)}%)`;
+
+      row.appendChild(name);
+      row.appendChild(value);
+      legend.appendChild(row);
+    });
+  };
+
+  const renderModuleChart = (modules) => {
+    const root = document.getElementById("module-volume-chart");
+    if (!root) return;
+    root.innerHTML = "";
+
+    const items = Array.isArray(modules) ? modules : [];
+    const maxValue = Math.max(1, ...items.map((item) => asNumber(item.value)));
+
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "provider-empty";
+      empty.textContent = "No module volume available.";
+      root.appendChild(empty);
+      return;
+    }
+
+    items.forEach((item, index) => {
+      const value = asNumber(item.value);
+      const percent = (value / maxValue) * 100;
+
+      const row = document.createElement("div");
+      row.className = "module-bar-row";
+
+      const meta = document.createElement("div");
+      meta.className = "module-bar-meta";
+      const label = document.createElement("span");
+      label.textContent = item.label || "Unknown";
+      const rawValue = document.createElement("strong");
+      rawValue.textContent = compactFormatter.format(value);
+      meta.appendChild(label);
+      meta.appendChild(rawValue);
+
+      const track = document.createElement("div");
+      track.className = "module-bar-track";
+      const bar = document.createElement("div");
+      bar.className = "module-bar-fill";
+      bar.style.width = `${percent}%`;
+      bar.style.backgroundColor = colors[index % colors.length];
+      track.appendChild(bar);
+
+      row.appendChild(meta);
+      row.appendChild(track);
+      root.appendChild(row);
+    });
+  };
+
+  const applySummary = (summary) => {
+    setText("metric-users-total", numberFormatter.format(asNumber(summary.users_total)));
+    setText("metric-active-sessions", numberFormatter.format(asNumber(summary.active_sessions)));
+    setText("metric-ai-requests-30d", numberFormatter.format(asNumber(summary.ai_requests_30d)));
+    setText("metric-ai-success-rate", `${asNumber(summary.ai_success_rate_30d).toFixed(1)}%`);
+    setText("metric-ai-cost-30d", currencyFormatter.format(asNumber(summary.ai_cost_30d)));
+    setText("metric-ai-tokens-30d", numberFormatter.format(asNumber(summary.ai_tokens_30d)));
+    setText("metric-bank-transactions-total", numberFormatter.format(asNumber(summary.bank_transactions_total)));
+    setText("metric-cash-sessions-running", numberFormatter.format(asNumber(summary.cash_sessions_running)));
+  };
+
+  const loadDashboard = async () => {
+    try {
+      const response = await fetch(endpoint, {
+        method: "GET",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" }
+      });
+      if (!response.ok) {
+        throw new Error(`Failed with status ${response.status}`);
+      }
+
+      const payload = await response.json();
+      applySummary(payload.summary || {});
+      renderDailyChart(payload.charts?.daily_ai_usage || []);
+      renderProviderChart(payload.charts?.provider_breakdown || []);
+      renderModuleChart(payload.charts?.module_totals || []);
+
+      if (payload.generated_at) {
+        const parsed = new Date(payload.generated_at);
+        if (!Number.isNaN(parsed.getTime())) {
+          setText("metric-last-sync", `Updated ${parsed.toLocaleString()}`);
+          return;
+        }
+      }
+      setText("metric-last-sync", "Updated just now");
+    } catch (error) {
+      console.error("Error while loading dashboard stats:", error);
+      setText("metric-last-sync", "Could not load live statistics");
+      renderDailyChart([]);
+      renderProviderChart([]);
+      renderModuleChart([]);
+    }
+  };
+
+  loadDashboard();
+})();
+</script>
 {% endblock %}
