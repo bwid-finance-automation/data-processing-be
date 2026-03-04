@@ -3579,6 +3579,7 @@ class CashReportService:
         maturity_date_updated = 0
         interest_rate_updated = 0
         provider_mismatch_skipped = 0
+        rate_changed_cells: List[Tuple[int, str]] = []  # (row, "L")
 
         for row in saving_rows:
             row_num = int(row.get("row") or 0)
@@ -3635,6 +3636,7 @@ class CashReportService:
                     if current_rate is None or abs(float(current_rate) - new_rate_f) > 1e-9:
                         row_mod["L"] = str(new_rate_f)
                         interest_rate_updated += 1
+                        rate_changed_cells.append((row_num, "L"))
 
             if row_mod:
                 modifications[row_num] = row_mod
@@ -3656,6 +3658,25 @@ class CashReportService:
                 maturity_date_updated,
                 interest_rate_updated,
             )
+
+            # Highlight cells where interest rate was changed
+            if rate_changed_cells:
+                light_blue_fill = (
+                    b'<fill><patternFill patternType="solid">'
+                    b'<fgColor rgb="FF00B0F0"/>'
+                    b'</patternFill></fill>'
+                )
+                await asyncio.to_thread(
+                    handler.highlight_cells,
+                    Path(working_file),
+                    "Saving Account",
+                    rate_changed_cells,
+                    light_blue_fill,
+                )
+                logger.info(
+                    "Highlighted %d rate-changed cells in Saving Account",
+                    len(rate_changed_cells),
+                )
         else:
             logger.info("Saving Account lookup sync: no field changes detected")
 
@@ -3666,6 +3687,7 @@ class CashReportService:
             "term_months_updated": term_months_updated,
             "maturity_date_updated": maturity_date_updated,
             "interest_rate_updated": interest_rate_updated,
+            "rate_changed_cells": len(rate_changed_cells),
             "provider_mismatch_skipped": provider_mismatch_skipped,
         }
 
