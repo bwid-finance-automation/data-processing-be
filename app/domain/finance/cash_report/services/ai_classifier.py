@@ -202,7 +202,7 @@ class AITransactionClassifier:
                 response_mime_type="application/json",
             )
             self.client = genai.GenerativeModel(
-                'gemini-2.0-flash',
+                'gemini-2.5-flash',
                 generation_config=self.generation_config
             )
         else:
@@ -225,7 +225,7 @@ class AITransactionClassifier:
     def get_and_reset_usage(self) -> Dict:
         """Return accumulated token usage and reset counters."""
         usage = dict(self._total_usage)
-        usage["model"] = "gemini-2.0-flash"
+        usage["model"] = "gemini-2.5-flash"
         usage["provider"] = "gemini"
         usage["cache_hit"] = self._cache_stats["cache_hit"]
         usage["api_call"] = self._cache_stats["api_call"]
@@ -313,8 +313,9 @@ Any transaction between entities within the BW Industrial group (subsidiaries, S
 Detection patterns:
 - Entity code pairs in description: "XXX_YYY_" format (e.g., "VC3_BB3_", "BCI_GTC_", "NT2_VC3_")
   Common entity codes: BB3, BB4, BB5, BB6, BBA, BBN, BCI, BDG, BDH, BHP, BLB, BNA, BNT, BSG, BTD, BTH, BTP, BTU, BWD, BWP, BYP, DC2, DVC, GTC, H5H, H5S, HD2, HD3, IRE, JHP, LCC, MHN, NSHL, NT2, PAE, PDE, PDHD, PNA, QV2, S5B, S5D, SC2, ST2, STL, TCS, TPT, VC3, WL2A, WL2B, XA1
-- BCC keywords: "BCC transfer", "chuyen tien hop tac kinh doanh", "BCC"
-- SHL keywords: "SHL", "shareholder loan", "SHL repayment", "SHL interest", "vay noi bo"
+- BCC keywords (general transfer): "BCC transfer", "chuyen tien hop tac kinh doanh"
+- SHL keywords (general transfer): "SHL", "shareholder loan", "vay noi bo"
+- EXCEPTION — SHL/BCC repayment/interest as RECEIPT → Loan receipts (see RULE 10)
 - Savings/Deposit operations: "HDTG", "GUI HDTG", "MO HDTG", "TAT TOAN", "CK SANG TK TIME", "TIMEMO", "TKKH", "tien gui co ky han", "HOP DONG TIEN GUI", "Completed transfer to BIDV CD"
 - Internal transfer keywords: "INTERNAL TRANSFER", "CHUYEN KHOAN", "Rut tien gui", "ROLLOVER", "VCBCSH"
 - "Tra goc TK tien gui" (return of deposit principal) → Internal transfer in
@@ -328,12 +329,13 @@ Detection patterns:
 **RULE 2 — LOAN REPAYMENT (BANK loans only)**
 ONLY for repayment of principal to BANKS. NOT intercompany.
 Keywords: "Tra no TK vay" (+ account number), "THU NO GOC VAY", "THU NO TAI KHOAN VAY", "THU NO TKV", "LD-PR", "REPAY LOAN"
-IMPORTANT: "SHL repayment" or "Repayment shareholder loan" = Internal transfer out (NOT Loan repayment)
+IMPORTANT: "SHL repayment" or "Repayment shareholder loan" as PAYMENT = Internal transfer out (NOT Loan repayment)
+IMPORTANT: "SHL repayment", "REPAYMENT OF SHL", "SHL INTEREST" as RECEIPT = Loan receipts (NOT Internal transfer in)
 
 **RULE 3 — LOAN INTEREST (BANK loan interest only)**
 Keywords: "Thu no LAI", "Thu no lai (LD-IN)", "lai phat sinh"
 NOT "thanh toan lai" which is bank deposit interest = Other receipts
-NOT SHL interest = Internal transfer
+NOT SHL interest — SHL interest as RECEIPT = Loan receipts, as PAYMENT = Internal transfer out
 
 **RULE 4 — OTHER RECEIPTS (bank interest/deposit returns ONLY)**
 This is STRICTLY for bank-generated interest credits. NOT for business receipts.
@@ -357,7 +359,15 @@ Repair/maintenance work (even by construction companies) = Operating expense.
 Share Purchase Agreement payments: "SPA", "Final payment SPA"
 
 **RULE 9 — REFINANCING**
-"giai ngan bu dap", "refinancing", "KLHT"
+"giai ngan bu dap", "refinancing", "bu dap chi phi KLHT"
+"KLHT" (khoi luong hoan thanh / completed construction volume) as RECEIPT = Refinancing (reimbursement)
+"KLHT" as PAYMENT = Construction expense
+
+**RULE 10 — LOAN RECEIPTS (intercompany loan repayment/interest received)**
+When entity RECEIVES SHL/BCC repayment or interest from subsidiary/group company = Loan receipts.
+Keywords (RECEIPT only): "REPAYMENT OF SHL", "SHL repayment", "SHL INTEREST", "lai vay SHL",
+  "REPAYMENT BCC", "tra lai BCC", "LOAN AGREEMENT", "per loan agreement"
+IMPORTANT: This overrides Rule 1 for RECEIPT direction. SHL/BCC PAYMENT direction = still Internal transfer out.
 
 === FEW-SHOT EXAMPLES (verified correct) ===
 
@@ -372,13 +382,19 @@ Share Purchase Agreement payments: "SPA", "Final payment SPA"
 [RECEIPT] "Tra lai TK tien gui 212000488544" → Other receipts (bank deposit interest credit)
 [RECEIPT] "CA - TARGET" → Other receipts (SINOPAC - typically bank interest; round amounts may be Internal transfer in)
 [RECEIPT] "CLOSING TDA - CLOSING TDA" → Internal transfer in
-[RECEIPT] "MISC CREDIT | MIR601281251C01 | BTPVC3Tra lai BCC" → Internal transfer in
+[RECEIPT] "MISC CREDIT | MIR601281251C01 | BTPVC3Tra lai BCC" → Loan receipts (BCC interest received)
+[RECEIPT] "MISC CREDIT | MIR602274581C01 | S4C-VC3-REPAYMENT OF SHL INTEREST/" → Loan receipts (SHL interest repayment received)
+[RECEIPT] "MISC CREDIT | MIR602274582C01 | VC3-H4H-TRA 1 PHAN LAI VAY SHL/PAR" → Loan receipts (SHL loan interest received)
+[RECEIPT] "MISC CREDIT | MIR602274585C01 | BB5REPAYMENT BCC TO VC3" → Loan receipts (BCC repayment received)
+[RECEIPT] "S5C-S4C-REPAYMENT OF SHL INTEREST/TRA MOT PHAN LAI VAY CHO CONG TY ME" → Loan receipts (SHL interest)
+[RECEIPT] "Transfer to VC3 per loan agreement/ Chuyen tien theo HD vay" → Loan receipts (intercompany loan disbursement)
+[RECEIPT] "BBA_VC3_TRANSFER TO VC3 PER LOAN AGREEMENT/CHUYEN TIEN THEO HD VAY" → Loan receipts
+[RECEIPT] "TT BU DAP CHI PHI KLHT DOT 2 THEO HD SO BB05/XD/25005" → Refinancing (construction cost reimbursement)
 [PAYMENT] "MISC DEBIT | ..." → Internal transfer out
 [PAYMENT] "VCBCSH. C719220126052748.BLB VC3 thanh toan chi phi dich vu management fee" → Internal transfer out
 [PAYMENT] "SHAREHOLDER LOAN FROM VC3 TO SPV4B" → Internal transfer out (intercompany, NOT loan repayment)
-[RECEIPT] "SHAREHOLDER LOAN FROM VC3 TO SPV4B" → Internal transfer in
-[PAYMENT] "BCI_GTC_Payment for SHL interest/Thanh toan lai vay noi bo" → Internal transfer out (SHL = intercompany)
-[RECEIPT] "BCI_GTC_Payment for SHL interest/Thanh toan lai vay noi bo" → Internal transfer in
+[RECEIPT] "SHAREHOLDER LOAN FROM VC3 TO SPV4B" → Internal transfer in (general SHL transfer, no repayment keyword)
+[PAYMENT] "BCI_GTC_Payment for SHL interest/Thanh toan lai vay noi bo" → Internal transfer out (SHL payment = intercompany)
 [PAYMENT] "So GD: 285A2611CPQB0FM7 VC3_SHL to BLA - VC3 cho BLA vay" → Internal transfer out
 [PAYMENT] "Tra no TK vay 800004949853,so tien 4546359927 VND" → Loan repayment (bank loan)
 [PAYMENT] "THU NO GOC VAY DEN HAN" → Loan repayment

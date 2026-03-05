@@ -69,53 +69,53 @@ DEFAULT_BANK_ALIAS_TO_FULL_NAME = {
     "WOORI": "Woori Bank",
 }
 
-# â”€â”€ Settlement detection patterns (Group A - Táº¥t toÃ¡n / RÃºt tiá»n) â”€â”€
+# â"€â"€ Settlement detection patterns (Group A - Táº¥t toÃ¡n / RÃºt tiá»n) â"€â"€
 # Used to detect settlement-eligible transactions by description.
 # Requires BOTH: Nature = "Internal transfer in" AND keyword/pattern match.
 
 # Regex patterns for settlement detection (compiled at module load)
 SETTLEMENT_PATTERNS = [
-    # GROUP A â€” Táº¥t toÃ¡n / RÃºt tiá»n (Current Account â† Savings)
+    # GROUP A -- Táº¥t toÃ¡n / RÃºt tiá»n (Current Account â† Savings)
     # 1-4: Táº¥t toÃ¡n / Terminate
     r"TAT\s*TOAN",                              # Táº¥t toÃ¡n
     r"TT\s+HDTG",                               # Viáº¿t táº¯t: Táº¥t toÃ¡n HDTG
-    r"TERMINATE\s*(PARTIAL\s*)?SAVING",         # Terminate saving â€” VTB
-    r"CA\s*-?\s*TARGET",                        # CA - TARGET â€” SINOPAC settlement
+    r"TERMINATE\s*(PARTIAL\s*)?SAVING",         # Terminate saving -- VTB
+    r"CA\s*-?\s*TARGET",                        # CA - TARGET -- SINOPAC settlement
     # 5-10: Withdrawal / RÃºt tiá»n (EN)
-    r"WITHDRAWAL\s*(OF\s*)?(THE\s*)?TERM\s*DEPOSIT",  # Withdrawal term deposit â€” VTB
-    r"FULL\s*WITHDRAWAL\s*FROM\s*SAVINGS",      # Full withdrawal â€” VTB
-    r"WITHDRAW\s*FIXED\s*DEPOSIT",              # Withdraw fixed deposit â€” BIDV
-    r"PARTIALLY\s*WITHDRAW\s*TERM\s*DEPOSIT",   # Partially withdraw â€” BIDV
-    r"CLOSE\s*TD\s*ACC",                        # Close Term Deposit â€” Kbank
-    r"CLOSING\s*TERM\s*DEPOSIT",                # Closing term deposit â€” Escrow
-    r"CLOSING\s*TDA",                           # Closing TDA â€” Woori
+    r"WITHDRAWAL\s*(OF\s*)?(THE\s*)?TERM\s*DEPOSIT",  # Withdrawal term deposit -- VTB
+    r"FULL\s*WITHDRAWAL\s*FROM\s*SAVINGS",      # Full withdrawal -- VTB
+    r"WITHDRAW\s*FIXED\s*DEPOSIT",              # Withdraw fixed deposit -- BIDV
+    r"PARTIALLY\s*WITHDRAW\s*TERM\s*DEPOSIT",   # Partially withdraw -- BIDV
+    r"CLOSE\s*TD\s*ACC",                        # Close Term Deposit -- Kbank
+    r"CLOSING\s*TERM\s*DEPOSIT",                # Closing term deposit -- Escrow
+    r"CLOSING\s*TDA",                           # Closing TDA -- Woori
     # 11-17: RÃºt tiá»n (VI)
-    r"RUT\s*TIEN\s*GUI",                        # RÃºt tiá»n gá»­i online â€” BIDV
+    r"RUT\s*TIEN\s*GUI",                        # RÃºt tiá»n gá»­i online -- BIDV
     r"RUT\s*TIEN.*TIET\s*KIEM",                 # RÃºt tiá»n tá»« TK tiáº¿t kiá»‡m
     r"RUT\s*TIEN.*HDTG",                        # RÃºt tiá»n theo HDTG
     r"RUT\s*MOT\s*PHAN",                        # RÃºt má»™t pháº§n tiá»n gá»­i
-    r"RUT\s*1\s*PHAN",                          # RÃºt 1 pháº§n â€” variant sá»‘
-    r"RUT\s*GOC\s*MOT\s*PHAN",                  # RÃºt gá»‘c má»™t pháº§n HDTG
+    r"RUT\s*1\s*PHAN",                          # RÃºt 1 pháº§n -- variant sá»'
+    r"RUT\s*GOC\s*MOT\s*PHAN",                  # RÃºt gá»'c má»™t pháº§n HDTG
     r"RUT\s*TRUOC\s*HAN",                       # RÃºt trÆ°á»›c háº¡n
     # 18-22: ÄÃ³ng TK
     r"DONG\s*TKKH",                             # ÄÃ³ng TK ká»³ háº¡n
     r"DONG\s*TK.*KY\s*HAN",                     # ÄÃ³ng TK + ká»³ háº¡n
     r"DONG\s*TK.*TIET\s*KIEM",                  # ÄÃ³ng TK tiáº¿t kiá»‡m
-    r"DONG\s*TK\s*(BIDV|THEO\s*DE|\d{3,})",     # ÄÃ³ng TK + mÃ£ NH/sá»‘ TK
+    r"DONG\s*TK\s*(BIDV|THEO\s*DE|\d{3,})",     # ÄÃ³ng TK + mÃ£ NH/sá»' TK
     r"DONG\s*HDTG",                             # ÄÃ³ng HDTG
-    # 23-24: Tráº£ gá»‘c
-    r"TRA\s*GOC",                               # Tráº£ gá»‘c (standalone â€” catches all TRA GOC variants)
+    # 23-24: Tráº£ gá»'c
+    r"TRA\s*GOC",                               # Tráº£ gá»'c (standalone -- catches all TRA GOC variants)
     # 25: Bare account number (SINOPAC-style, description = only digits)
-    r"^\s*\d{10,}(?:\.0+)?\s*$",                # Pure account number (10+ digits, optional .0) â€” SINOPAC
+    r"^\s*\d{10,}(?:\.0+)?\s*$",                # Pure account number (10+ digits, optional .0) -- SINOPAC
 ]
 
 # Simple keyword matching (faster, for common patterns)
 # NOTE: Only include keywords specific to settling/closing saving deposits.
 # Do NOT include intercompany transfer keywords (SHL, BCC, CHUYEN TIEN, etc.)
-# â€” those are normal "Internal transfer in" but NOT settlement of savings.
+# -- those are normal "Internal transfer in" but NOT settlement of savings.
 SETTLEMENT_KEYWORDS = [
     "tat toan",         # Táº¥t toÃ¡n (lowercase fallback)
-    "tra goc",          # Tráº£ gá»‘c (lowercase fallback)
+    "tra goc",          # Tráº£ gá»'c (lowercase fallback)
     "rut tien gui",     # RÃºt tiá»n gá»­i (lowercase fallback)
 ]
 
@@ -218,8 +218,8 @@ TRANSACTION_NATURE_ALIASES = {
 }
 
 # Entity codes for dual-entity transfer detection.
-# If description mentions 2+ DIFFERENT entity codes â†’ internal transfer between entities.
-# E.g., "VC3_DC2_TRANSFER MONEY" contains VC3 and DC2 â†’ settlement candidate.
+# If description mentions 2+ DIFFERENT entity codes -> internal transfer between entities.
+# E.g., "VC3_DC2_TRANSFER MONEY" contains VC3 and DC2 -> settlement candidate.
 ENTITY_CODES = [
     "bwd", "bhd", "bbn", "hd2", "bhp", "bnt", "hd3", "bth",
     "th1hc", "th2hc", "th2", "btu", "bsg", "bnc", "bsl", "nt2",
@@ -252,61 +252,61 @@ ENTITY_CODES = [
     "pae", "pdhd", "pde", "wl2b", "shl",
 ]
 
-# â”€â”€ Open New Saving Account patterns (Group B - Gá»­i tiá»n / Má»Ÿ HDTG) â”€â”€
+# â"€â"€ Open New Saving Account patterns (Group B - Gá»­i tiá»n / Má»Ÿ HDTG) â"€â"€
 # Used to detect transactions that open new saving accounts.
 # Requires BOTH: Nature = "Internal transfer out" AND pattern match.
 
 OPEN_NEW_PATTERNS = [
-    # GROUP B â€” Gá»­i tiá»n / Má»Ÿ HDTG (Current Account â†’ Saving Account)
+    # GROUP B -- Gá»­i tiá»n / Má»Ÿ HDTG (Current Account -> Saving Account)
     # Tiá»n gá»­i cÃ³ ká»³ háº¡n (reversed word order: "TIEN GUI CO KY HAN" not "GUI TIEN")
-    r"TIEN\s*GUI\s*CO\s*KY\s*HAN",               # Tiá»n gá»­i cÃ³ ká»³ háº¡n â€” BIDV eFAST
-    # Há»£p Ä‘á»“ng tiá»n gá»­i (without MO prefix)
-    r"HOP\s*DONG\s*TIEN\s*GUI",                   # Há»£p Ä‘á»“ng tiá»n gá»­i sá»‘ â€” BIDV
+    r"TIEN\s*GUI\s*CO\s*KY\s*HAN",               # Tiá»n gá»­i cÃ³ ká»³ háº¡n -- BIDV eFAST
+    # Há»£p Ä'á»"ng tiá»n gá»­i (without MO prefix)
+    r"HOP\s*DONG\s*TIEN\s*GUI",                   # Há»£p Ä'á»"ng tiá»n gá»­i sá»' -- BIDV
     # Gá»­i tiá»n patterns
     r"GUI\s*TIEN.*HDTG",                          # Gá»­i tiá»n theo HDTG
-    r"GUI\s*TIEN.*HOP\s*DONG",                    # Gá»­i tiá»n theo há»£p Ä‘á»“ng
+    r"GUI\s*TIEN.*HOP\s*DONG",                    # Gá»­i tiá»n theo há»£p Ä'á»"ng
     r"GUI\s*TIEN\s*VAO\s*HOP\s*DONG",             # Gá»­i tiá»n vÃ o HDTG
     r"GUI\s*TIEN\s*GUI\s*KY\s*HAN",               # Gá»­i tiá»n gá»­i ká»³ háº¡n
     r"GUI\s*TIEN\s*VAO\s*TAI\s*KHOAN\s*TIEN\s*GUI",  # Gá»­i tiá»n vÃ o TKTG cÃ³ ká»³ háº¡n
-    r"GUI\s*TIEN\s*TK",                           # Gá»­i tiá»n TK â€” BIDV
-    r"GUI\s*TIEN\s*GUI\s*CKH",                    # Gá»­i tiá»n gá»­i CKH â€” ACB
-    r"GUI\s*TIEN\s*NGAY",                         # Gá»­i tiá»n ngÃ y â€” TCB
+    r"GUI\s*TIEN\s*TK",                           # Gá»­i tiá»n TK -- BIDV
+    r"GUI\s*TIEN\s*GUI\s*CKH",                    # Gá»­i tiá»n gá»­i CKH -- ACB
+    r"GUI\s*TIEN\s*NGAY",                         # Gá»­i tiá»n ngÃ y -- TCB
     # 32-38: Gá»­i HDTG/TK
     r"GUI\s*HDTG",                                # Gá»­i HDTG
     r"GUI\s*TK\s*THEO\s*HDTG",                    # Gá»­i TK theo HDTG
     r"GUI\s*TIET\s*KIEM",                         # Gá»­i tiáº¿t kiá»‡m
     r"GUI\s*KY\s*HAN",                            # Gá»­i ká»³ háº¡n
-    r"GUI\s*TK\s*\d+\s*THANG",                    # Gá»­i TK + thÃ¡ng â€” VTB
-    r"GUI\s*TKLH",                                # Gá»­i TK linh hoáº¡t â€” BIDV
-    r"GUI\s*TGCKH",                               # Gá»­i tiá»n gá»­i CKH â€” ACB
+    r"GUI\s*TK\s*\d+\s*THANG",                    # Gá»­i TK + thÃ¡ng -- VTB
+    r"GUI\s*TKLH",                                # Gá»­i TK linh hoáº¡t -- BIDV
+    r"GUI\s*TGCKH",                               # Gá»­i tiá»n gá»­i CKH -- ACB
     # 39-44: Má»Ÿ HDTG
     r"MO\s*HDTG",                                 # Má»Ÿ HDTG
-    r"MO\s*HOP\s*DONG\s*TIEN\s*GUI",              # Má»Ÿ há»£p Ä‘á»“ng tiá»n gá»­i
-    r"MO\s*HGTG",                                 # Má»Ÿ HGTG â€” typo = MO HDTG
+    r"MO\s*HOP\s*DONG\s*TIEN\s*GUI",              # Má»Ÿ há»£p Ä'á»"ng tiá»n gá»­i
+    r"MO\s*HGTG",                                 # Má»Ÿ HGTG -- typo = MO HDTG
     r"TRICH\s*TK\s*MO.*HDTG",                     # TrÃ­ch TK má»Ÿ HDTG
     r"HACH\s*TOAN\s*HDTG",                        # Háº¡ch toÃ¡n HDTG
     r"HT\s+HDTG",                                 # Viáº¿t táº¯t: Háº¡ch toÃ¡n HDTG
     # 45-54: HDTG patterns
     r"CHUYEN\s*KHOAN\s*VAO\s*HDTG",               # Chuyá»ƒn khoáº£n vÃ o HDTG
-    r"HDTG\s*KH\s*\d",                            # HDTG ká»³ háº¡n + sá»‘
-    r"HDTG\s*RGLH",                               # HDTG rÃºt gá»‘c linh hoáº¡t
+    r"HDTG\s*KH\s*\d",                            # HDTG ká»³ háº¡n + sá»'
+    r"HDTG\s*RGLH",                               # HDTG rÃºt gá»'c linh hoáº¡t
     r"HDTG\s*\d+\s*(THANG|NGAY|TH|THT)",          # HDTG + ká»³ háº¡n thÃ¡ng/ngÃ y
-    r"HDTG\s*SO\s*\d",                            # HDTG sá»‘ â€” BIDV
+    r"HDTG\s*SO\s*\d",                            # HDTG sá»' -- BIDV
     r"HDTG\s+\d{3}[\s/]",                         # HDTG + mÃ£ chi nhÃ¡nh
     r"HDTG:\s*\d{3}",                             # HDTG: + mÃ£ HÄ
     r"HDTG\s+CKH",                                # HDTG cÃ³ ká»³ háº¡n
-    r"HGTD\s*SO",                                 # HGTD â€” typo = HDTG
-    r"\d+/\d+/HDTG",                              # MÃ£ HÄ dáº¡ng sá»‘/nÄƒm/HDTG
+    r"HGTD\s*SO",                                 # HGTD -- typo = HDTG
+    r"\d+/\d+/HDTG",                              # MÃ£ HÄ dáº¡ng sá»'/nÄƒm/HDTG
     # 55-57: VCB Time Deposit
-    r"CK\s*SANG\s*TK\s*TIME",                     # CK sang TK TIME â€” VCB
-    r"TIMEMO",                                    # TK TIMEMO â€” VCB savings
-    r"TIMECT",                                    # TK TIMECT â€” VCB savings
+    r"CK\s*SANG\s*TK\s*TIME",                     # CK sang TK TIME -- VCB
+    r"TIMEMO",                                    # TK TIMEMO -- VCB savings
+    r"TIMECT",                                    # TK TIMECT -- VCB savings
     # 58-63: English patterns
     r"DEPOSIT\s*FOR\s*NEXT\s*PRINCIPAL",          # KEB Hana escrow savings
-    r"OPEN\s*TD",                                 # Open Term Deposit â€” Kbank
+    r"OPEN\s*TD",                                 # Open Term Deposit -- Kbank
     r"COMPLETED\s*TRANSFER\s*TO\s*BIDV\s*CD",     # Transfer to BIDV CD account
-    r"SETTLEMENT\s*CONTRACT",                     # Settlement contract â€” VIB
-    # NOTE: AUTO ROLLOVER removed â€” rollover renews existing deposit, not open new
+    r"SETTLEMENT\s*CONTRACT",                     # Settlement contract -- VIB
+    # NOTE: AUTO ROLLOVER removed -- rollover renews existing deposit, not open new
     # Ká»³ háº¡n / RGLH / ÄÃ¡o háº¡n
     r"KY\s*HAN.*RGLH",                            # Ká»³ háº¡n + RGLH
     r"RGLH.*KY\s*HAN",                            # RGLH + ká»³ háº¡n
@@ -438,6 +438,45 @@ class CashReportService:
 
         if session.user_id is not None and session.user_id != user_id:
             raise PermissionError("You do not have access to this session")
+
+    async def _ensure_working_file(
+        self, session_id: str
+    ) -> Tuple[Dict[str, Any], Path]:
+        """
+        Validate that both session info AND working file exist on disk.
+
+        Returns (session_info, working_file_path).
+
+        Raises ValueError with a clear message distinguishing:
+        - Session not found at all (not in DB, not on disk)
+        - Working file expired (session in DB but file lost after server restart)
+        """
+        session_info = self.template_manager.get_session_info(session_id)
+        working_file = self.template_manager.get_working_file_path(session_id)
+
+        if session_info and working_file and working_file.exists():
+            return session_info, working_file
+
+        # File missing — check DB to give a clear error
+        if self.db_session:
+            result = await self.db_session.execute(
+                select(CashReportSessionModel).where(
+                    CashReportSessionModel.session_id == session_id
+                )
+            )
+            db_session = result.scalar_one_or_none()
+            if db_session:
+                logger.warning(
+                    "Session %s exists in DB but working file is missing on disk "
+                    "(likely lost after server restart/deploy)",
+                    session_id,
+                )
+                raise ValueError(
+                    f"Working file for session {session_id} has expired "
+                    f"(server was restarted). Please create a new session."
+                )
+
+        raise ValueError(f"Session {session_id} not found")
 
     async def get_or_create_session(
         self,
@@ -644,14 +683,8 @@ class CashReportService:
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
-        # Get session info
-        session_info = self.template_manager.get_session_info(session_id)
-        if not session_info:
-            raise ValueError(f"Session {session_id} not found")
-
-        working_file = self.template_manager.get_working_file_path(session_id)
-        if not working_file:
-            raise ValueError(f"Working file for session {session_id} not found")
+        # Get session info + validate working file exists
+        session_info, working_file = await self._ensure_working_file(session_id)
 
         # Get date range for filtering
         opening_date = None
@@ -864,7 +897,7 @@ class CashReportService:
         if progress_callback:
             await asyncio.sleep(0)  # Flush SSE
 
-        # Prepare Movement sheet (copy Cash Balance â†’ Prior Period + clear old data)
+        # Prepare Movement sheet (copy Cash Balance -> Prior Period + clear old data)
         # Only on first upload (check DB total_transactions, not Excel rows which include template data)
         is_first_upload = await self._is_first_upload(session_id)
         if is_first_upload:
@@ -946,7 +979,7 @@ class CashReportService:
         ai_usage = self.ai_classifier.get_and_reset_usage()
         ai_usage["processing_time_ms"] = _classify_elapsed_ms
 
-        return _finish({
+        final_result = {
             "session_id": session_id,
             "files_processed": len(files),
             "total_transactions_added": rows_added,
@@ -960,7 +993,9 @@ class CashReportService:
                 "ai_cached": ai_cached_count,
                 "unclassified": unclassified_count,
             },
-        })
+        }
+
+        return _finish(final_result)
 
     # ------------------------------------------------------------------ #
     #  Upload Movement NS/Manual file                                      #
@@ -1006,14 +1041,8 @@ class CashReportService:
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
-        # Get session info
-        session_info = self.template_manager.get_session_info(session_id)
-        if not session_info:
-            raise ValueError(f"Session {session_id} not found")
-
-        working_file = self.template_manager.get_working_file_path(session_id)
-        if not working_file:
-            raise ValueError(f"Working file for session {session_id} not found")
+        # Get session info + validate working file exists
+        session_info, working_file = await self._ensure_working_file(session_id)
 
         # Get date range for filtering
         opening_date = None
@@ -1249,7 +1278,7 @@ class CashReportService:
             Nature category string if confidently matched, None if needs AI.
         """
         key_payment, category, _ = self.rule_classifier.classify(description, is_receipt)
-        # Default fallbacks mean no specific keyword matched â†' needs AI
+        # Default fallbacks mean no specific keyword matched -> needs AI
         if key_payment in ("Other receipts", "Other payment"):
             return None
         return category
@@ -1378,7 +1407,8 @@ class CashReportService:
                         continue
 
                     desc_raw = row[0]
-                    nature_raw = row[1]
+                    # File format: desc;debit;credit;nature (nature is LAST column)
+                    nature_raw = row[-1]
                     nature = self._canonical_reference_nature(nature_raw)
                     if not nature:
                         skipped_rows += 1
@@ -1499,6 +1529,21 @@ class CashReportService:
         """
         is_receipt = bool(tx.debit)
         description = (tx.description or "").strip()
+
+        # ── Hard business rules: SHL/BCC repayment, LOAN AGREEMENT, KLHT ──
+        # Must be checked BEFORE settlement patterns to avoid false override.
+        desc_lower_tfidf = description.lower()
+        _shl_bcc_kws = (
+            "repayment of shl", "shl repayment", "shl interest",
+            "lai vay shl", "tra mot phan lai vay",
+            "repayment bcc", "tra lai bcc",
+        )
+        if is_receipt and any(kw in desc_lower_tfidf for kw in _shl_bcc_kws):
+            return "Loan receipts"
+        if is_receipt and "loan agreement" in desc_lower_tfidf:
+            return "Loan receipts"
+        if "klht" in desc_lower_tfidf:
+            return "Refinancing" if is_receipt else "Construction expense"
 
         # ── Settlement patterns: roundness + amount-based nature ──
         # >= 1B (any shape)  → Internal transfer in (settlement flow separates principal/interest)
@@ -1979,7 +2024,32 @@ class CashReportService:
         classified_by = getattr(tx, "_classified_by", "") or ""
         is_reference = classified_by.startswith("reference")
 
+        desc_lower = description.lower()
+
         if is_receipt:
+            # ── Hard business rules: SHL/BCC repayment, LOAN AGREEMENT, KLHT ──
+            # These override ALL other classification (including settlement patterns)
+            # because they are deterministic business rules, not heuristics.
+            _shl_bcc_repay_kws = (
+                "repayment of shl", "shl repayment", "shl interest",
+                "lai vay shl", "tra mot phan lai vay",
+                "repayment bcc", "tra lai bcc",
+            )
+            if any(kw in desc_lower for kw in _shl_bcc_repay_kws):
+                tx.nature = "Loan receipts"
+                tx._classified_by = "rule_guardrail"
+                return
+
+            if "loan agreement" in desc_lower:
+                tx.nature = "Loan receipts"
+                tx._classified_by = "rule_guardrail"
+                return
+
+            if "klht" in desc_lower:
+                tx.nature = "Refinancing"
+                tx._classified_by = "rule_guardrail"
+                return
+
             # Settlement patterns (from Settlement.csv) — explicit curated rules, always override.
             # Roundness + amount-based nature:
             #   >= 1B (any shape)  → Internal transfer in (settlement flow separates)
@@ -2003,14 +2073,18 @@ class CashReportService:
             # Catches cases not covered by specific settlement regex patterns,
             # e.g. "GUI HDTG SO ...", "HOP DONG TIEN GUI ...", "SAVING ACCOUNT ..."
             if (tx.debit or Decimal("0")) >= _UNIT_1B:
-                desc_lower = description.lower()
                 if any(kw in desc_lower for kw in HDTG_DEPOSIT_KEYWORDS):
                     tx.nature = "Internal transfer in"
                     tx._classified_by = "rule_guardrail"
                     return
         else:
+            # ── Hard business rule: KLHT payment → Construction expense ──
+            if "klht" in desc_lower:
+                tx.nature = "Construction expense"
+                tx._classified_by = "rule_guardrail"
+                return
+
             # Intercompany profit-distribution payments should be transfer-out.
-            desc_lower = description.lower()
             if (
                 self._has_dual_entity_transfer(desc_lower)
                 and self._is_profit_distribution_transfer(description)
@@ -2148,7 +2222,7 @@ class CashReportService:
         self._refresh_transactions_reference_index_if_needed()
         self._refresh_tfidf_index_if_needed()
 
-        # â”€â”€ Phase 1: Rule-based classification â”€â”€
+        # â"€â"€ Phase 1: Rule-based classification â"€â"€
         needs_ai_indices = []
         rule_classified = 0
 
@@ -2210,7 +2284,7 @@ class CashReportService:
             ))
             await asyncio.sleep(0)
 
-        # â”€â”€ Phase 2: AI classification for remaining â”€â”€
+        # â"€â"€ Phase 2: AI classification for remaining â"€â"€
         if not needs_ai_indices:
             logger.info("All transactions classified by rules, no AI needed")
             for tx in transactions:
@@ -2467,9 +2541,8 @@ class CashReportService:
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
-        session_info = self.template_manager.get_session_info(session_id)
-        if not session_info:
-            raise ValueError(f"Session {session_id} not found")
+        # Get session info + validate working file exists
+        session_info, _ = await self._ensure_working_file(session_id)
 
         # Get date range for filtering
         opening_date = None
@@ -2604,7 +2677,7 @@ class CashReportService:
         if progress_callback:
             progress_callback(ProgressEvent(
                 event_type="complete", step="preview_ready",
-                message=f"Classification complete â€” review {len(classified)} transactions before confirming",
+                message=f"Classification complete -- review {len(classified)} transactions before confirming",
                 percentage=100,
                 data={"classification_stats": stats},
             ))
@@ -2685,9 +2758,7 @@ class CashReportService:
         if not pending:
             raise ValueError("No pending classifications found. Please upload and preview first.")
 
-        working_file = self.template_manager.get_working_file_path(session_id)
-        if not working_file:
-            raise ValueError(f"Session {session_id} not found")
+        _, working_file = await self._ensure_working_file(session_id)
 
         # Apply user modifications
         modifications_applied = 0
@@ -2719,7 +2790,7 @@ class CashReportService:
                 nature=tx_data["nature"],
             ))
 
-        # Prepare Movement (copy Cash Balance â†’ Prior Period + clear old data) on first write
+        # Prepare Movement (copy Cash Balance -> Prior Period + clear old data) on first write
         is_first_upload = await self._is_first_upload(session_id)
         if is_first_upload:
             from .openpyxl_handler import get_openpyxl_handler
@@ -2739,14 +2810,16 @@ class CashReportService:
         # Clear pending file
         self._clear_pending(session_id)
 
-        return _finish({
+        result = {
             "session_id": session_id,
             "status": "confirmed",
             "total_transactions_written": rows_added,
             "total_rows_in_movement": total_rows,
             "modifications_applied": modifications_applied,
             "classification_stats": pending.get("stats", {}),
-        })
+        }
+
+        return _finish(result)
 
     async def _is_first_upload(self, session_id: str) -> bool:
         """Check if this is the first upload for a session.
@@ -3040,14 +3113,14 @@ class CashReportService:
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
+        _, working_file = await self._ensure_working_file(session_id)
+
         if step:
-            working_file = self.template_manager.get_working_file_path(session_id)
-            if working_file:
-                snapshot = working_file.parent / f"snapshot_{step}.xlsx"
-                if snapshot.exists():
-                    return snapshot
+            snapshot = working_file.parent / f"snapshot_{step}.xlsx"
+            if snapshot.exists():
+                return snapshot
             # Fallback to current working file if snapshot not found
-        return self.template_manager.get_working_file_path(session_id)
+        return working_file
 
     async def list_sessions(self, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """List active sessions from database, filtered by user."""
@@ -3112,8 +3185,9 @@ class CashReportService:
         """
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
-        working_file = self.template_manager.get_working_file_path(session_id)
-        if not working_file:
+        try:
+            _, working_file = await self._ensure_working_file(session_id)
+        except ValueError:
             return []
 
         writer = MovementDataWriter(working_file)
@@ -3137,9 +3211,7 @@ class CashReportService:
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
-        working_file = self.template_manager.get_working_file_path(session_id)
-        if not working_file:
-            raise ValueError(f"Session {session_id} not found")
+        _, working_file = await self._ensure_working_file(session_id)
 
         def _normalize_account_text(value: Any) -> str:
             text = str(value or "").strip().replace("'", "")
@@ -3694,7 +3766,7 @@ class CashReportService:
     @staticmethod
     def _read_acc_char_account_to_code(working_file) -> Dict[str, str]:
         """
-        Read accountâ†’code mapping from Acc_Char sheet columns B (Account No.) and C (CODE).
+        Read account->code mapping from Acc_Char sheet columns B (Account No.) and C (CODE).
         Both are value columns (not formulas), so always reliable.
 
         Returns:
@@ -3808,7 +3880,7 @@ class CashReportService:
     @staticmethod
     def _build_account_entity_map(working_file: str) -> Dict[str, str]:
         """
-        Build current_account â†’ entity_name mapping from Cash Balance sheet.
+        Build current_account -> entity_name mapping from Cash Balance sheet.
 
         Cash Balance columns: A=Entity, C=Account, X=Bank_1.
         These are value columns (not formulas), so always available.
@@ -3848,14 +3920,14 @@ class CashReportService:
                     account_entity[acc_str] = str(entity).strip()
             wb.close()
         except Exception as e:
-            logger.warning(f"Failed to build accountâ†’entity map from Cash Balance: {e}")
-        logger.info(f"Built accountâ†’entity map: {len(account_entity)} entries")
+            logger.warning(f"Failed to build account->entity map from Cash Balance: {e}")
+        logger.info(f"Built account->entity map: {len(account_entity)} entries")
         return account_entity
 
     @staticmethod
     def _read_def_entity_to_code(working_file) -> Dict[str, str]:
         """
-        Read entityâ†’code mapping from the Def sheet.
+        Read entity->code mapping from the Def sheet.
         Def sheet: Row 3 = headers, Row 4+ = data.
         Column A (0) = Abb. (CODE), Column B (1) = Entities (ENTITY).
 
@@ -3984,7 +4056,7 @@ class CashReportService:
     @staticmethod
     def _read_prior_period_branches(working_file) -> Dict[str, List[str]]:
         """
-        Read entityâ†’branches mapping from 'Cash balance (Prior period)' sheet.
+        Read entity->branches mapping from 'Cash balance (Prior period)' sheet.
         Row 3 = headers, Row 4+ = data.
         Column A (0) = ENTITY, Column B (1) = BRANCH.
 
@@ -4029,9 +4101,9 @@ class CashReportService:
         provider_hint: str = "",
     ) -> str:
         """
-        Determine BRANCH for a new saving account by looking up the entity’s
+        Determine BRANCH for a new saving account by looking up the entity's
         branches in Cash Balance (Prior period), then matching with the saving
-        account’s bank prefix.
+        account's bank prefix.
 
         Logic:
         1. If provider_hint is given (from lookup metadata), use it as primary
@@ -4074,7 +4146,7 @@ class CashReportService:
             elif acc.startswith("2") and len(acc) == 12:
                 bank_keyword = "VIETINBANK"
 
-        # Look up entity’s branches
+        # Look up entity's branches
         branches = entity_branches.get((entity or "").upper(), [])
         if branches and bank_keyword:
             for br in branches:
@@ -4093,11 +4165,11 @@ class CashReportService:
         Extract saving account number from description for settlement transactions.
 
         Patterns:
-        - "TAT TOAN TIEN GUI SO 14501110378000" â†’ 14501110378000
-        - "TAT TOAN HDTG RGLH SO... (TK 1059960714)" â†’ 1059960714
-        - "TAT TOAN TAI KHOAN TIEN GUI CO KY HAN SO 218000472157" â†’ 218000472157
-        - "Tra goc TK tien gui 217000486074" â†’ 217000486074
-        - "07003600017772" (bare account number) â†’ 07003600017772
+        - "TAT TOAN TIEN GUI SO 14501110378000" -> 14501110378000
+        - "TAT TOAN HDTG RGLH SO... (TK 1059960714)" -> 1059960714
+        - "TAT TOAN TAI KHOAN TIEN GUI CO KY HAN SO 218000472157" -> 218000472157
+        - "Tra goc TK tien gui 217000486074" -> 217000486074
+        - "07003600017772" (bare account number) -> 07003600017772
 
         Returns:
             Account number string or None
@@ -4120,6 +4192,8 @@ class CashReportService:
 
         # Pattern 2: "SO xxxxxx" at end - "TAT TOAN ... SO 14501110378000"
         # Must have "TAT TOAN" or "TIEN GUI" or "HDTG" context
+        # NOTE: Only match pure-digit accounts. Dot-separated numbers like
+        # "640.2025.41808" are HDTG contract numbers, NOT saving account numbers.
         if re.search(r'TAT\s*TOAN|TIEN\s*GUI|HDTG', description, re.IGNORECASE):
             match = re.search(r'SO\s*(\d{6,20})\s*$', description, re.IGNORECASE)
             if match:
@@ -4130,7 +4204,7 @@ class CashReportService:
                 return match.group(1)
 
         # Pattern 3: "tien gui XXXXXXXX" - account after "tien gui" (VTB "Tra goc" pattern)
-        # E.g., "Tra goc TK tien gui 217000486074" â†’ 217000486074
+        # E.g., "Tra goc TK tien gui 217000486074" -> 217000486074
         match = re.search(r'tien\s*gui\s+(\d{10,20})', description, re.IGNORECASE)
         if match:
             return match.group(1)
@@ -4279,6 +4353,50 @@ class CashReportService:
                     f"{[(m[0]['account'], m[0]['closing_balance_vnd']) for m in partial_matches]}"
                 )
 
+        # Fallback: match by bank + entity + exact closing balance (no maturity required)
+        # When multiple accounts share the same balance, use maturity date as
+        # tiebreaker — pick the one whose maturity is closest to tx_date,
+        # preferring maturity <= tx_date (already matured = most likely settled).
+        if principal and bank_entity_matches:
+            balance_only_matches = [
+                sa for sa in bank_entity_matches
+                if sa.get("closing_balance_vnd") == principal
+            ]
+            if len(balance_only_matches) == 1:
+                best = balance_only_matches[0]
+                logger.info(
+                    f"Settlement: found saving account {best['account']} by "
+                    f"closing_balance={principal} (no maturity constraint), "
+                    f"bank={bank}, entity={entity}"
+                )
+                return best["account"]
+            elif len(balance_only_matches) > 1 and tx_date:
+                # Tiebreak by maturity: prefer matured (mat <= tx_date), then closest
+                def _maturity_sort_key(sa):
+                    mat = sa.get("maturity_date")
+                    if mat is None:
+                        return (1, 9999)  # no maturity → lowest priority
+                    delta = (mat - tx_date).days  # negative = already matured
+                    already_matured = 0 if delta <= 0 else 1
+                    return (already_matured, abs(delta))
+
+                balance_only_matches.sort(key=_maturity_sort_key)
+                best = balance_only_matches[0]
+                logger.info(
+                    f"Settlement: found saving account {best['account']} by "
+                    f"closing_balance={principal}, maturity tiebreak "
+                    f"(maturity={best.get('maturity_date')}, tx_date={tx_date}), "
+                    f"bank={bank}, entity={entity}, "
+                    f"candidates={[(m['account'], m.get('maturity_date')) for m in balance_only_matches]}"
+                )
+                return best["account"]
+            elif len(balance_only_matches) > 1:
+                logger.info(
+                    f"Settlement: {len(balance_only_matches)} balance-only matches for "
+                    f"bank={bank}, entity={entity}, principal={principal}: "
+                    f"{[m['account'] for m in balance_only_matches]}"
+                )
+
         # Fallback: single match by bank + entity
         if len(bank_entity_matches) == 1:
             logger.info(f"Settlement: found saving account {bank_entity_matches[0]['account']} by bank={bank} + entity={entity}")
@@ -4301,8 +4419,8 @@ class CashReportService:
     @staticmethod
     def _has_dual_entity_transfer(desc_lower: str) -> bool:
         """
-        Check if description mentions 2+ different entity codes â†’ internal transfer.
-        Example: "VC3_DC2_TRANSFER MONEY" â†’ VC3 + DC2 = 2 entities.
+        Check if description mentions 2+ different entity codes -> internal transfer.
+        Example: "VC3_DC2_TRANSFER MONEY" -> VC3 + DC2 = 2 entities.
 
         Handles substring overlap: if both "th2" and "th2hc" match,
         "th2" is removed (it's a substring of the longer match).
@@ -4311,7 +4429,7 @@ class CashReportService:
         if len(matched) < 2:
             return False
         # Remove codes that are substrings of longer matched codes
-        # e.g., "th2" inside "th2hc" â†’ only keep "th2hc"
+        # e.g., "th2" inside "th2hc" -> only keep "th2hc"
         filtered = {
             code for code in matched
             if not any(code != other and code in other for other in matched)
@@ -4380,7 +4498,7 @@ class CashReportService:
             if any(kw in desc_lower for kw in HDTG_DEPOSIT_KEYWORDS):
                 return True
 
-        # NOTE: Dual-entity check removed â€” it caused false positives on
+        # NOTE: Dual-entity check removed -- it caused false positives on
         # intercompany transfers (e.g., "INTERNAL TRANSFER FROM VC3 TO DC2").
         # All legitimate settlements are caught by patterns above.
 
@@ -4464,10 +4582,10 @@ class CashReportService:
         Extract saving account number from description for open-new transactions.
 
         Patterns for HDTG/saving account:
-        - "CK den tai khoan 813015095347" â†’ 813015095347
-        - "HDTG SO 123456789" â†’ 123456789
-        - "(TK 123456789)" â†’ 123456789
-        - "GUI HDTG ... SO 123456789" â†’ 123456789
+        - "CK den tai khoan 813015095347" -> 813015095347
+        - "HDTG SO 123456789" -> 123456789
+        - "(TK 123456789)" -> 123456789
+        - "GUI HDTG ... SO 123456789" -> 123456789
 
         Returns:
             Account number string or None
@@ -4506,11 +4624,11 @@ class CashReportService:
         Extract term, interest rate, and maturity date from description.
 
         Examples:
-        - "HDTG 900/2026/47248, KH 01 THANG, LS 4.75%/NAM" â†’ term="1 months", rate=0.0475
-        - "KY HAN 175 NGAY, DEN HAN 24/07/2026" â†’ term="175 days", maturity="2026-07-24"
-        - "TKKH 46 NGAY THEO HD SO 0034.2026" â†’ term="46 days"
-        - "1 THANG THEO HD" â†’ term="1 months"
-        - "LS 4.75%" or "LAI SUAT 4.75%" â†’ rate=0.0475
+        - "HDTG 900/2026/47248, KH 01 THANG, LS 4.75%/NAM" -> term="1 months", rate=0.0475
+        - "KY HAN 175 NGAY, DEN HAN 24/07/2026" -> term="175 days", maturity="2026-07-24"
+        - "TKKH 46 NGAY THEO HD SO 0034.2026" -> term="46 days"
+        - "1 THANG THEO HD" -> term="1 months"
+        - "LS 4.75%" or "LAI SUAT 4.75%" -> rate=0.0475
 
         Returns:
             dict with keys: term_months, term_days, interest_rate, maturity_date (all optional)
@@ -4645,14 +4763,12 @@ class CashReportService:
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
-        working_file = self.template_manager.get_working_file_path(session_id)
-        if not working_file:
-            raise ValueError(f"Session {session_id} not found")
+        _, working_file = await self._ensure_working_file(session_id)
 
         writer = MovementDataWriter(working_file)
         self._refresh_detection_pattern_indexes_if_needed()
 
-        # â”€â”€ Step 1: Scan Movement data â”€â”€
+        # -- Step 1: Scan Movement data --
         emit("step_start", "scanning", "Scanning Movement data...", percentage=0)
         await asyncio.sleep(0.3)  # Allow SSE to deliver step_start
 
@@ -4667,7 +4783,7 @@ class CashReportService:
                 "counter_entries_created": 0,
             })
 
-        # Build current_account â†’ entity mapping from Cash Balance sheet.
+        # Build current_account -> entity mapping from Cash Balance sheet.
         # The Movement sheet's Entity column (J) is formula-based and has no
         # cached values when the file hasn't been opened in Excel, so we
         # resolve entity from Cash Balance (which has value columns).
@@ -4780,7 +4896,7 @@ class CashReportService:
              data={"settlement_found": len(settlement_transactions)})
         await asyncio.sleep(0.4)
 
-        # â”€â”€ Step 3: Lookup saving accounts â”€â”€
+        # â"€â"€ Step 3: Lookup saving accounts â"€â"€
         emit("step_start", "lookup", "Looking up saving accounts...", percentage=40)
         await asyncio.sleep(0.3)
 
@@ -5102,7 +5218,7 @@ class CashReportService:
              })
         await asyncio.sleep(0.4)
 
-        # â”€â”€ Step 5: Cleanup & Finalize â”€â”€
+        # â"€â"€ Step 5: Cleanup & Finalize â"€â"€
         emit("step_start", "cleanup", "Cleaning up zero-balance saving accounts...", percentage=80)
         await asyncio.sleep(0.3)
 
@@ -5172,7 +5288,7 @@ class CashReportService:
         self._save_step_snapshot(session_id, "settlement")
 
         emit("complete", "done",
-             f"Settlement complete â€” {len(counter_entries)} counter entries"
+             f"Settlement complete -- {len(counter_entries)} counter entries"
              + (f", {len(interest_inserts)} interest splits" if interest_inserts else ""),
              percentage=100, data=result)
 
@@ -5247,14 +5363,12 @@ class CashReportService:
         if user_id is not None:
             await self._verify_session_owner(session_id, user_id)
 
-        working_file = self.template_manager.get_working_file_path(session_id)
-        if not working_file:
-            raise ValueError(f"Session {session_id} not found")
+        _, working_file = await self._ensure_working_file(session_id)
 
         writer = MovementDataWriter(working_file)
         self._refresh_detection_pattern_indexes_if_needed()
 
-        # â”€â”€ Step 1: Scan Movement data â”€â”€
+        # â"€â"€ Step 1: Scan Movement data â"€â"€
         emit("step_start", "scanning", "Scanning Movement data for open-new transactions...", percentage=0)
         await asyncio.sleep(0.3)
 
@@ -5269,8 +5383,8 @@ class CashReportService:
                 "counter_entries_created": 0,
             })
 
-        # Build current_account â†’ entity mapping from Cash Balance sheet
-        # (same approach as settlement â€” avoids reliance on formula columns)
+        # Build current_account -> entity mapping from Cash Balance sheet
+        # (same approach as settlement -- avoids reliance on formula columns)
         account_entity_map = self._build_account_entity_map(working_file)
 
         emit("step_complete", "scanning",
@@ -5279,7 +5393,7 @@ class CashReportService:
              data={"total_transactions": len(transactions)})
         await asyncio.sleep(0.4)
 
-        # â”€â”€ Step 2: Detect open-new transactions â”€â”€
+        # â"€â"€ Step 2: Detect open-new transactions â"€â"€
         emit("step_start", "detecting", "Detecting open-new transactions (GROUP B patterns)...", percentage=20)
         await asyncio.sleep(0.3)
 
@@ -5366,7 +5480,7 @@ class CashReportService:
              data={"open_new_found": len(open_new_transactions)})
         await asyncio.sleep(0.4)
 
-        # â”€â”€ Step 3: Load lookup data if provided â”€â”€
+        # â"€â"€ Step 3: Load lookup data if provided â"€â"€
         emit("step_start", "lookup", "Looking up saving accounts...", percentage=40)
         await asyncio.sleep(0.3)
 
@@ -5425,19 +5539,19 @@ class CashReportService:
         acc_char_data = self._read_acc_char_full_data(working_file)
 
         # Load lookup maps for CODE and BRANCH determination
-        # 1) accountâ†'code from Acc_Char Bâ†'C (reliable fallback)
+        # 1) account->code from Acc_Char B->C (reliable fallback)
         account_to_code = self._read_acc_char_account_to_code(working_file)
-        # 2) entityâ†’code from Def sheet (primary CODE source per user spec)
+        # 2) entity->code from Def sheet (primary CODE source per user spec)
         def_entity_to_code = self._read_def_entity_to_code(working_file)
-        # 3) bank aliasâ†’bank name from Def sheet (for BRANCH normalization)
+        # 3) bank alias->bank name from Def sheet (for BRANCH normalization)
         def_bank_alias_to_name = self._read_def_bank_alias_to_name(working_file)
-        # 4) entityâ†’branches from Cash balance (Prior period) for BRANCH
+        # 4) entity->branches from Cash balance (Prior period) for BRANCH
         entity_branches = self._read_prior_period_branches(working_file)
         logger.info(
-            f"Lookups: {len(account_to_code)} accâ†’code, "
-            f"{len(def_entity_to_code)} entâ†’code (Def), "
+            f"Lookups: {len(account_to_code)} acc->code, "
+            f"{len(def_entity_to_code)} ent->code (Def), "
             f"{len(def_bank_alias_to_name)} bank aliases (Def), "
-            f"{len(entity_branches)} entâ†’branches (Prior)",
+            f"{len(entity_branches)} ent->branches (Prior)",
         )
 
         # Check for existing counter entries to avoid duplicates
@@ -6195,7 +6309,7 @@ class CashReportService:
             if desc in existing_descs:
                 # Counter entry already exists in Movement — but we may still need
                 # to create catalog rows (Acc_Char, Saving Account, Cash Balance)
-                # if the saving account hasn’t been registered yet.
+                # if the saving account hasn't been registered yet.
                 pre_existing_acc = _normalize_account_text(
                     existing_counter_accounts.get(desc, "")
                 )
@@ -6285,11 +6399,11 @@ class CashReportService:
                     skipped_duplicate.append(desc)
                 continue
 
-            # Resolve entity from Cash Balance accountâ†’entity map
+            # Resolve entity from Cash Balance account->entity map
             tx_account = str(tx.account).strip() if tx.account else ""
             entity = account_entity_map.get(tx_account, "")
 
-            # If still empty, try Acc_Char â†’ Def reverse lookup
+            # If still empty, try Acc_Char -> Def reverse lookup
             if not entity:
                 code_for_entity = account_to_code.get(tx_account, "")
                 if code_for_entity:
@@ -6583,15 +6697,15 @@ class CashReportService:
                 account=saving_acc,
                 date=tx.date,
                 description=tx.description or "",
-                debit=tx.credit,  # Swap: original credit â†' counter debit
+                debit=tx.credit,  # Swap: original credit -> counter debit
                 credit=Decimal("0"),
                 nature="Internal transfer in",
             )
             counter_entries.append(counter)
             original_row_indices.append(row_idx)
 
-            # Look up CODE from Def sheet (primary): entity â†’ code
-            # Fallback: Acc_Char accountâ†’code using CURRENT account (tx.account)
+            # Look up CODE from Def sheet (primary): entity -> code
+            # Fallback: Acc_Char account->code using CURRENT account (tx.account)
             code = ""
             if entity:
                 code = def_entity_to_code.get(entity.upper(), "")
@@ -6772,7 +6886,7 @@ class CashReportService:
                 "saving_account_lookup_sync": saving_lookup_sync,
             })
 
-        # â”€â”€ Step 4: Create counter entries â”€â”€
+        # â"€â"€ Step 4: Create counter entries â"€â"€
         rows_added = 0
         if counter_entries:
             emit("step_start", "writing", f"Creating {len(counter_entries)} counter entries...", percentage=60)
@@ -6795,7 +6909,7 @@ class CashReportService:
                  data={"rows_added": rows_added})
             await asyncio.sleep(0.4)
 
-        # â”€â”€ Step 4.5: Add rows to Acc_Char, Saving Account, Cash Balance (B1-B3) â”€â”€
+        # â"€â"€ Step 4.5: Add rows to Acc_Char, Saving Account, Cash Balance (B1-B3) â"€â"€
         # Batch: ONE ZIP read/write for all 3 sheets
         emit("step_start", "catalog",
              "Adding new saving accounts to catalog sheets (Acc_Char, Saving Account, Cash Balance)...",
@@ -6897,7 +7011,7 @@ class CashReportService:
             )
             await asyncio.sleep(0.2)
 
-        # â”€â”€ Step 5: Finalize â”€â”€
+        # â"€â"€ Step 5: Finalize â"€â"€
         if self.db_session:
             db_result = await self.db_session.execute(
                 select(CashReportSessionModel).where(
@@ -6940,7 +7054,7 @@ class CashReportService:
         self._save_step_snapshot(session_id, "open_new")
 
         emit("complete", "done",
-             f"Open-new complete â€” {rows_added} entries, {acc_char_added} new accounts added",
+             f"Open-new complete -- {rows_added} entries, {acc_char_added} new accounts added",
              percentage=100, data=result)
 
         return _finish(result)
@@ -7504,7 +7618,7 @@ class CashReportService:
     ) -> Dict[str, Any]:
         """
         Run settlement + open-new automation using the test template
-        (cash_report_for_test.xlsx). No AI calls needed â€” natures are pre-classified.
+        (cash_report_for_test.xlsx). No AI calls needed -- natures are pre-classified.
 
         Creates a temporary session, runs both automations, returns combined results.
         The test session stays available for download until manually deleted.
@@ -7624,4 +7738,233 @@ class CashReportService:
             emit("error", "error", str(e))
             logger.exception("Test automation failed")
             raise
+
+    # ==================== Approve & Export Transactions ====================
+
+    def _check_summary_validation(self, working_file: Path) -> Dict[str, Any]:
+        """
+        Read Summary sheet row 109 "Test E.O.P" cached values.
+        Columns: B=BWID JSC, C=VC3, D=Subsidiaries, E=Total.
+
+        Returns dict: {"valid": bool, "details": {col_name: value}}
+
+        NOTE: Cached values may be stale if the file was never opened in Excel
+        after data was written. Use the manual approve endpoint with force=true
+        as fallback.
+        """
+        import openpyxl as _openpyxl
+
+        wb = _openpyxl.load_workbook(working_file, data_only=True, read_only=True)
+        try:
+            ws = wb["Summary"]
+            col_names = {2: "BWID JSC", 3: "VC3", 4: "Subsidiaries", 5: "Total"}
+            details = {}
+            all_true = True
+            for row in ws.iter_rows(min_row=109, max_row=109, min_col=2, max_col=5):
+                for cell in row:
+                    col_name = col_names.get(cell.column, f"Col{cell.column}")
+                    val = cell.value
+                    # Accept: True, 1, "TRUE", "true"
+                    is_true = val is True or val == 1 or str(val).strip().upper() == "TRUE"
+                    details[col_name] = val
+                    if not is_true:
+                        all_true = False
+        finally:
+            wb.close()
+
+        return {"valid": all_true, "details": details}
+
+    def _check_all_natures_valid(
+        self, transactions: List["MovementTransaction"]
+    ) -> Dict[str, Any]:
+        """
+        Validate that all transactions have valid, known natures.
+        This is a necessary condition for correct classification —
+        if any transaction has empty/unknown nature, data quality is suspect.
+
+        Returns: {"valid": bool, "invalid_count": int, "invalid_natures": list}
+        """
+        all_categories = ALL_PAYMENT_CATEGORIES | ALL_RECEIPT_CATEGORIES
+        invalid_natures = []
+        for tx in transactions:
+            nature = (tx.nature or "").strip()
+            if not nature or nature not in all_categories:
+                invalid_natures.append(
+                    f"{(tx.description or '')[:50]}... → '{nature}'"
+                )
+        return {
+            "valid": len(invalid_natures) == 0,
+            "invalid_count": len(invalid_natures),
+            "invalid_natures": invalid_natures[:10],  # limit for readability
+        }
+
+    async def approve_and_export_transactions(
+        self,
+        session_id: str,
+        user_id: Optional[int] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Approve a session's classifications and append verified transactions
+        to Transactions.csv for future ground-truth classification.
+
+        Validates Summary "Test E.O.P" = TRUE for all entities before proceeding.
+        Deduplicates by (description, direction).
+        If same description exists with different nature, updates it.
+
+        Args:
+            session_id: The session ID to approve
+            user_id: Owner user ID for access control
+            force: Skip Summary validation check
+
+        Returns:
+            Dict with stats: appended, updated, skipped, total
+        """
+        if user_id is not None:
+            await self._verify_session_owner(session_id, user_id)
+
+        _, working_file = await self._ensure_working_file(session_id)
+
+        writer = MovementDataWriter(working_file)
+        transactions = writer.get_all_transactions()
+
+        # Validate: all natures must be valid known categories
+        if not force:
+            nature_check = self._check_all_natures_valid(transactions)
+            if not nature_check["valid"]:
+                raise ValueError(
+                    f"{nature_check['invalid_count']} transactions have invalid natures: "
+                    f"{nature_check['invalid_natures']}. Use force=true to override."
+                )
+            summary_check = self._check_summary_validation(working_file)
+            if not summary_check["valid"]:
+                failed = {
+                    k: v for k, v in summary_check["details"].items()
+                    if not (v is True or v == 1 or str(v).strip().upper() == "TRUE")
+                }
+                raise ValueError(
+                    f"Summary validation failed. These columns are not TRUE: "
+                    f"{failed}. Use force=true to override."
+                )
+
+        if not transactions:
+            return {"appended": 0, "updated": 0, "skipped": 0, "total": 0}
+
+        # Filter: only require non-empty description and nature
+        valid_transactions = [
+            tx for tx in transactions
+            if (tx.description or "").strip()
+            and (tx.nature or "").strip()
+        ]
+
+        if not valid_transactions:
+            return {"appended": 0, "updated": 0, "skipped": 0, "total": 0}
+
+        # Load existing CSV into lookup dict
+        csv_path = TRANSACTIONS_REFERENCE_FILE
+        existing: Dict[Tuple[str, bool], Tuple[int, str, str]] = {}
+        # {(normalized_desc, is_receipt): (line_index, raw_line, nature)}
+        all_lines: list = []
+
+        if csv_path.exists():
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+                all_lines = f.readlines()
+
+            reader = csv.reader(all_lines[1:], delimiter=";")  # skip header
+            for i, row in enumerate(reader):
+                if not row or len(row) < 2:
+                    continue
+                desc_raw = row[0]
+                # File format: desc;debit;credit;nature (nature is LAST column)
+                nature_raw = row[-1]
+                nature = self._canonical_reference_nature(nature_raw)
+                if not nature:
+                    continue
+                is_receipt = self._is_receipt_nature(nature)
+                desc_norm = self._normalize_reference_description(desc_raw)
+                if desc_norm:
+                    existing[(desc_norm, is_receipt)] = (i + 1, all_lines[i + 1], nature)
+
+        appended = 0
+        updated = 0
+        skipped = 0
+        lines_to_update: Dict[int, str] = {}  # line_index → new line content
+        lines_to_append: list = []
+
+        for tx in valid_transactions:
+            # Strip newlines — multi-line descriptions break CSV row structure
+            desc = re.sub(r"[\r\n]+", " ", (tx.description or "")).strip()
+            nature = (tx.nature or "").strip()
+            canonical = self._canonical_reference_nature(nature)
+            if not canonical or not desc:
+                skipped += 1
+                continue
+
+            is_receipt = bool(tx.debit)
+            desc_norm = self._normalize_reference_description(desc)
+            key = (desc_norm, is_receipt)
+
+            debit_str = str(tx.debit) if tx.debit else ""
+            credit_str = str(tx.credit) if tx.credit else ""
+
+            if key in existing:
+                _, _, existing_nature = existing[key]
+                if existing_nature == canonical:
+                    skipped += 1
+                    continue
+                # Nature changed → update
+                line_idx = existing[key][0]
+                # Format: desc;debit;credit;nature (matching existing file format)
+                new_line = f"{desc};{debit_str};{credit_str};{canonical}\n"
+                lines_to_update[line_idx] = new_line
+                existing[key] = (line_idx, new_line, canonical)
+                updated += 1
+            else:
+                new_line = f"{desc};{debit_str};{credit_str};{canonical}\n"
+                lines_to_append.append(new_line)
+                existing[key] = (-1, new_line, canonical)
+                appended += 1
+
+        # Write atomically: update in-place + append new
+        if lines_to_update or lines_to_append:
+            # Apply in-place updates
+            for idx, new_content in lines_to_update.items():
+                if idx < len(all_lines):
+                    all_lines[idx] = new_content
+
+            # Ensure header exists (preserve original if already valid)
+            if not all_lines:
+                all_lines = ["Bank description;Debit;Credit;Nature\n"]
+
+            # Append new lines
+            all_lines.extend(lines_to_append)
+
+            # Atomic write: temp file → rename
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=csv_path.parent, suffix=".csv.tmp"
+            )
+            try:
+                with open(tmp_fd, "w", encoding="utf-8-sig", newline="") as f:
+                    f.writelines(all_lines)
+                Path(tmp_path).replace(csv_path)
+            except Exception:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+
+            # Rebuild index to pick up new entries
+            self._rebuild_transactions_reference_index()
+
+            logger.info(
+                "Approved transactions for session %s: appended=%d, updated=%d, "
+                "skipped=%d, total_user_tx=%d",
+                session_id, appended, updated, skipped, len(valid_transactions),
+            )
+
+        return {
+            "appended": appended,
+            "updated": updated,
+            "skipped": skipped,
+            "total": len(valid_transactions),
+        }
 

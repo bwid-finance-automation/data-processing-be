@@ -155,7 +155,8 @@ class TfidfNatureClassifier:
                     if not row or len(row) < 2:
                         continue
                     desc_raw = row[0].strip()
-                    nature_raw = row[1].strip()
+                    # File format: desc;debit;credit;nature (nature is LAST column)
+                    nature_raw = row[-1].strip()
 
                     nature = self._canonical_nature(nature_raw)
                     if not nature or not desc_raw:

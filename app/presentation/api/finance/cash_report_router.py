@@ -143,6 +143,15 @@ async def init_session(
         raise
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=f"Master template not found: {e}")
+    except ValueError as e:
+        err_msg = str(e)
+        # User-friendly messages for common template validation errors
+        if "Summary" in err_msg or "sheet not found" in err_msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid template file: required sheets (Summary, Cash Balance, Movement, etc.) not found. Please upload a valid Cash Report template.",
+            )
+        raise HTTPException(status_code=400, detail=err_msg)
     except Exception as e:
         logger.error(f"Error initializing session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1331,3 +1340,26 @@ async def get_cache_stats(
         "connected": False,
         "message": "Redis cache is disabled for Cash Report module.",
     }
+
+
+@router.post("/approve-transactions/{session_id}")
+async def approve_transactions(
+    session_id: str,
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    """
+    Approve a session's classifications and export verified transactions
+    to Transactions.csv for future ground-truth classification.
+
+    Automatically validates Summary "Test E.O.P" = TRUE for all entities.
+    If validation fails, returns error. Use force=true to override.
+    """
+    service = CashReportService(db_session=db)
+    result = await service.approve_and_export_transactions(
+        session_id=session_id,
+        user_id=current_user.id,
+        force=force,
+    )
+    return {"success": True, **result}
