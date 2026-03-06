@@ -1312,10 +1312,11 @@ class CashReportService:
         Map external keyword category to canonical Nature for receipt/payment direction.
         Returns None when the category is not valid for the transaction direction.
         """
-        category = (raw_category or "").strip()
+        category = (raw_category or "").replace("\u00A0", " ").strip()
         if not category:
             return None
 
+        category = TRANSACTION_NATURE_ALIASES.get(category, category)
         category_lower = category.lower()
         if category_lower == "internal transfer":
             return "Internal transfer in" if is_receipt else "Internal transfer out"

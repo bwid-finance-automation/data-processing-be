@@ -48,6 +48,32 @@ class OpenpyxlHandler:
     FORMULA_COLUMNS = [8, 10, 11, 12, 13, 14, 15, 16]  # H, J, K, L, M, N, O, P
 
     FIRST_DATA_ROW = 4
+    SUMMARY_TEXT_NORMALIZATIONS = {
+        # Canonicalize Summary Nature labels so SUMIFS always match Movement.
+        "A80": "Receipt from tenants",
+        "A81": "Refund land/deal deposit payment",
+        "A82": "Refinancing",
+        "A83": "Loan drawdown",
+        "A84": "VAT refund",
+        "A85": "Corporate Loan drawdown",
+        "A86": "Loan receipts",
+        "A87": "Contribution",
+        "A88": "Other receipts",
+        "A90": "Internal transfer in",
+        "A91": "Internal contribution in",
+        "A92": "Dividend receipt (inside group)",
+        "A93": "Cash received from acquisition",
+        "A96": "Land acquisition",
+        "A97": "Deal payment",
+        "A98": "Construction expense",
+        "A99": "Operating expense",
+        "A100": "Loan repayment",
+        "A101": "Loan interest",
+        "A103": "Internal transfer out",
+        "A104": "Internal contribution out",
+        "A105": "Dividend paid (inside group)",
+        "A106": "Payment for acquisition",
+    }
 
     def __init__(self):
         self._formula_cache: Dict[str, Dict[int, str]] = {}
@@ -2561,10 +2587,20 @@ class OpenpyxlHandler:
             "B5": (self._date_to_serial(opening_date), True),
             "B6": (self._date_to_serial(ending_date), True),
         }
+        updates.update(
+            {
+                ref: (value, False)
+                for ref, value in self.SUMMARY_TEXT_NORMALIZATIONS.items()
+            }
+        )
+        target_rows = {
+            "".join(ch for ch in ref if ch.isdigit())
+            for ref in updates
+        }
 
         for row_el in sheet_data:
             row_num = row_el.get("r")
-            if row_num not in ("1", "2", "3", "4", "5", "6"):
+            if row_num not in target_rows:
                 continue
 
             for cell in row_el:
