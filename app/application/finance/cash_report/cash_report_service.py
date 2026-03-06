@@ -29,6 +29,7 @@ from app.domain.finance.cash_report.services.ai_classifier import (
     AITransactionClassifier,
     ALL_PAYMENT_CATEGORIES,
     ALL_RECEIPT_CATEGORIES,
+    get_keyword_rules_file_mtime,
 )
 from app.domain.finance.cash_report.services.tfidf_classifier import TfidfNatureClassifier
 from app.domain.finance.cash_report.models.key_payment import KeyPaymentClassifier
@@ -154,7 +155,9 @@ class ExternalKeywordRule:
 # Keep these narrow to avoid broad side effects.
 CA_TARGET_NORMALIZED = "ca target"
 BIDV_IBANK_WITHDRAWAL_NORMALIZED = "rut tien gui online tren bidv ibank"
-BIDV_IBANK_WITHDRAWAL_RECEIPT_ACCOUNTS = frozenset({"2221133456"})
+BIDV_IBANK_WITHDRAWAL_RECEIPT_EXCEPTIONS = frozenset({
+    ("2221133456", Decimal("8000526028")),
+})
 
 # Natures eligible for settlement detection.
 SETTLEMENT_ELIGIBLE_NATURES = frozenset({
@@ -178,6 +181,8 @@ NUMERIC_ACCOUNT_DESC_RE = _re.compile(r"^\d{10,20}$")
 TRANSACTIONS_REFERENCE_FILE = Path(__file__).resolve().parents[4] / "movement_nature_filter" / "Transactions.csv"
 SETTLEMENT_REFERENCE_FILE = Path(__file__).resolve().parents[4] / "movement_nature_filter" / "Settlement.csv"
 OPEN_NEW_REFERENCE_FILE = Path(__file__).resolve().parents[4] / "movement_nature_filter" / "OpenNew.csv"
+DEF_REFERENCE_FILE = Path(__file__).resolve().parents[4] / "movement_nature_filter" / "Def.csv"
+DEF_ENTITY_CODES_FILE = Path(__file__).resolve().parents[4] / "movement_nature_filter" / "Def Entity Codes.csv"
 
 # Keep these exclusions even when loading patterns from OpenNew.csv.
 # They are known non-open-new movements and caused false positives in production.
@@ -249,8 +254,23 @@ ENTITY_CODES = [
     "n4a", "n4b", "n4c", "n4d", "n4e",
     "lmx", "dc2", "pat", "st2", "tde", "mpl", "nas", "lbn",
     # Additional codes found in settlement descriptions
-    "pae", "pdhd", "pde", "wl2b", "shl",
+    "pae", "pdhd", "pde", "wl2b", "shl", "s4c", "s5c",
 ]
+
+DUAL_ENTITY_PREFIX_SUFFIXES = (
+    "transfer",
+    "repayment",
+    "payment",
+    "reimbursement",
+    "reimburse",
+    "loan",
+    "agreement",
+    "bcc",
+    "shl",
+    "cash",
+    "interest",
+    "fee",
+)
 
 # â"€â"€ Open New Saving Account patterns (Group B - Gá»­i tiá»n / Má»Ÿ HDTG) â"€â"€
 # Used to detect transactions that open new saving accounts.
@@ -342,6 +362,8 @@ class CashReportService:
         self.statement_reader = BankStatementReader()
         self.ai_classifier = AITransactionClassifier()
         self.rule_classifier = KeyPaymentClassifier()
+        self._entity_codes = self._build_entity_code_index()
+        self._entity_codes_mtime = self._get_entity_code_lookup_mtime()
         self._rules_file_mtime = self._get_rules_file_mtime()
         self._external_keyword_index = self._build_external_keyword_index()
         self._settlement_rules_mtime: Optional[float] = None
@@ -1530,10 +1552,17 @@ class CashReportService:
         """
         is_receipt = bool(tx.debit)
         description = (tx.description or "").strip()
-
-        # ── Hard business rules: SHL/BCC repayment, LOAN AGREEMENT, KLHT ──
-        # Must be checked BEFORE settlement patterns to avoid false override.
         desc_lower_tfidf = description.lower()
+
+        if "klht" in desc_lower_tfidf:
+            return "Refinancing" if is_receipt else "Construction expense"
+
+        dual_entity_nature = self._classify_dual_entity_transfer(description, is_receipt)
+        if dual_entity_nature:
+            return dual_entity_nature
+
+        # ?????? Hard business rules: SHL/BCC repayment, LOAN AGREEMENT ??????
+        # Must be checked BEFORE settlement patterns to avoid false override.
         _shl_bcc_kws = (
             "repayment of shl", "shl repayment", "shl interest",
             "lai vay shl", "tra mot phan lai vay",
@@ -1543,8 +1572,6 @@ class CashReportService:
             return "Loan receipts"
         if is_receipt and "loan agreement" in desc_lower_tfidf:
             return "Loan receipts"
-        if "klht" in desc_lower_tfidf:
-            return "Refinancing" if is_receipt else "Construction expense"
 
         # ── Settlement patterns: roundness + amount-based nature ──
         # >= 1B (any shape)  → Internal transfer in (settlement flow separates principal/interest)
@@ -1605,12 +1632,11 @@ class CashReportService:
             if CA_TARGET_NORMALIZED in desc_norm:
                 return "Receipt from tenants" if amount >= _UNIT_1B else "Other receipts"
 
-            # BIDV iBank withdrawal for known account 2221133456 behaves as
-            # receipt-side interest on non-round amounts.
+            # Preserve known historical outliers without broad account-level overrides.
             account_norm = re.sub(r"\D+", "", str(account or ""))
             if (
                 BIDV_IBANK_WITHDRAWAL_NORMALIZED in desc_norm
-                and account_norm in BIDV_IBANK_WITHDRAWAL_RECEIPT_ACCOUNTS
+                and (account_norm, amount) in BIDV_IBANK_WITHDRAWAL_RECEIPT_EXCEPTIONS
             ):
                 return "Receipt from tenants"
 
@@ -1809,10 +1835,7 @@ class CashReportService:
         rules_file = getattr(self.ai_classifier, "_rules_file", None)
         if not rules_file:
             return None
-        try:
-            return Path(rules_file).stat().st_mtime
-        except OSError:
-            return None
+        return get_keyword_rules_file_mtime(Path(rules_file))
 
     def _refresh_external_keyword_index_if_needed(self) -> None:
         """
@@ -1956,6 +1979,14 @@ class CashReportService:
             return
         self._reload_detection_pattern_indexes()
 
+    def _refresh_entity_code_index_if_needed(self) -> None:
+        """Reload dual-entity lookup CSV when it changes."""
+        current_mtime = self._get_entity_code_lookup_mtime()
+        if current_mtime == self._entity_codes_mtime:
+            return
+        self._entity_codes = self._build_entity_code_index()
+        self._entity_codes_mtime = current_mtime
+
     @staticmethod
     def _keyword_matches_description(
         description_norm: str,
@@ -2026,6 +2057,17 @@ class CashReportService:
         is_reference = classified_by.startswith("reference")
 
         desc_lower = description.lower()
+
+        if "klht" in desc_lower:
+            tx.nature = "Refinancing" if is_receipt else "Construction expense"
+            tx._classified_by = "rule_guardrail"
+            return
+
+        dual_entity_nature = self._classify_dual_entity_transfer(description, is_receipt)
+        if dual_entity_nature:
+            tx.nature = dual_entity_nature
+            tx._classified_by = "rule_guardrail"
+            return
 
         if is_receipt:
             # ── Hard business rules: SHL/BCC repayment, LOAN AGREEMENT, KLHT ──
@@ -2219,6 +2261,7 @@ class CashReportService:
             return []
 
         self._refresh_detection_pattern_indexes_if_needed()
+        self._refresh_entity_code_index_if_needed()
         self._refresh_external_keyword_index_if_needed()
         self._refresh_transactions_reference_index_if_needed()
         self._refresh_tfidf_index_if_needed()
@@ -4418,24 +4461,143 @@ class CashReportService:
         return None
 
     @staticmethod
-    def _has_dual_entity_transfer(desc_lower: str) -> bool:
+    def _load_entity_codes_from_csv(csv_path: Path) -> set[str]:
+        """Read entity codes from a dedicated CSV lookup file."""
+        codes: set[str] = set()
+        if not csv_path.exists():
+            return codes
+
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.reader(handle, delimiter=";"))
+
+            header_idx = None
+            for idx, row in enumerate(rows):
+                normalized = {str(cell or "").strip().lower() for cell in row}
+                if {"code", "entity"} <= normalized or {"abb.", "entities"} <= normalized or {"abb", "entities"} <= normalized:
+                    header_idx = idx
+                    break
+
+            if header_idx is None:
+                return codes
+
+            header = [str(cell or "").strip() for cell in rows[header_idx]]
+            normalized_header = [cell.lower() for cell in header]
+
+            code_idx = None
+            for idx, cell in enumerate(normalized_header):
+                if cell not in {"code", "abb", "abb."}:
+                    continue
+                right_cell = normalized_header[idx + 1] if idx + 1 < len(normalized_header) else ""
+                if right_cell in {"entity", "entities"}:
+                    code_idx = idx
+                    break
+
+            if code_idx is None:
+                for idx, cell in enumerate(normalized_header):
+                    if cell in {"code", "abb", "abb."}:
+                        code_idx = idx
+                        break
+
+            if code_idx is None:
+                return codes
+
+            for row in rows[header_idx + 1:]:
+                if not any(str(cell or "").strip() for cell in row):
+                    continue
+                code = row[code_idx] if code_idx < len(row) else ""
+                code_norm = str(code).strip().lower()
+                if code_norm:
+                    codes.add(code_norm)
+        except Exception as exc:
+            logger.warning(f"Failed to read Def entity CSV {csv_path}: {exc}")
+
+        return codes
+
+    @staticmethod
+    def _tokenize_entity_description(description: str) -> List[str]:
+        """Tokenize description for entity-code matching."""
+        return [token for token in CashReportService._normalize_text_for_match(description).split() if token]
+
+    def _build_entity_code_index(self) -> frozenset[str]:
+        """Build entity-code lookup from CSV first, then template Def, then static fallback."""
+        codes = {str(code).strip().lower() for code in ENTITY_CODES if str(code).strip()}
+        for csv_path in (DEF_REFERENCE_FILE, DEF_ENTITY_CODES_FILE):
+            codes.update(self._load_entity_codes_from_csv(csv_path))
+
+        master_template = getattr(self.template_manager, "master_template_path", None)
+        if master_template:
+            def_entity_to_code = self._read_def_entity_to_code(master_template)
+            codes.update(
+                str(code).strip().lower()
+                for code in def_entity_to_code.values()
+                if str(code).strip()
+            )
+
+        return frozenset(codes)
+
+    def _get_entity_code_lookup_mtime(self) -> Optional[float]:
+        """Track the latest mtime across entity lookup CSVs."""
+        mtimes = [
+            self._get_file_mtime(DEF_REFERENCE_FILE),
+            self._get_file_mtime(DEF_ENTITY_CODES_FILE),
+        ]
+        mtimes = [mtime for mtime in mtimes if mtime is not None]
+        return max(mtimes) if mtimes else None
+
+    def _extract_entity_codes(self, description: str) -> set[str]:
+        """Extract entity codes from description using exact tokens and safe prefixes."""
+        tokens = self._tokenize_entity_description(description)
+        if not tokens:
+            return set()
+
+        codes = getattr(
+            self,
+            "_entity_codes",
+            frozenset(str(code).strip().lower() for code in ENTITY_CODES if str(code).strip()),
+        )
+        if not codes:
+            return set()
+
+        sorted_codes = sorted(codes, key=len, reverse=True)
+        matched: set[str] = set()
+
+        def _starts_with_other_code(text: str) -> bool:
+            return any(text.startswith(code) for code in sorted_codes)
+
+        for token in tokens:
+            if token in codes:
+                matched.add(token)
+                continue
+
+            for code in sorted_codes:
+                if not token.startswith(code) or token == code:
+                    continue
+                remainder = token[len(code):]
+                if (
+                    remainder
+                    and (
+                        _starts_with_other_code(remainder)
+                        or any(remainder.startswith(prefix) for prefix in DUAL_ENTITY_PREFIX_SUFFIXES)
+                    )
+                ):
+                    matched.add(code)
+                    break
+
+        return matched
+
+    def _has_dual_entity_transfer(self, description: str) -> bool:
         """
         Check if description mentions 2+ different entity codes -> internal transfer.
         Example: "VC3_DC2_TRANSFER MONEY" -> VC3 + DC2 = 2 entities.
-
-        Handles substring overlap: if both "th2" and "th2hc" match,
-        "th2" is removed (it's a substring of the longer match).
         """
-        matched = {code for code in ENTITY_CODES if code in desc_lower}
-        if len(matched) < 2:
-            return False
-        # Remove codes that are substrings of longer matched codes
-        # e.g., "th2" inside "th2hc" -> only keep "th2hc"
-        filtered = {
-            code for code in matched
-            if not any(code != other and code in other for other in matched)
-        }
-        return len(filtered) >= 2
+        return len(self._extract_entity_codes(description)) >= 2
+
+    def _classify_dual_entity_transfer(self, description: str, is_receipt: bool) -> Optional[str]:
+        """Descriptions containing 2+ internal entity codes are transfer flows."""
+        if not self._has_dual_entity_transfer(description):
+            return None
+        return "Internal transfer in" if is_receipt else "Internal transfer out"
 
     def _is_profit_distribution_transfer(self, description: str) -> bool:
         """Detect profit-distribution wording in transfer descriptions."""

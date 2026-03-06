@@ -14,6 +14,7 @@ import csv
 import json
 import os
 import hashlib
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
@@ -60,6 +61,68 @@ ALL_CATEGORIES = ALL_PAYMENT_CATEGORIES | ALL_RECEIPT_CATEGORIES
 # ai_classifier.py is at: app/domain/finance/cash_report/services/ai_classifier.py
 # parents: [0]=services, [1]=cash_report, [2]=finance, [3]=domain, [4]=app, [5]=project_root
 _PROJECT_ROOT = Path(__file__).resolve().parents[5]
+PRIMARY_RULES_FILE = _PROJECT_ROOT / "movement_nature_filter" / "Key Words CSV.csv"
+FREQUENTLY_UPDATED_RULES_FILE = (
+    _PROJECT_ROOT / "movement_nature_filter" / "Key Words ((Frequently Update).csv"
+)
+LEGACY_RULES_FILE = _PROJECT_ROOT / "movement_nature_filter" / "Key Words.csv"
+
+
+def _read_csv_text_for_compare(file_path: Path) -> str:
+    """Read CSV text with normalized newlines for content comparison."""
+    with file_path.open("r", encoding="utf-8-sig", newline="") as f:
+        return f.read().replace("\r\n", "\n").replace("\r", "\n")
+
+
+def ensure_latest_keyword_rules_file(file_path: Optional[Path] = None) -> Path:
+    """
+    Keep Key Words CSV.csv synced from the finance-maintained frequently-updated file.
+
+    The frequently-updated file is treated as the source of truth when it exists.
+    We still copy it into Key Words CSV.csv so the rest of the codebase can keep
+    using the long-standing active rules file path.
+    """
+    requested_path = Path(file_path) if file_path else PRIMARY_RULES_FILE
+
+    if FREQUENTLY_UPDATED_RULES_FILE.exists():
+        target_path = PRIMARY_RULES_FILE
+        try:
+            source_text = _read_csv_text_for_compare(FREQUENTLY_UPDATED_RULES_FILE)
+            target_text = (
+                _read_csv_text_for_compare(target_path)
+                if target_path.exists()
+                else None
+            )
+            if source_text != target_text:
+                shutil.copyfile(FREQUENTLY_UPDATED_RULES_FILE, target_path)
+                logger.info(
+                    "Synced keyword rules from %s -> %s",
+                    FREQUENTLY_UPDATED_RULES_FILE,
+                    target_path,
+                )
+        except Exception as e:
+            logger.warning("Failed to sync frequently-updated keyword rules: %s", e)
+
+        if requested_path in {PRIMARY_RULES_FILE, LEGACY_RULES_FILE}:
+            return target_path
+        return requested_path
+
+    if requested_path.exists():
+        return requested_path
+    if PRIMARY_RULES_FILE.exists():
+        return PRIMARY_RULES_FILE
+    if LEGACY_RULES_FILE.exists():
+        return LEGACY_RULES_FILE
+    return PRIMARY_RULES_FILE
+
+
+def get_keyword_rules_file_mtime(file_path: Optional[Path] = None) -> Optional[float]:
+    """Return mtime after syncing from the frequently-updated source when available."""
+    path = ensure_latest_keyword_rules_file(file_path)
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def _resolve_default_rules_file() -> Path:
@@ -67,15 +130,7 @@ def _resolve_default_rules_file() -> Path:
     Resolve default keyword-rules CSV path.
     Prefer the current finance-maintained file name, fallback to legacy.
     """
-    candidates = [
-        _PROJECT_ROOT / "movement_nature_filter" / "Key Words CSV.csv",
-        _PROJECT_ROOT / "movement_nature_filter" / "Key Words.csv",
-    ]
-    for path in candidates:
-        if path.exists():
-            return path
-    # Deterministic fallback when file is temporarily missing.
-    return candidates[0]
+    return ensure_latest_keyword_rules_file(PRIMARY_RULES_FILE)
 
 
 DEFAULT_RULES_FILE = _resolve_default_rules_file()
@@ -95,6 +150,7 @@ def load_keyword_rules_from_csv(file_path: Path) -> Dict[str, List[str]]:
         Dict of category → list of keywords
     """
     rules: Dict[str, List[str]] = defaultdict(list)
+    file_path = ensure_latest_keyword_rules_file(file_path)
 
     if not file_path.exists():
         logger.warning(f"Rules CSV not found: {file_path}")
@@ -188,7 +244,7 @@ class AITransactionClassifier:
         self._cache_stats = {"cache_hit": 0, "api_call": 0}  # Track cache hits vs API calls
 
         # Load keyword rules from CSV
-        rules_path = rules_file or DEFAULT_RULES_FILE
+        rules_path = ensure_latest_keyword_rules_file(rules_file or DEFAULT_RULES_FILE)
         self._keyword_rules = load_keyword_rules_from_csv(rules_path)
         self._keyword_rules_prompt = build_keyword_rules_prompt(self._keyword_rules)
         self._rules_file = rules_path
@@ -215,9 +271,10 @@ class AITransactionClassifier:
         Returns:
             Total number of keywords loaded
         """
-        path = rules_file or self._rules_file
+        path = ensure_latest_keyword_rules_file(rules_file or self._rules_file)
         self._keyword_rules = load_keyword_rules_from_csv(path)
         self._keyword_rules_prompt = build_keyword_rules_prompt(self._keyword_rules)
+        self._rules_file = path
         total = sum(len(kws) for kws in self._keyword_rules.values())
         logger.info(f"Reloaded {total} keywords from {path}")
         return total
