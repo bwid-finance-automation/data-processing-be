@@ -171,8 +171,9 @@ def _evaluate_file(parser: VIBParser, file_name: str, text: str) -> List[Section
                 missing_ids.append(tx_id)
                 continue
             matched += 1
-            parser_wd += tx.debit or 0.0
-            parser_dep += tx.credit or 0.0
+            # System convention: debit = money in (deposit), credit = money out (withdrawal).
+            parser_wd += tx.credit or 0.0
+            parser_dep += tx.debit or 0.0
 
         predicted_close = None if opening is None else (opening + parser_dep - parser_wd)
         wd_err = None if sum_wd is None else abs(parser_wd - sum_wd)

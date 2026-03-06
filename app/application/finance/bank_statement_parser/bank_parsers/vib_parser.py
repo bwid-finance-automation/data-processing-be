@@ -86,7 +86,7 @@ class VIBParser(BaseBankParser):
         Logic from fxParse_VIB_Transactions:
         - Find header row with "Ngày giao dịch"
         - Extract columns: Ngày giao dịch, Số chứng từ, Mô tả, Ghi nợ, Ghi có, Loại tiền, Số dư
-        - Map: Debit = "Ghi nợ" (tiền RA), Credit = "Ghi có" (tiền VÀO)
+        - Map to system convention: Debit = "Ghi có" (money in), Credit = "Ghi nợ" (money out)
         - Extract account number from top 12 rows
         - Drop rows where both Debit and Credit are zero
         """
@@ -127,11 +127,11 @@ class VIBParser(BaseBankParser):
             transactions = []
 
             for _, row in data.iterrows():
-                # Standard mapping:
-                # - "Ghi nợ"  = money out  -> Debit
-                # - "Ghi có"  = money in   -> Credit
-                debit_val = self._fix_number_vib(row.get("Ghi nợ")) if "Ghi nợ" in row else None
-                credit_val = self._fix_number_vib(row.get("Ghi có")) if "Ghi có" in row else None
+                # System convention:
+                # - "Ghi có" = money in  -> Debit
+                # - "Ghi nợ" = money out -> Credit
+                debit_val = self._fix_number_vib(row.get("Ghi có")) if "Ghi có" in row else None
+                credit_val = self._fix_number_vib(row.get("Ghi nợ")) if "Ghi nợ" in row else None
 
                 # Skip rows where both are zero/blank
                 if (debit_val is None or debit_val == 0) and (credit_val is None or credit_val == 0):
@@ -424,9 +424,9 @@ class VIBParser(BaseBankParser):
            0              (tx2 deposit)
            ...
 
-        CORRECT MAPPING:
-        - Debit = Withdrawal column (Phát sinh nợ) = tiền RA
-        - Credit = Deposit column (Phát sinh có) = tiền VÀO
+        System mapping:
+        - Debit = Deposit column (Phát sinh có) = money in
+        - Credit = Withdrawal column (Phát sinh nợ) = money out
         """
         try:
             # Split by account sections first
@@ -1038,14 +1038,14 @@ class VIBParser(BaseBankParser):
             # Get description for this transaction (if available)
             description = descriptions[tx_idx] if tx_idx < len(descriptions) else ""
 
-            # Standard mapping:
-            # - Phát sinh nợ (Withdrawal) = DEBIT (tiền ra)
-            # - Phát sinh có (Deposit) = CREDIT (tiền vào)
+            # System convention:
+            # - Withdrawal (money out) -> Credit
+            # - Deposit (money in) -> Debit
             tx = BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=withdrawal if withdrawal > 0 else None,  # Withdrawal -> Debit (money out)
-                credit=deposit if deposit > 0 else None,       # Deposit -> Credit (money in)
+                debit=deposit if deposit > 0 else None,
+                credit=withdrawal if withdrawal > 0 else None,
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -1056,8 +1056,8 @@ class VIBParser(BaseBankParser):
             )
             transactions.append(tx)
             logger.info(
-                f"VIB complex: TX {tx_id} - debit(withdrawal)={withdrawal}, "
-                f"credit(deposit)={deposit}, desc={description[:30] if description else ''}"
+                f"VIB complex: TX {tx_id} - debit(deposit)={deposit}, "
+                f"credit(withdrawal)={withdrawal}, desc={description[:30] if description else ''}"
             )
 
         return transactions
@@ -1190,14 +1190,14 @@ class VIBParser(BaseBankParser):
                 i += 1
                 continue
 
-            # Standard mapping:
-            # - Phát sinh nợ (Withdrawal) = DEBIT (tiền ra)
-            # - Phát sinh có (Deposit) = CREDIT (tiền vào)
+            # System convention:
+            # - Withdrawal (money out) -> Credit
+            # - Deposit (money in) -> Debit
             tx = BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=withdrawal if withdrawal > 0 else None,  # Withdrawal -> Debit (money out)
-                credit=deposit if deposit > 0 else None,       # Deposit -> Credit (money in)
+                debit=deposit if deposit > 0 else None,
+                credit=withdrawal if withdrawal > 0 else None,
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -1721,9 +1721,9 @@ class VIBParser(BaseBankParser):
         credit_val = credit or 0.0
 
         if tx_code in outflow_codes:
-            return debit_val > 0 and credit_val == 0
-        if tx_code in inflow_codes:
             return credit_val > 0 and debit_val == 0
+        if tx_code in inflow_codes:
+            return debit_val > 0 and credit_val == 0
         return True
 
     def _is_balance_like_value(
@@ -1796,10 +1796,10 @@ class VIBParser(BaseBankParser):
         debit_val = reconstructed_debit or 0.0
         credit_val = reconstructed_credit or 0.0
 
-        if tx_code in outflow_codes and debit_val >= 100_000_000:
+        if tx_code in outflow_codes and credit_val >= 100_000_000:
             local_max = (local_signal or {}).get("max", 0.0) or 0.0
             local_count = (local_signal or {}).get("count", 0)
-            # Large debit reconstructed from balance-delta but nearby block has
+            # Large outflow reconstructed from balance-delta but nearby block has
             # no comparable explicit amount -> low confidence.
             if local_max < 10_000_000 and local_count <= 2:
                 return True
@@ -1815,16 +1815,16 @@ class VIBParser(BaseBankParser):
         return False
 
     def _compute_amount_totals_for_headers(self, tx_map: dict, tx_headers: List[tuple]) -> tuple[float, float]:
-        """Compute debit/credit totals for transactions in header order."""
-        debit_total = 0.0
-        credit_total = 0.0
+        """Compute withdrawal/deposit totals for transactions in header order."""
+        withdrawal_total = 0.0
+        deposit_total = 0.0
         for tx_id, _, _ in tx_headers:
             tx = tx_map.get(tx_id)
             if not tx:
                 continue
-            debit_total += tx.debit or 0.0
-            credit_total += tx.credit or 0.0
-        return debit_total, credit_total
+            withdrawal_total += tx.credit or 0.0
+            deposit_total += tx.debit or 0.0
+        return withdrawal_total, deposit_total
 
     def _extract_all_descriptions(self, section: str) -> List[str]:
         """
@@ -2507,8 +2507,8 @@ class VIBParser(BaseBankParser):
                         break
 
             reconstructed[tx_id] = {
-                "debit": withdrawal,
-                "credit": deposit,
+                "debit": deposit,
+                "credit": withdrawal,
                 "description": desc,
                 "source_balance": balances[point_idx] if point_idx < len(balances) else None,
                 "tx_code": tx_code,
@@ -2609,8 +2609,8 @@ class VIBParser(BaseBankParser):
             return BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=withdrawal if withdrawal > 0 else None,  # Withdrawal -> Debit (money out)
-                credit=deposit if deposit > 0 else None,       # Deposit -> Credit (money in)
+                debit=deposit if deposit > 0 else None,
+                credit=withdrawal if withdrawal > 0 else None,
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -2740,8 +2740,8 @@ class VIBParser(BaseBankParser):
             return BankTransaction(
                 bank_name="VIB",
                 acc_no=acc_no or "",
-                debit=withdrawal if withdrawal > 0 else None,  # Withdrawal -> Debit (money out)
-                credit=deposit if deposit > 0 else None,       # Deposit -> Credit (money in)
+                debit=deposit if deposit > 0 else None,
+                credit=withdrawal if withdrawal > 0 else None,
                 date=tx_date,
                 description=description,
                 currency=currency,
@@ -2792,11 +2792,11 @@ class VIBParser(BaseBankParser):
             if withdrawal == 0 and deposit == 0:
                 return None
 
-            # Standard mapping:
-            # Debit = Withdrawal (Phat sinh no, money out)
-            # Credit = Deposit (Phat sinh co, money in)
-            debit_val = withdrawal
-            credit_val = deposit
+            # System convention:
+            # Debit = Deposit (Phat sinh co, money in)
+            # Credit = Withdrawal (Phat sinh no, money out)
+            debit_val = deposit
+            credit_val = withdrawal
 
             # Parse date
             tx_date = self._parse_date_from_text(date_str)
